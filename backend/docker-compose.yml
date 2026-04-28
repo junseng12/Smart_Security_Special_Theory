@@ -1,0 +1,70 @@
+version: '3.9'
+
+services:
+  # ── Node.js Backend ──────────────────────────────────────────────────────────
+  api:
+    build: .
+    container_name: smartcity-api
+    ports:
+      - "3000:3000"
+    env_file: .env
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
+
+  # ── Watchtower (separate process) ────────────────────────────────────────────
+  watchtower:
+    build: .
+    container_name: smartcity-watchtower
+    command: node src/services/watchtower.js
+    env_file: .env
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+
+  # ── Go Perun Node ─────────────────────────────────────────────────────────────
+  # Replace with actual Perun Go node image when available
+  perun-node:
+    image: perun-node:latest   # build from go-perun repo
+    container_name: smartcity-perun
+    ports:
+      - "8080:8080"   # gRPC
+      - "8081:8081"   # REST fallback
+    environment:
+      - CHAIN_URL=${BASE_RPC_URL}
+      - ADJUDICATOR=${PERUN_ADJUDICATOR_ADDRESS}
+      - ASSET_HOLDER=${PERUN_ASSET_HOLDER_ADDRESS}
+    restart: unless-stopped
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: smartcity-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: smartcity-postgres
+    environment:
+      POSTGRES_DB: smartcity_payments
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  pg-data:

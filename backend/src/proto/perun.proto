@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package perun;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Perun State Channel Service
+// Implemented by the Go Perun node process.
+// Node.js backend calls these RPCs to manage channel lifecycle.
+// ─────────────────────────────────────────────────────────────────────────────
+
+service PerunService {
+  // Lifecycle
+  rpc OpenChannel     (OpenChannelRequest)     returns (OpenChannelResponse);
+  rpc ProposeUpdate   (ProposeUpdateRequest)   returns (ProposeUpdateResponse);
+  rpc SettleChannel   (SettleChannelRequest)   returns (SettleChannelResponse);
+  rpc DisputeChannel  (DisputeChannelRequest)  returns (DisputeChannelResponse);
+
+  // Monitoring
+  rpc GetChannelStatus (GetChannelStatusRequest) returns (GetChannelStatusResponse);
+  rpc ListOpenChannels (ListOpenChannelsRequest) returns (ListOpenChannelsResponse);
+}
+
+// ── Open ─────────────────────────────────────────────────────────────────────
+message OpenChannelRequest {
+  string user_address     = 1;
+  string operator_address = 2;
+  string deposit_usdc     = 3;  // in wei (USDC has 6 decimals)
+}
+
+message OpenChannelResponse {
+  string channel_id    = 1;
+  string initial_state = 2;  // JSON-encoded ChannelState
+  string deposit_tx    = 3;  // on-chain deposit TX hash
+  string error         = 4;
+}
+
+// ── Update ───────────────────────────────────────────────────────────────────
+message ProposeUpdateRequest {
+  string channel_id       = 1;
+  int64  nonce            = 2;
+  string balance_user     = 3;  // in USDC wei
+  string balance_operator = 4;
+}
+
+message ProposeUpdateResponse {
+  string state_hash    = 1;
+  string operator_sig  = 2;  // operator's ECDSA sig over (channelId, nonce, balances)
+  string error         = 3;
+}
+
+// ── Settle ───────────────────────────────────────────────────────────────────
+message SettleChannelRequest {
+  string channel_id  = 1;
+  string final_state = 2;  // JSON: { nonce, balances, signatures }
+}
+
+message SettleChannelResponse {
+  string tx_hash = 1;
+  string error   = 2;
+}
+
+// ── Dispute ──────────────────────────────────────────────────────────────────
+message DisputeChannelRequest {
+  string channel_id   = 1;
+  string latest_state = 2;  // JSON: { nonce, balances, signatures }
+}
+
+message DisputeChannelResponse {
+  string tx_hash = 1;
+  string error   = 2;
+}
+
+// ── Status ───────────────────────────────────────────────────────────────────
+message GetChannelStatusRequest {
+  string channel_id = 1;
+}
+
+message GetChannelStatusResponse {
+  string channel_id = 1;
+  string status     = 2;  // "open" | "finalised" | "disputed" | "settled"
+  int64  nonce      = 3;
+  string error      = 4;
+}
+
+// ── List ─────────────────────────────────────────────────────────────────────
+message ListOpenChannelsRequest {}
+
+message ListOpenChannelsResponse {
+  repeated string channel_ids = 1;
+}
