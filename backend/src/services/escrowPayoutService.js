@@ -1,18 +1,20 @@
 /**
  * Escrow Payout Service
  * ─────────────────────────────────────────────────────────────────────────────
- * Perun 정산 완료 → Escrow 컨트랙트로 자금 Lock
- * 24h Hold & Verify → 환불 or 운영자 지급
+ * SmartCityEscrow 컨트랙트와 연동하는 백엔드 서비스
  *
- * Dual-Path:
- *   4a. Issue 확인 → refundToBuyer(userAddress)
- *   4b. No Issue   → releaseToMerchant()
+ * 컨트랙트 함수 대응:
+ *   createEscrow()          → lockFundsInEscrow()
+ *   registerRefundIssue()   → registerRefundIssue()
+ *   releaseToSeller()       → releaseToSeller()
+ *   refundToBuyer()         → refundToBuyer()
+ *   getEscrowStatus()       → getEscrowStatus()
  *
- * Escrow Contract ABI:
- *   lockFunds(sessionId, buyer, merchant, amount)
- *   refundToBuyer(sessionId)
- *   releaseToMerchant(sessionId)
- *   reclaimExpired(sessionId)
+ * 이벤트 수신 (백엔드 동기화):
+ *   EscrowCreated           → DB escrow_locks 생성
+ *   RefundIssueRegistered   → DB 상태 업데이트
+ *   ReleasedToSeller        → DB released 처리
+ *   RefundedToBuyer         → DB refunded 처리 + 케이스 종결
  */
 
 const { ethers } = require('ethers');
@@ -20,124 +22,219 @@ const logger = require('../utils/logger');
 const { getPool } = require('./db');
 const caseManager = require('./refundCaseManager');
 
-// ── Escrow ABI (최소) ─────────────────────────────────────────────────────────
+// ── Contract ABI ──────────────────────────────────────────────────────────────
 const ESCROW_ABI = [
-  'function lockFunds(bytes32 sessionId, address buyer, address merchant, uint256 amount) external',
-  'function refundToBuyer(bytes32 sessionId) external',
-  'function releaseToMerchant(bytes32 sessionId) external',
-  'function reclaimExpired(bytes32 sessionId) external',
-  'function getEscrowState(bytes32 sessionId) view returns (uint8 state, uint256 amount, address buyer, address merchant, uint256 releaseTime)',
-  'event FundsLocked(bytes32 indexed sessionId, address buyer, address merchant, uint256 amount)',
-  'event BuyerRefunded(bytes32 indexed sessionId, uint256 amount)',
-  'event MerchantPaid(bytes32 indexed sessionId, uint256 amount)',
+  // Write
+  'function createEscrow(bytes32 escrowId, address buyer, address seller, uint256 amount, uint256 holdDeadline) external',
+  'function registerRefundIssue(bytes32 escrowId, uint8 issueType, string calldata description) external',
+  'function releaseToSeller(bytes32 escrowId) external',
+  'function refundToBuyer(bytes32 escrowId) external',
+  'function emergencyCancel(bytes32 escrowId) external',
+  // Read
+  'function getEscrowStatus(bytes32 escrowId) view returns (uint8 state, uint256 amount, address buyer, address seller, uint256 holdDeadline, bool isDeadlinePassed)',
+  'function getIssueRecord(bytes32 escrowId) view returns (uint8 issueType, string description, uint256 registeredAt)',
+  'function isDeadlinePassed(bytes32 escrowId) view returns (bool)',
+  // Events
+  'event EscrowCreated(bytes32 indexed escrowId, address indexed buyer, address indexed seller, uint256 amount, uint256 holdDeadline)',
+  'event RefundIssueRegistered(bytes32 indexed escrowId, uint8 issueType, string description, uint256 registeredAt)',
+  'event ReleasedToSeller(bytes32 indexed escrowId, address indexed seller, uint256 amount)',
+  'event RefundedToBuyer(bytes32 indexed escrowId, address indexed buyer, uint256 amount)',
 ];
 
-const HOLD_PERIOD_HOURS = 24;
+// IssueType enum 매핑
+const ISSUE_TYPE = {
+  unlock_failure: 0,
+  device_fault:   1,
+  wrong_charge:   2,
+  sensor_failure: 3,
+  service_outage: 4,
+  other:          5,
+};
 
-// ── 헬퍼: provider/wallet 초기화 ─────────────────────────────────────────────
+const HOLD_PERIOD_SECONDS = 24 * 60 * 60; // 24시간
+
+// ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 
 function getOperatorWallet() {
   const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL);
   return new ethers.Wallet(process.env.OPERATOR_PRIVATE_KEY, provider);
 }
 
-function getEscrowContract(walletOrProvider) {
+function getEscrowContract(signerOrProvider) {
   const addr = process.env.ESCROW_CONTRACT_ADDRESS;
-  if (!addr) throw new Error('ESCROW_CONTRACT_ADDRESS not set in env');
-  return new ethers.Contract(addr, ESCROW_ABI, walletOrProvider);
+  if (!addr) throw new Error('ESCROW_CONTRACT_ADDRESS not set');
+  return new ethers.Contract(addr, ESCROW_ABI, signerOrProvider);
+}
+
+/** sessionId → bytes32 escrowId 변환 */
+function toEscrowId(sessionId) {
+  // 32바이트로 맞추기 위해 keccak256 사용
+  return ethers.keccak256(ethers.toUtf8Bytes(sessionId));
 }
 
 // ── DB 마이그레이션 ────────────────────────────────────────────────────────────
 async function ensureEscrowTable() {
   await getPool().query(`
     CREATE TABLE IF NOT EXISTS escrow_locks (
-      id              SERIAL PRIMARY KEY,
-      session_id      TEXT NOT NULL UNIQUE,
-      channel_id      TEXT,
-      case_id         TEXT,
-      user_address    TEXT NOT NULL,
-      merchant_address TEXT NOT NULL,
-      amount_usdc     NUMERIC NOT NULL,
-      lock_tx         TEXT,
-      release_tx      TEXT,
-      outcome         TEXT,          -- 'refunded' | 'released' | 'pending'
-      locked_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      release_after   TIMESTAMPTZ NOT NULL,
-      released_at     TIMESTAMPTZ
+      id               SERIAL PRIMARY KEY,
+      session_id       TEXT NOT NULL UNIQUE,
+      escrow_id_bytes  TEXT NOT NULL,
+      channel_id       TEXT,
+      case_id          TEXT,
+      user_address     TEXT NOT NULL,
+      seller_address   TEXT NOT NULL,
+      amount_usdc      NUMERIC NOT NULL,
+      hold_deadline    TIMESTAMPTZ NOT NULL,
+      create_tx        TEXT,
+      release_tx       TEXT,
+      state            TEXT NOT NULL DEFAULT 'Held',
+      locked_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      released_at      TIMESTAMPTZ
     );
     CREATE INDEX IF NOT EXISTS idx_escrow_session ON escrow_locks(session_id);
-    CREATE INDEX IF NOT EXISTS idx_escrow_outcome ON escrow_locks(outcome);
+    CREATE INDEX IF NOT EXISTS idx_escrow_state   ON escrow_locks(state);
   `);
 }
 
-// ── 1. Perun 정산 완료 → Escrow Lock ─────────────────────────────────────────
-
+// ─────────────────────────────────────────────────────────────────────────────
+// 1. createEscrow — Perun 정산 완료 후 Seller 지급 예정 금액 Escrow에 잠금
+// ─────────────────────────────────────────────────────────────────────────────
 /**
- * 정산 금액을 Escrow 컨트랙트에 잠금 (Hold & Verify 시작)
- *
  * @param {object} params
  * @param {string} params.sessionId
  * @param {string} params.channelId
- * @param {string} params.userAddress      - buyer
- * @param {string} params.merchantAddress  - operator/merchant
- * @param {string} params.amountUsdc       - 잠글 금액 (운영자 수령분)
+ * @param {string} params.buyerAddress     - 사용자 (환불 수신 가능)
+ * @param {string} params.sellerAddress    - 운영자/판매자 (정상 지급 수신)
+ * @param {string} params.amountUsdc      - 잠글 금액
+ * @param {number} [params.holdSeconds]   - Hold 기간 (기본 24h)
  */
-async function lockFundsInEscrow({ sessionId, channelId, userAddress, merchantAddress, amountUsdc }) {
+async function createEscrow({ sessionId, channelId, buyerAddress, sellerAddress, amountUsdc, holdSeconds = HOLD_PERIOD_SECONDS }) {
   await ensureEscrowTable();
 
-  const wallet = getOperatorWallet();
-  const escrow = getEscrowContract(wallet);
-
+  const wallet  = getOperatorWallet();
+  const escrow  = getEscrowContract(wallet);
+  const escrowId = toEscrowId(sessionId);
   const amountWei = ethers.parseUnits(amountUsdc, 6);
-  const sessionIdBytes = ethers.encodeBytes32String(sessionId.slice(0, 31)); // bytes32
+  const holdDeadline = Math.floor(Date.now() / 1000) + holdSeconds;
 
-  logger.info('Locking funds in escrow', { sessionId, amountUsdc });
+  logger.info('Creating escrow', { sessionId, escrowId, amountUsdc, holdDeadline });
 
-  const tx = await escrow.lockFunds(sessionIdBytes, userAddress, merchantAddress, amountWei);
+  // USDC approve → createEscrow 순서
+  const usdcContract = new ethers.Contract(
+    process.env.USDC_CONTRACT_ADDRESS,
+    ['function approve(address spender, uint256 amount) returns (bool)'],
+    wallet
+  );
+  const approveTx = await usdcContract.approve(process.env.ESCROW_CONTRACT_ADDRESS, amountWei);
+  await approveTx.wait();
+
+  const tx = await escrow.createEscrow(escrowId, buyerAddress, sellerAddress, amountWei, holdDeadline);
   const receipt = await tx.wait();
 
-  const releaseAfter = new Date(Date.now() + HOLD_PERIOD_HOURS * 3600 * 1000);
+  const holdDeadlineDate = new Date(holdDeadline * 1000);
 
   await getPool().query(
     `INSERT INTO escrow_locks
-     (session_id, channel_id, user_address, merchant_address, amount_usdc, lock_tx, outcome, release_after)
-     VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
-     ON CONFLICT (session_id) DO UPDATE SET lock_tx = $6, locked_at = NOW()`,
-    [sessionId, channelId, userAddress, merchantAddress, amountUsdc, receipt.hash, releaseAfter]
+     (session_id, escrow_id_bytes, channel_id, user_address, seller_address, amount_usdc, hold_deadline, create_tx, state)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'Held')
+     ON CONFLICT (session_id) DO UPDATE
+     SET create_tx = $8, locked_at = NOW(), state = 'Held'`,
+    [sessionId, escrowId, channelId, buyerAddress, sellerAddress, amountUsdc, holdDeadlineDate, receipt.hash]
   );
 
-  logger.info('Escrow locked', { sessionId, txHash: receipt.hash, releaseAfter });
-  return { txHash: receipt.hash, releaseAfter };
+  logger.info('Escrow created', { sessionId, txHash: receipt.hash, holdDeadline: holdDeadlineDate });
+  return { txHash: receipt.hash, escrowId, holdDeadline: holdDeadlineDate };
 }
 
-// ── 4a. Issue 확인 → 구매자 환불 ─────────────────────────────────────────────
-
+// ─────────────────────────────────────────────────────────────────────────────
+// 2. registerRefundIssue — 문제 발생 기록
+// ─────────────────────────────────────────────────────────────────────────────
 /**
- * 환불 케이스 승인 후 Escrow에서 사용자에게 환불
- *
  * @param {string} sessionId
- * @param {string} caseId
+ * @param {string} caseId           - 백엔드 환불 케이스 ID
+ * @param {string} issueType        - ISSUE_TYPE 키 (예: 'sensor_failure')
+ * @param {string} description      - 문제 설명
  */
-async function refundToBuyer(sessionId, caseId) {
-  await ensureEscrowTable();
+async function registerRefundIssue(sessionId, caseId, issueType, description) {
+  const wallet  = getOperatorWallet();
+  const escrow  = getEscrowContract(wallet);
+  const escrowId = toEscrowId(sessionId);
 
-  const wallet = getOperatorWallet();
-  const escrow = getEscrowContract(wallet);
-  const sessionIdBytes = ethers.encodeBytes32String(sessionId.slice(0, 31));
+  const issueTypeNum = ISSUE_TYPE[issueType] ?? ISSUE_TYPE.other;
+  const desc = `${caseId}|${description}`.slice(0, 200); // 컨트랙트 string 제한 고려
 
-  logger.info('Executing buyer refund from escrow', { sessionId, caseId });
+  logger.info('Registering refund issue on-chain', { sessionId, issueType, caseId });
 
-  const tx = await escrow.refundToBuyer(sessionIdBytes);
+  const tx = await escrow.registerRefundIssue(escrowId, issueTypeNum, desc);
+  await tx.wait();
+
+  await getPool().query(
+    `UPDATE escrow_locks SET state = 'RefundIssue', case_id = $2 WHERE session_id = $1`,
+    [sessionId, caseId]
+  );
+
+  logger.info('Refund issue registered on-chain', { sessionId });
+  return { txHash: tx.hash };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 3. releaseToSeller — 문제 없음 + holdDeadline 경과 → Seller에게 즉시 송금
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * @param {string} sessionId
+ */
+async function releaseToSeller(sessionId) {
+  const wallet  = getOperatorWallet();
+  const escrow  = getEscrowContract(wallet);
+  const escrowId = toEscrowId(sessionId);
+
+  // holdDeadline 확인 (컨트랙트에서도 revert하지만 미리 체크)
+  const isPassed = await escrow.isDeadlinePassed(escrowId);
+  if (!isPassed) {
+    throw new Error(`Hold deadline not yet passed for session ${sessionId}`);
+  }
+
+  logger.info('Releasing escrow to seller', { sessionId });
+
+  const tx = await escrow.releaseToSeller(escrowId);
   const receipt = await tx.wait();
 
   await getPool().query(
     `UPDATE escrow_locks
-     SET outcome = 'refunded', release_tx = $2, released_at = NOW(), case_id = $3
+     SET state = 'Released', release_tx = $2, released_at = NOW()
+     WHERE session_id = $1`,
+    [sessionId, receipt.hash]
+  );
+
+  logger.info('Escrow released to seller', { sessionId, txHash: receipt.hash });
+  return { txHash: receipt.hash };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 4. refundToBuyer — 문제 확인 → Buyer에게 즉시 환불
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * @param {string} sessionId
+ * @param {string} caseId    - 연결된 환불 케이스 ID
+ */
+async function refundToBuyer(sessionId, caseId) {
+  const wallet  = getOperatorWallet();
+  const escrow  = getEscrowContract(wallet);
+  const escrowId = toEscrowId(sessionId);
+
+  logger.info('Refunding escrow to buyer', { sessionId, caseId });
+
+  const tx = await escrow.refundToBuyer(escrowId);
+  const receipt = await tx.wait();
+
+  await getPool().query(
+    `UPDATE escrow_locks
+     SET state = 'Refunded', release_tx = $2, released_at = NOW(), case_id = $3
      WHERE session_id = $1`,
     [sessionId, receipt.hash, caseId]
   );
 
-  // 케이스 지급 완료
+  // 케이스 지급 완료 → 종결
   if (caseId) {
     await caseManager.markPaid(caseId);
     await caseManager.closeCase(caseId);
@@ -147,81 +244,85 @@ async function refundToBuyer(sessionId, caseId) {
   return { txHash: receipt.hash };
 }
 
-// ── 4b. No Issue → 운영자 지급 ───────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. getEscrowStatus — 상태 조회
+// ─────────────────────────────────────────────────────────────────────────────
+const STATE_LABELS = ['None', 'Held', 'RefundIssue', 'Released', 'Refunded'];
 
-/**
- * 이슈 없음 확인 후 Escrow에서 운영자(merchant)에게 지급
- *
- * @param {string} sessionId
- */
-async function releaseToMerchant(sessionId) {
-  await ensureEscrowTable();
-
-  const wallet = getOperatorWallet();
-  const escrow = getEscrowContract(wallet);
-  const sessionIdBytes = ethers.encodeBytes32String(sessionId.slice(0, 31));
-
-  logger.info('Releasing escrow to merchant', { sessionId });
-
-  const tx = await escrow.releaseToMerchant(sessionIdBytes);
-  const receipt = await tx.wait();
-
-  await getPool().query(
-    `UPDATE escrow_locks
-     SET outcome = 'released', release_tx = $2, released_at = NOW()
-     WHERE session_id = $1`,
-    [sessionId, receipt.hash]
-  );
-
-  logger.info('Merchant paid from escrow', { sessionId, txHash: receipt.hash });
-  return { txHash: receipt.hash };
-}
-
-// ── Hold 기간 만료 체크 (Watchtower 호출) ────────────────────────────────────
-
-/**
- * 24h Hold 만료됐는데 환불 케이스 없는 세션 → releaseToMerchant
- */
-async function processExpiredHolds() {
-  await ensureEscrowTable();
-
-  const result = await getPool().query(
-    `SELECT el.*, rc.id as case_id, rc.status as case_status
-     FROM escrow_locks el
-     LEFT JOIN refund_cases rc ON rc.session_id = el.session_id
-     WHERE el.outcome = 'pending'
-       AND el.release_after < NOW()`
-  );
-
-  for (const lock of result.rows) {
-    // 환불 케이스가 APPROVED/PAID 상태면 → 환불 처리
-    if (lock.case_id && ['APPROVED'].includes(lock.case_status)) {
-      await refundToBuyer(lock.session_id, lock.case_id);
-    } else {
-      // 이슈 없음 → 운영자 지급
-      await releaseToMerchant(lock.session_id);
-    }
-  }
-
-  logger.info('Expired holds processed', { count: result.rows.length });
-}
-
-/**
- * 에스크로 상태 조회
- */
 async function getEscrowStatus(sessionId) {
   await ensureEscrowTable();
-  const result = await getPool().query(
+
+  // DB 조회
+  const dbResult = await getPool().query(
     'SELECT * FROM escrow_locks WHERE session_id = $1',
     [sessionId]
   );
-  return result.rows[0] || null;
+  const dbRow = dbResult.rows[0] || null;
+
+  // 온체인 상태도 조회 (컨트랙트 주소가 있는 경우)
+  let onChain = null;
+  if (process.env.ESCROW_CONTRACT_ADDRESS) {
+    try {
+      const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL);
+      const escrow   = getEscrowContract(provider);
+      const escrowId = toEscrowId(sessionId);
+      const [state, amount, buyer, seller, holdDeadline, isDeadlinePassed] =
+        await escrow.getEscrowStatus(escrowId);
+
+      onChain = {
+        state:           STATE_LABELS[Number(state)] || 'Unknown',
+        amount:          ethers.formatUnits(amount, 6),
+        buyer,
+        seller,
+        holdDeadline:    new Date(Number(holdDeadline) * 1000),
+        isDeadlinePassed,
+      };
+    } catch (err) {
+      logger.warn('On-chain escrow status fetch failed', { error: err.message });
+    }
+  }
+
+  return { db: dbRow, onChain };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Watchtower: holdDeadline 만료된 Held 에스크로 자동 처리
+// ─────────────────────────────────────────────────────────────────────────────
+async function processExpiredHolds() {
+  await ensureEscrowTable();
+
+  const result = await getPool().query(`
+    SELECT el.*, rc.id as case_id, rc.status as case_status
+    FROM escrow_locks el
+    LEFT JOIN refund_cases rc ON rc.session_id = el.session_id
+    WHERE el.state = 'Held'
+      AND el.hold_deadline < NOW()
+  `);
+
+  for (const lock of result.rows) {
+    try {
+      // RefundIssue 케이스가 APPROVED면 → 환불
+      if (lock.case_status === 'APPROVED') {
+        await refundToBuyer(lock.session_id, lock.case_id);
+      } else {
+        // 이슈 없음 → Seller 지급
+        await releaseToSeller(lock.session_id);
+      }
+    } catch (err) {
+      logger.error('Failed to process expired hold', { sessionId: lock.session_id, error: err.message });
+    }
+  }
+
+  logger.info('Expired escrow holds processed', { count: result.rows.length });
 }
 
 module.exports = {
-  lockFundsInEscrow,
+  createEscrow,
+  registerRefundIssue,
+  releaseToSeller,
   refundToBuyer,
-  releaseToMerchant,
-  processExpiredHolds,
   getEscrowStatus,
+  processExpiredHolds,
+  toEscrowId,
+  ISSUE_TYPE,
 };
