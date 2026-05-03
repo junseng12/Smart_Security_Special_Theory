@@ -4,23 +4,37 @@ const logger = require('../utils/logger');
 let client;
 
 /**
- * Connect to Redis. Called once at bootstrap.
+ * Connect to Redis.
+ * REDIS_URL 환경변수가 있으면 URL 방식 (Upstash 등 클라우드)
+ * 없으면 HOST/PORT 방식 (로컬)
  */
 async function connectRedis() {
-  client = new Redis({
-    host: process.env.REDIS_HOST || 'localhost',
-    port: parseInt(process.env.REDIS_PORT) || 6379,
-    password: process.env.REDIS_PASSWORD || undefined,
-    db: parseInt(process.env.REDIS_DB) || 0,
-    retryStrategy: (times) => Math.min(times * 100, 3000),
-    lazyConnect: true,
-  });
+  const redisUrl = process.env.REDIS_URL;
+
+  if (redisUrl) {
+    // Upstash 등 TLS Redis — URL 방식
+    client = new Redis(redisUrl, {
+      tls: redisUrl.startsWith('rediss://') ? {} : undefined,
+      retryStrategy: (times) => Math.min(times * 200, 5000),
+      lazyConnect: true,
+    });
+  } else {
+    // 로컬 Redis — HOST/PORT 방식
+    client = new Redis({
+      host:     process.env.REDIS_HOST     || 'localhost',
+      port:     parseInt(process.env.REDIS_PORT) || 6379,
+      password: process.env.REDIS_PASSWORD || undefined,
+      db:       parseInt(process.env.REDIS_DB)   || 0,
+      retryStrategy: (times) => Math.min(times * 200, 5000),
+      lazyConnect: true,
+    });
+  }
 
   client.on('error', (err) => logger.error('Redis error', { error: err.message }));
   client.on('reconnecting', () => logger.warn('Redis reconnecting...'));
+  client.on('connect', () => logger.info('Redis connected'));
 
   await client.connect();
-  logger.info('Redis connected');
   return client;
 }
 
@@ -29,47 +43,29 @@ function getRedis() {
   return client;
 }
 
-// ── Channel state helpers ────────────────────────────────────────────────────
+// ── Channel state helpers ─────────────────────────────────────────────────────
 
 const CHANNEL_KEY = (channelId) => `channel:${channelId}`;
-const CHANNEL_TTL = 60 * 60 * 24 * 30; // 30 days
+const CHANNEL_TTL  = 60 * 60 * 24 * 30; // 30일
 
-/**
- * Save the latest channel state.
- * @param {string} channelId
- * @param {object} state  - { nonce, balances: { user, operator }, signatures, updatedAt }
- */
 async function saveChannelState(channelId, state) {
-  const redis = getRedis();
-  await redis.set(CHANNEL_KEY(channelId), JSON.stringify(state), 'EX', CHANNEL_TTL);
+  await getRedis().set(CHANNEL_KEY(channelId), JSON.stringify(state), 'EX', CHANNEL_TTL);
 }
 
-/**
- * Retrieve the latest channel state.
- */
 async function getChannelState(channelId) {
-  const redis = getRedis();
-  const raw = await redis.get(CHANNEL_KEY(channelId));
+  const raw = await getRedis().get(CHANNEL_KEY(channelId));
   return raw ? JSON.parse(raw) : null;
 }
 
-/**
- * Delete channel state after final settlement.
- */
 async function deleteChannelState(channelId) {
-  const redis = getRedis();
-  await redis.del(CHANNEL_KEY(channelId));
+  await getRedis().del(CHANNEL_KEY(channelId));
 }
 
-/**
- * List all active channel IDs (uses SCAN to avoid blocking).
- */
 async function listActiveChannelIds() {
-  const redis = getRedis();
   const ids = [];
   let cursor = '0';
   do {
-    const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'channel:*', 'COUNT', 100);
+    const [nextCursor, keys] = await getRedis().scan(cursor, 'MATCH', 'channel:*', 'COUNT', 100);
     cursor = nextCursor;
     ids.push(...keys.map((k) => k.replace('channel:', '')));
   } while (cursor !== '0');
