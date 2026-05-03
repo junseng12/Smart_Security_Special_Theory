@@ -7,35 +7,40 @@ const rateLimit = require('express-rate-limit');
 const logger = require('./utils/logger');
 const { connectRedis } = require('./services/redisClient');
 const { connectDB } = require('./services/db');
-const channelRoutes = require('./routes/channels');
-const healthRoutes = require('./routes/health');
-const errorHandler = require('./middleware/errorHandler');
+
+const channelRoutes  = require('./routes/channels');
+const sessionRoutes  = require('./routes/sessions');
+const refundRoutes   = require('./routes/refunds');
+const healthRoutes   = require('./routes/health');
+const errorHandler   = require('./middleware/errorHandler');
 const requestValidator = require('./middleware/requestValidator');
 
 const app = express();
 
-// ── Security middleware ──────────────────────────────────────────────────────
+// ── Security ─────────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(express.json());
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
 
-// ── Rate limiting ────────────────────────────────────────────────────────────
+// ── Rate limiting ─────────────────────────────────────────────────────────────
 const limiter = rateLimit({
   windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 60_000,
-  max: parseInt(process.env.RATE_LIMIT_MAX) || 100,
+  max:      parseInt(process.env.RATE_LIMIT_MAX)       || 100,
   standardHeaders: true,
-  legacyHeaders: false,
+  legacyHeaders:   false,
 });
 app.use('/api/', limiter);
 
-// ── Routes ───────────────────────────────────────────────────────────────────
-app.use('/health', healthRoutes);
+// ── Routes ────────────────────────────────────────────────────────────────────
+app.use('/health',                    healthRoutes);
 app.use('/api/v1/channels', requestValidator, channelRoutes);
+app.use('/api/v1/sessions', requestValidator, sessionRoutes);
+app.use('/api/v1/refunds',  requestValidator, refundRoutes);
 
-// ── Error handler (must be last) ─────────────────────────────────────────────
+// ── Error handler ─────────────────────────────────────────────────────────────
 app.use(errorHandler);
 
-// ── Bootstrap ────────────────────────────────────────────────────────────────
+// ── Bootstrap ─────────────────────────────────────────────────────────────────
 async function bootstrap() {
   try {
     await connectRedis();
@@ -44,7 +49,19 @@ async function bootstrap() {
 
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => {
-      logger.info(`SmartCity Payment Backend listening on port ${PORT}`);
+      logger.info(`SmartCity Payment Backend running on port ${PORT}`);
+      logger.info('Routes:');
+      logger.info('  POST /api/v1/sessions/start');
+      logger.info('  POST /api/v1/sessions/:id/charge');
+      logger.info('  POST /api/v1/sessions/:id/sign');
+      logger.info('  POST /api/v1/sessions/:id/end');
+      logger.info('  GET  /api/v1/sessions/:id/status');
+      logger.info('  GET  /api/v1/sessions/:id/stream  (SSE)');
+      logger.info('  POST /api/v1/refunds');
+      logger.info('  POST /api/v1/refunds/:id/evaluate');
+      logger.info('  POST /api/v1/refunds/:id/approve');
+      logger.info('  POST /api/v1/refunds/:id/payout');
+      logger.info('  GET  /health');
     });
   } catch (err) {
     logger.error('Failed to start server', { error: err.message });
@@ -53,5 +70,4 @@ async function bootstrap() {
 }
 
 bootstrap();
-
-module.exports = app; // for tests
+module.exports = app;
