@@ -166,4 +166,48 @@ async function disputeChannel(params) {
   return restCall('/channels/dispute', params);
 }
 
-module.exports = { openChannel, proposeUpdate, settleChannel, disputeChannel };
+
+/**
+ * Perun 노드 연결 상태 확인 (healthcheck용)
+ * @returns {{ connected: boolean, mode: string, host: string|null }}
+ */
+async function pingPerun() {
+  if (!useGrpc) {
+    return { connected: false, mode: 'mock', host: null };
+  }
+  try {
+    // gRPC deadline 2초로 빠른 ping
+    await new Promise((resolve, reject) => {
+      const deadline = new Date(Date.now() + 2000);
+      perunStub.ListOpenChannels({}, { deadline }, (err, resp) => {
+        if (err) reject(err);
+        else resolve(resp);
+      });
+    });
+    const host = process.env.PERUN_GRPC_HOST;
+    const port = process.env.PERUN_GRPC_PORT;
+    return { connected: true, mode: 'grpc', host: `${host}:${port}` };
+  } catch (err) {
+    logger.warn('Perun ping failed', { error: err.message });
+    return { connected: false, mode: 'grpc_unavailable', host: process.env.PERUN_GRPC_HOST, error: err.message };
+  }
+}
+
+/**
+ * gRPC 재연결 시도 (환경변수 변경 후 런타임 재초기화)
+ */
+function reinitGrpc() {
+  perunStub = null;
+  useGrpc = false;
+  initGrpc();
+  return { mode: useGrpc ? 'grpc' : 'mock' };
+}
+
+module.exports = {
+  openChannel,
+  proposeUpdate,
+  settleChannel,
+  disputeChannel,
+  pingPerun,
+  reinitGrpc,
+};

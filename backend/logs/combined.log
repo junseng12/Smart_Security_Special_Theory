@@ -293,3 +293,46 @@
 {"caseId":"case_97043f41","level":"info","message":"Refund case updated","newStatus":"REJECTED","timestamp":"2026-05-08 06:08:21"}
 {"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:21 +0000] \"POST /api/v1/refunds/case_97043f41/evaluate HTTP/1.1\" 200 74 \"-\" \"node\"","timestamp":"2026-05-08 06:08:21"}
 {"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:22 +0000] \"GET /api/v1/refunds/case_97043f41 HTTP/1.1\" 200 665 \"-\" \"node\"","timestamp":"2026-05-08 06:08:22"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:20:46 +0000] \"GET /health HTTP/1.1\" 200 86 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:20:46"}
+{"level":"info","message":"Perun gRPC host not configured — running in MOCK mode","timestamp":"2026-05-08 06:21:22"}
+{"level":"info","message":"Perun gRPC host not configured — running in MOCK mode","timestamp":"2026-05-08 06:21:27"}
+{"level":"info","message":"Redis connected","timestamp":"2026-05-08 06:21:27"}
+{"level":"info","message":"DB migrations complete — all tables ready","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"PostgreSQL connected","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"Redis and DB connected","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"SmartCity Payment Backend running on port 3000","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"Routes:","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  POST /api/v1/sessions/start","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  POST /api/v1/sessions/:id/charge","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  POST /api/v1/sessions/:id/sign","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  POST /api/v1/sessions/:id/end","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  GET  /api/v1/sessions/:id/status","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  GET  /api/v1/sessions/:id/stream  (SSE)","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  POST /api/v1/refunds","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  POST /api/v1/refunds/:id/evaluate","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  POST /api/v1/refunds/:id/approve","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  POST /api/v1/refunds/:id/payout","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"  GET  /health","timestamp":"2026-05-08 06:21:29"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:21:32 +0000] \"GET /health HTTP/1.1\" 200 167 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:21:32"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:22:57 +0000] \"GET /health HTTP/1.1\" 200 167 \"-\" \"node\"","timestamp":"2026-05-08 06:22:57"}
+{"level":"info","message":"Session started","serviceType":"bicycle","sessionId":"4cbe01fd-82a9-4149-a39a-6c5374d58dc6","timestamp":"2026-05-08 06:22:58","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"depositUsdc":"5000000","level":"debug","message":"perunClient.openChannel","operatorAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7","timestamp":"2026-05-08 06:22:58","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_9aa7df55","depositUsdc":"5000000","level":"info","message":"[MOCK] openChannel","timestamp":"2026-05-08 06:22:58","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_9aa7df55","depositUsdc":"5.000000","level":"info","message":"Channel opened","timestamp":"2026-05-08 06:22:59","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"level":"info","message":"Session state changed","newStatus":"Active","sessionId":"4cbe01fd-82a9-4149-a39a-6c5374d58dc6","timestamp":"2026-05-08 06:22:59"}
+{"channelId":"ch_mock_9aa7df55","depositUsdc":"5.000000","level":"info","message":"Session + Channel opened","sessionId":"4cbe01fd-82a9-4149-a39a-6c5374d58dc6","timestamp":"2026-05-08 06:22:59"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:22:59 +0000] \"POST /api/v1/sessions/start HTTP/1.1\" 201 262 \"-\" \"node\"","timestamp":"2026-05-08 06:22:59"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:23:00 +0000] \"GET /api/v1/sessions/4cbe01fd-82a9-4149-a39a-6c5374d58dc6/status HTTP/1.1\" 200 447 \"-\" \"node\"","timestamp":"2026-05-08 06:23:00"}
+{"adjustments":[{"amount":0.020000000000000004,"type":"minimum_fare_applied"}],"finalFare":0.1,"level":"info","message":"Fare calculated","serviceType":"bicycle","sessionId":"4cbe01fd-82a9-4149-a39a-6c5374d58dc6","timestamp":"2026-05-08 06:23:00"}
+{"level":"info","message":"WalletService initialised","operatorAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7","timestamp":"2026-05-08 06:23:01","treasuryAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_9aa7df55","chargeUsdc":"0.100000","level":"info","message":"Signature request created","nonce":1,"timestamp":"2026-05-08 06:23:01"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:23:01 +0000] \"POST /api/v1/sessions/4cbe01fd-82a9-4149-a39a-6c5374d58dc6/charge HTTP/1.1\" 200 542 \"-\" \"node\"","timestamp":"2026-05-08 06:23:01"}
+{"channelId":"ch_mock_9aa7df55","level":"info","message":"User signature accepted","nonce":1,"timestamp":"2026-05-08 06:23:02"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:23:02 +0000] \"POST /api/v1/sessions/4cbe01fd-82a9-4149-a39a-6c5374d58dc6/sign HTTP/1.1\" 200 409 \"-\" \"node\"","timestamp":"2026-05-08 06:23:02"}
+{"caseId":"case_dd7a0787","level":"info","message":"Refund case created","reason":"sensor_failure","requestedUsdc":"3.000000","timestamp":"2026-05-08 06:23:02","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:23:02 +0000] \"POST /api/v1/refunds HTTP/1.1\" 201 65 \"-\" \"node\"","timestamp":"2026-05-08 06:23:02"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:23:03 +0000] \"GET /api/v1/refunds/case_dd7a0787 HTTP/1.1\" 200 556 \"-\" \"node\"","timestamp":"2026-05-08 06:23:03"}
+{"caseId":"case_dd7a0787","level":"info","message":"Refund case updated","newStatus":"VERIFYING","timestamp":"2026-05-08 06:23:03"}
+{"caseId":"case_dd7a0787","level":"info","message":"Refund case updated","newStatus":"REJECTED","timestamp":"2026-05-08 06:23:04"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:23:04 +0000] \"POST /api/v1/refunds/case_dd7a0787/evaluate HTTP/1.1\" 200 74 \"-\" \"node\"","timestamp":"2026-05-08 06:23:04"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:23:04 +0000] \"GET /api/v1/refunds/case_dd7a0787 HTTP/1.1\" 200 665 \"-\" \"node\"","timestamp":"2026-05-08 06:23:04"}
