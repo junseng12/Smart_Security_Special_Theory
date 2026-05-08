@@ -1,0 +1,52 @@
+{
+  "name": "Transaction",
+  "type": "object",
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": [
+        "deposit",
+        "payment",
+        "transfer"
+      ],
+      "description": "Transaction type"
+    },
+    "amount": {
+      "type": "number",
+      "description": "USDC amount"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "completed",
+        "failed"
+      ],
+      "default": "completed"
+    },
+    "to_address": {
+      "type": "string",
+      "description": "Recipient address"
+    },
+    "from_address": {
+      "type": "string",
+      "description": "Sender address"
+    },
+    "merchant_name": {
+      "type": "string",
+      "description": "Name of merchant for payments"
+    },
+    "tx_hash": {
+      "type": "string",
+      "description": "Simulated transaction hash"
+    },
+    "wallet_id": {
+      "type": "string",
+      "description": "Associated wallet ID"
+    }
+  },
+  "required": [
+    "type",
+    "amount"
+  ]
+}

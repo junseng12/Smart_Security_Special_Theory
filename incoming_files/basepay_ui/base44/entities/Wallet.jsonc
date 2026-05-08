@@ -1,0 +1,22 @@
+{
+  "name": "Wallet",
+  "type": "object",
+  "properties": {
+    "address": {
+      "type": "string",
+      "description": "Base chain wallet address"
+    },
+    "balance": {
+      "type": "number",
+      "default": 0,
+      "description": "USDC balance"
+    },
+    "private_key_hash": {
+      "type": "string",
+      "description": "Simulated private key hash for demo"
+    }
+  },
+  "required": [
+    "address"
+  ]
+}
