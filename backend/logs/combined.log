@@ -204,3 +204,92 @@
 {"adjustments":[{"amount":0.020000000000000004,"type":"minimum_fare_applied"}],"finalFare":0.1,"level":"info","message":"Fare calculated","serviceType":"bicycle","sessionId":"19d32ad8-6407-4c3c-8cb6-a15c5724df1f","timestamp":"2026-05-08 05:59:32"}
 {"level":"error","message":"Unhandled error invalid BigNumberish string: Cannot convert ch_mock_dc6f4af7 to a BigInt (argument=\"value\", value=\"ch_mock_dc6f4af7\", code=INVALID_ARGUMENT, version=6.16.0)","method":"POST","stack":"TypeError: invalid BigNumberish string: Cannot convert ch_mock_dc6f4af7 to a BigInt (argument=\"value\", value=\"ch_mock_dc6f4af7\", code=INVALID_ARGUMENT, version=6.16.0)\n    at makeError (/app/backend/node_modules/ethers/lib.commonjs/utils/errors.js:130:21)\n    at assert (/app/backend/node_modules/ethers/lib.commonjs/utils/errors.js:157:15)\n    at assertArgument (/app/backend/node_modules/ethers/lib.commonjs/utils/errors.js:169:5)\n    at getBigInt (/app/backend/node_modules/ethers/lib.commonjs/utils/maths.js:93:48)\n    at getUint (/app/backend/node_modules/ethers/lib.commonjs/utils/maths.js:104:20)\n    at Object.toBeHex (/app/backend/node_modules/ethers/lib.commonjs/utils/maths.js:168:19)\n    at buildStateMessage (/app/backend/src/services/walletService.js:58:34)\n    at Object.createSignatureRequest (/app/backend/src/services/signatureManager.js:72:21)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)\n    at async Object.chargeUsage (/app/backend/src/services/channelOrchestrator.js:83:22)","timestamp":"2026-05-08 05:59:32","url":"/api/v1/sessions/19d32ad8-6407-4c3c-8cb6-a15c5724df1f/charge"}
 {"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:05:59:32 +0000] \"POST /api/v1/sessions/19d32ad8-6407-4c3c-8cb6-a15c5724df1f/charge HTTP/1.1\" 500 183 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 05:59:32"}
+{"level":"info","message":"DB migrations complete — all tables ready","timestamp":"2026-05-08 06:05:28"}
+{"level":"info","message":"PostgreSQL connected","timestamp":"2026-05-08 06:05:28"}
+{"level":"info","message":"Redis connected","timestamp":"2026-05-08 06:05:28"}
+{"level":"info","message":"Perun gRPC host not configured — running in MOCK mode","timestamp":"2026-05-08 06:05:29"}
+{"level":"info","message":"DB migrations complete — all tables ready","timestamp":"2026-05-08 06:05:41"}
+{"level":"info","message":"PostgreSQL connected","timestamp":"2026-05-08 06:05:41"}
+{"level":"info","message":"Redis connected","timestamp":"2026-05-08 06:05:41"}
+{"level":"info","message":"Perun gRPC host not configured — running in MOCK mode","timestamp":"2026-05-08 06:06:05"}
+{"level":"info","message":"Redis connected","timestamp":"2026-05-08 06:06:05"}
+{"level":"info","message":"DB migrations complete — all tables ready","timestamp":"2026-05-08 06:06:07"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:06:11 +0000] \"GET /health HTTP/1.1\" 200 86 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:06:11"}
+{"level":"info","message":"Session started","serviceType":"bicycle","sessionId":"7b0a8af6-2283-4e67-b8e4-f9aa321f4a70","timestamp":"2026-05-08 06:06:19","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"depositUsdc":"5000000","level":"debug","message":"perunClient.openChannel","operatorAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7","timestamp":"2026-05-08 06:06:19","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_a4ad1849","depositUsdc":"5000000","level":"info","message":"[MOCK] openChannel","timestamp":"2026-05-08 06:06:19","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_a4ad1849","depositUsdc":"5.000000","level":"info","message":"Channel opened","timestamp":"2026-05-08 06:06:20","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"level":"info","message":"Session state changed","newStatus":"Active","sessionId":"7b0a8af6-2283-4e67-b8e4-f9aa321f4a70","timestamp":"2026-05-08 06:06:20"}
+{"channelId":"ch_mock_a4ad1849","depositUsdc":"5.000000","level":"info","message":"Session + Channel opened","sessionId":"7b0a8af6-2283-4e67-b8e4-f9aa321f4a70","timestamp":"2026-05-08 06:06:20"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:06:20 +0000] \"POST /api/v1/sessions/start HTTP/1.1\" 201 262 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:06:20"}
+{"adjustments":[{"amount":0.020000000000000004,"type":"minimum_fare_applied"}],"finalFare":0.1,"level":"info","message":"Fare calculated","serviceType":"bicycle","sessionId":"7b0a8af6-2283-4e67-b8e4-f9aa321f4a70","timestamp":"2026-05-08 06:06:21"}
+{"level":"error","message":"Unhandled error invalid BigNumberish string: Cannot convert ch_mock_a4ad1849 to a BigInt (argument=\"value\", value=\"ch_mock_a4ad1849\", code=INVALID_ARGUMENT, version=6.16.0)","method":"POST","stack":"TypeError: invalid BigNumberish string: Cannot convert ch_mock_a4ad1849 to a BigInt (argument=\"value\", value=\"ch_mock_a4ad1849\", code=INVALID_ARGUMENT, version=6.16.0)\n    at makeError (/app/backend/node_modules/ethers/lib.commonjs/utils/errors.js:130:21)\n    at assert (/app/backend/node_modules/ethers/lib.commonjs/utils/errors.js:157:15)\n    at assertArgument (/app/backend/node_modules/ethers/lib.commonjs/utils/errors.js:169:5)\n    at getBigInt (/app/backend/node_modules/ethers/lib.commonjs/utils/maths.js:93:48)\n    at getUint (/app/backend/node_modules/ethers/lib.commonjs/utils/maths.js:104:20)\n    at Object.toBeHex (/app/backend/node_modules/ethers/lib.commonjs/utils/maths.js:168:19)\n    at buildStateMessage (/app/backend/src/services/walletService.js:58:34)\n    at Object.createSignatureRequest (/app/backend/src/services/signatureManager.js:72:21)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)\n    at async Object.chargeUsage (/app/backend/src/services/channelOrchestrator.js:83:22)","timestamp":"2026-05-08 06:06:22","url":"/api/v1/sessions/7b0a8af6-2283-4e67-b8e4-f9aa321f4a70/charge"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:06:22 +0000] \"POST /api/v1/sessions/7b0a8af6-2283-4e67-b8e4-f9aa321f4a70/charge HTTP/1.1\" 500 183 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:06:22"}
+{"level":"info","message":"DB migrations complete — all tables ready","timestamp":"2026-05-08 06:06:39"}
+{"level":"info","message":"PostgreSQL connected","timestamp":"2026-05-08 06:06:39"}
+{"level":"info","message":"Redis connected","timestamp":"2026-05-08 06:06:39"}
+{"level":"info","message":"WalletService initialised","operatorAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7","timestamp":"2026-05-08 06:06:40","treasuryAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"level":"info","message":"Perun gRPC host not configured — running in MOCK mode","timestamp":"2026-05-08 06:07:07"}
+{"level":"info","message":"Redis connected","timestamp":"2026-05-08 06:07:07"}
+{"level":"info","message":"DB migrations complete — all tables ready","timestamp":"2026-05-08 06:07:09"}
+{"level":"info","message":"Session started","serviceType":"bicycle","sessionId":"2eaef405-038e-4c7f-b818-2f39584ddad2","timestamp":"2026-05-08 06:07:13","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"depositUsdc":"5000000","level":"debug","message":"perunClient.openChannel","operatorAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7","timestamp":"2026-05-08 06:07:13","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_59fec5cb","depositUsdc":"5000000","level":"info","message":"[MOCK] openChannel","timestamp":"2026-05-08 06:07:13","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_59fec5cb","depositUsdc":"5.000000","level":"info","message":"Channel opened","timestamp":"2026-05-08 06:07:13","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"level":"info","message":"Session state changed","newStatus":"Active","sessionId":"2eaef405-038e-4c7f-b818-2f39584ddad2","timestamp":"2026-05-08 06:07:14"}
+{"channelId":"ch_mock_59fec5cb","depositUsdc":"5.000000","level":"info","message":"Session + Channel opened","sessionId":"2eaef405-038e-4c7f-b818-2f39584ddad2","timestamp":"2026-05-08 06:07:14"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:07:14 +0000] \"POST /api/v1/sessions/start HTTP/1.1\" 201 262 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:07:14"}
+{"adjustments":[{"amount":0.020000000000000004,"type":"minimum_fare_applied"}],"finalFare":0.1,"level":"info","message":"Fare calculated","serviceType":"bicycle","sessionId":"2eaef405-038e-4c7f-b818-2f39584ddad2","timestamp":"2026-05-08 06:07:14"}
+{"level":"error","message":"Unhandled error invalid BigNumberish string: Cannot convert ch_mock_59fec5cb to a BigInt (argument=\"value\", value=\"ch_mock_59fec5cb\", code=INVALID_ARGUMENT, version=6.16.0)","method":"POST","stack":"TypeError: invalid BigNumberish string: Cannot convert ch_mock_59fec5cb to a BigInt (argument=\"value\", value=\"ch_mock_59fec5cb\", code=INVALID_ARGUMENT, version=6.16.0)\n    at makeError (/app/backend/node_modules/ethers/lib.commonjs/utils/errors.js:130:21)\n    at assert (/app/backend/node_modules/ethers/lib.commonjs/utils/errors.js:157:15)\n    at assertArgument (/app/backend/node_modules/ethers/lib.commonjs/utils/errors.js:169:5)\n    at getBigInt (/app/backend/node_modules/ethers/lib.commonjs/utils/maths.js:93:48)\n    at getUint (/app/backend/node_modules/ethers/lib.commonjs/utils/maths.js:104:20)\n    at Object.toBeHex (/app/backend/node_modules/ethers/lib.commonjs/utils/maths.js:168:19)\n    at buildStateMessage (/app/backend/src/services/walletService.js:58:34)\n    at Object.createSignatureRequest (/app/backend/src/services/signatureManager.js:72:21)\n    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)\n    at async Object.chargeUsage (/app/backend/src/services/channelOrchestrator.js:83:22)","timestamp":"2026-05-08 06:07:15","url":"/api/v1/sessions/2eaef405-038e-4c7f-b818-2f39584ddad2/charge"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:07:15 +0000] \"POST /api/v1/sessions/2eaef405-038e-4c7f-b818-2f39584ddad2/charge HTTP/1.1\" 500 183 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:07:15"}
+{"level":"info","message":"Perun gRPC host not configured — running in MOCK mode","timestamp":"2026-05-08 06:07:51"}
+{"level":"info","message":"Redis connected","timestamp":"2026-05-08 06:07:52"}
+{"level":"info","message":"DB migrations complete — all tables ready","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"PostgreSQL connected","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"Redis and DB connected","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"SmartCity Payment Backend running on port 3000","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"Routes:","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  POST /api/v1/sessions/start","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  POST /api/v1/sessions/:id/charge","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  POST /api/v1/sessions/:id/sign","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  POST /api/v1/sessions/:id/end","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  GET  /api/v1/sessions/:id/status","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  GET  /api/v1/sessions/:id/stream  (SSE)","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  POST /api/v1/refunds","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  POST /api/v1/refunds/:id/evaluate","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  POST /api/v1/refunds/:id/approve","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  POST /api/v1/refunds/:id/payout","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"  GET  /health","timestamp":"2026-05-08 06:07:54"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:07:57 +0000] \"GET /health HTTP/1.1\" 200 86 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:07:57"}
+{"level":"info","message":"Session started","serviceType":"bicycle","sessionId":"0212150b-1a8f-4262-a751-36a5ffa483b0","timestamp":"2026-05-08 06:08:09","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"depositUsdc":"5000000","level":"debug","message":"perunClient.openChannel","operatorAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7","timestamp":"2026-05-08 06:08:09","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_066c40cb","depositUsdc":"5000000","level":"info","message":"[MOCK] openChannel","timestamp":"2026-05-08 06:08:09","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_066c40cb","depositUsdc":"5.000000","level":"info","message":"Channel opened","timestamp":"2026-05-08 06:08:09","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"level":"info","message":"Session state changed","newStatus":"Active","sessionId":"0212150b-1a8f-4262-a751-36a5ffa483b0","timestamp":"2026-05-08 06:08:10"}
+{"channelId":"ch_mock_066c40cb","depositUsdc":"5.000000","level":"info","message":"Session + Channel opened","sessionId":"0212150b-1a8f-4262-a751-36a5ffa483b0","timestamp":"2026-05-08 06:08:10"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:10 +0000] \"POST /api/v1/sessions/start HTTP/1.1\" 201 262 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:08:10"}
+{"adjustments":[{"amount":0.020000000000000004,"type":"minimum_fare_applied"}],"finalFare":0.1,"level":"info","message":"Fare calculated","serviceType":"bicycle","sessionId":"0212150b-1a8f-4262-a751-36a5ffa483b0","timestamp":"2026-05-08 06:08:11"}
+{"level":"info","message":"WalletService initialised","operatorAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7","timestamp":"2026-05-08 06:08:11","treasuryAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_066c40cb","chargeUsdc":"0.100000","level":"info","message":"Signature request created","nonce":1,"timestamp":"2026-05-08 06:08:12"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:12 +0000] \"POST /api/v1/sessions/0212150b-1a8f-4262-a751-36a5ffa483b0/charge HTTP/1.1\" 200 542 \"-\" \"curl/7.88.1\"","timestamp":"2026-05-08 06:08:12"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:15 +0000] \"GET /health HTTP/1.1\" 200 86 \"-\" \"node\"","timestamp":"2026-05-08 06:08:15"}
+{"level":"info","message":"Session started","serviceType":"bicycle","sessionId":"0e334d7f-1b88-4d1f-a60f-5bdcd1072eae","timestamp":"2026-05-08 06:08:16","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"depositUsdc":"5000000","level":"debug","message":"perunClient.openChannel","operatorAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7","timestamp":"2026-05-08 06:08:16","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_9ba70bb5","depositUsdc":"5000000","level":"info","message":"[MOCK] openChannel","timestamp":"2026-05-08 06:08:16","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"channelId":"ch_mock_9ba70bb5","depositUsdc":"5.000000","level":"info","message":"Channel opened","timestamp":"2026-05-08 06:08:16","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"level":"info","message":"Session state changed","newStatus":"Active","sessionId":"0e334d7f-1b88-4d1f-a60f-5bdcd1072eae","timestamp":"2026-05-08 06:08:17"}
+{"channelId":"ch_mock_9ba70bb5","depositUsdc":"5.000000","level":"info","message":"Session + Channel opened","sessionId":"0e334d7f-1b88-4d1f-a60f-5bdcd1072eae","timestamp":"2026-05-08 06:08:17"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:17 +0000] \"POST /api/v1/sessions/start HTTP/1.1\" 201 262 \"-\" \"node\"","timestamp":"2026-05-08 06:08:17"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:17 +0000] \"GET /api/v1/sessions/0e334d7f-1b88-4d1f-a60f-5bdcd1072eae/status HTTP/1.1\" 200 447 \"-\" \"node\"","timestamp":"2026-05-08 06:08:17"}
+{"adjustments":[{"amount":0.020000000000000004,"type":"minimum_fare_applied"}],"finalFare":0.1,"level":"info","message":"Fare calculated","serviceType":"bicycle","sessionId":"0e334d7f-1b88-4d1f-a60f-5bdcd1072eae","timestamp":"2026-05-08 06:08:18"}
+{"channelId":"ch_mock_9ba70bb5","chargeUsdc":"0.100000","level":"info","message":"Signature request created","nonce":1,"timestamp":"2026-05-08 06:08:19"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:19 +0000] \"POST /api/v1/sessions/0e334d7f-1b88-4d1f-a60f-5bdcd1072eae/charge HTTP/1.1\" 200 542 \"-\" \"node\"","timestamp":"2026-05-08 06:08:19"}
+{"channelId":"ch_mock_9ba70bb5","level":"info","message":"User signature accepted","nonce":1,"timestamp":"2026-05-08 06:08:20"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:20 +0000] \"POST /api/v1/sessions/0e334d7f-1b88-4d1f-a60f-5bdcd1072eae/sign HTTP/1.1\" 200 409 \"-\" \"node\"","timestamp":"2026-05-08 06:08:20"}
+{"caseId":"case_97043f41","level":"info","message":"Refund case created","reason":"sensor_failure","requestedUsdc":"3.000000","timestamp":"2026-05-08 06:08:20","userAddress":"0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:20 +0000] \"POST /api/v1/refunds HTTP/1.1\" 201 65 \"-\" \"node\"","timestamp":"2026-05-08 06:08:20"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:20 +0000] \"GET /api/v1/refunds/case_97043f41 HTTP/1.1\" 200 556 \"-\" \"node\"","timestamp":"2026-05-08 06:08:20"}
+{"caseId":"case_97043f41","level":"info","message":"Refund case updated","newStatus":"VERIFYING","timestamp":"2026-05-08 06:08:21"}
+{"caseId":"case_97043f41","level":"info","message":"Refund case updated","newStatus":"REJECTED","timestamp":"2026-05-08 06:08:21"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:21 +0000] \"POST /api/v1/refunds/case_97043f41/evaluate HTTP/1.1\" 200 74 \"-\" \"node\"","timestamp":"2026-05-08 06:08:21"}
+{"level":"info","message":"::ffff:127.0.0.1 - - [08/May/2026:06:08:22 +0000] \"GET /api/v1/refunds/case_97043f41 HTTP/1.1\" 200 665 \"-\" \"node\"","timestamp":"2026-05-08 06:08:22"}

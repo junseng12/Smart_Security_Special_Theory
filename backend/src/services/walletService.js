@@ -31,7 +31,9 @@ function init() {
 
   provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL);
   operatorWallet = new ethers.Wallet(process.env.OPERATOR_PRIVATE_KEY, provider);
-  treasuryWallet = new ethers.Wallet(process.env.TREASURY_PRIVATE_KEY, provider);
+  // TREASURY_PRIVATE_KEY는 선택적 — 없으면 operatorWallet 재사용
+  const treasuryKey = process.env.TREASURY_PRIVATE_KEY || process.env.OPERATOR_PRIVATE_KEY;
+  treasuryWallet = new ethers.Wallet(treasuryKey, provider);
 
   usdcContract = new ethers.Contract(
     process.env.USDC_CONTRACT_ADDRESS,
