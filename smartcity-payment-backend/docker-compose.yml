@@ -1,7 +1,20 @@
 version: '3.9'
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SmartCity Payment Backend — Docker Compose
+#
+# 기본 실행 (외부 DB 사용):
+#   docker compose up api watchtower
+#
+# 로컬 DB 포함 실행:
+#   docker compose --profile localdb up
+#
+# Perun 노드 포함 실행 (실제 노드 이미지 있을 때):
+#   docker compose --profile perun up
+# ─────────────────────────────────────────────────────────────────────────────
+
 services:
-  # ── Node.js Backend ──────────────────────────────────────────────────────────
+  # ── Node.js Backend ────────────────────────────────────────────────────────
   api:
     build: .
     container_name: smartcity-api
@@ -9,38 +22,31 @@ services:
       - "3000:3000"
     env_file: .env
     depends_on:
-      - redis
-      - postgres
+      redis:
+        condition: service_healthy
     restart: unless-stopped
     volumes:
       - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
 
-  # ── Watchtower (separate process) ────────────────────────────────────────────
+  # ── Watchtower ────────────────────────────────────────────────────────────
   watchtower:
     build: .
     container_name: smartcity-watchtower
     command: node src/services/watchtower.js
     env_file: .env
     depends_on:
-      - redis
-      - postgres
+      - api
     restart: unless-stopped
+    volumes:
+      - ./logs:/app/logs
 
-  # ── Go Perun Node ─────────────────────────────────────────────────────────────
-  # Replace with actual Perun Go node image when available
-  perun-node:
-    image: perun-node:latest   # build from go-perun repo
-    container_name: smartcity-perun
-    ports:
-      - "8080:8080"   # gRPC
-      - "8081:8081"   # REST fallback
-    environment:
-      - CHAIN_URL=${BASE_RPC_URL}
-      - ADJUDICATOR=${PERUN_ADJUDICATOR_ADDRESS}
-      - ASSET_HOLDER=${PERUN_ASSET_HOLDER_ADDRESS}
-    restart: unless-stopped
-
-  # ── Redis ─────────────────────────────────────────────────────────────────────
+  # ── Redis ─────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: smartcity-redis
@@ -50,11 +56,17 @@ services:
       - redis-data:/data
     command: redis-server --appendonly yes
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
-  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  # ── PostgreSQL (로컬 개발용, --profile localdb 옵션으로 활성화) ──────────
   postgres:
     image: postgres:16-alpine
     container_name: smartcity-postgres
+    profiles: ["localdb"]
     environment:
       POSTGRES_DB: smartcity_payments
       POSTGRES_USER: user
@@ -64,6 +76,31 @@ services:
     volumes:
       - pg-data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d smartcity_payments"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Go Perun Node (실제 노드 이미지 준비됐을 때, --profile perun으로 활성화)
+  perun-node:
+    image: ${PERUN_NODE_IMAGE:-perun-node:latest}
+    container_name: smartcity-perun
+    profiles: ["perun"]
+    ports:
+      - "8080:8080"   # gRPC
+      - "8081:8081"   # REST fallback
+    environment:
+      - CHAIN_URL=${BASE_RPC_URL}
+      - ADJUDICATOR=${PERUN_ADJUDICATOR_ADDRESS:-0x0000000000000000000000000000000000000000}
+      - ASSET_HOLDER=${PERUN_ASSET_HOLDER_ADDRESS:-0x0000000000000000000000000000000000000000}
+      - OPERATOR_KEY=${OPERATOR_PRIVATE_KEY}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=localhost:8080"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
 volumes:
   redis-data:

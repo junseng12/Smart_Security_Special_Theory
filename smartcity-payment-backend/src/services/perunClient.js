@@ -17,11 +17,21 @@ const logger = require('../utils/logger');
 const PROTO_PATH = path.join(__dirname, '../proto/perun.proto');
 
 let perunStub = null; // gRPC stub
-let useGrpc = true;
+let useGrpc = false;
 
 // ── gRPC initialisation ──────────────────────────────────────────────────────
 
 function initGrpc() {
+  const host = process.env.PERUN_GRPC_HOST;
+  const port = process.env.PERUN_GRPC_PORT;
+
+  // Perun Go 노드 주소 미설정 시 → mock 모드 (개발/테스트 전용)
+  if (!host || !port || host === 'undefined') {
+    logger.info('Perun gRPC host not configured — running in MOCK mode');
+    useGrpc = false;
+    return;
+  }
+
   try {
     const packageDef = protoLoader.loadSync(PROTO_PATH, {
       keepCase: true,
@@ -31,17 +41,39 @@ function initGrpc() {
       oneofs: true,
     });
     const proto = grpc.loadPackageDefinition(packageDef).perun;
-    const target = `${process.env.PERUN_GRPC_HOST}:${process.env.PERUN_GRPC_PORT}`;
+    const target = `${host}:${port}`;
     perunStub = new proto.PerunService(target, grpc.credentials.createInsecure());
     logger.info(`Perun gRPC client targeting ${target}`);
     useGrpc = true;
   } catch (err) {
-    logger.warn('gRPC init failed, falling back to REST', { error: err.message });
+    logger.warn('gRPC init failed, falling back to mock mode', { error: err.message });
     useGrpc = false;
   }
 }
 
 initGrpc();
+
+// ── Mock responses (Perun Go 노드 없이 작동) ─────────────────────────────────
+const { v4: uuidv4 } = require('uuid');
+
+function mockOpenChannel({ userAddress, operatorAddress, depositUsdc }) {
+  const channelId = `ch_mock_${uuidv4().slice(0,8)}`;
+  logger.info('[MOCK] openChannel', { channelId, userAddress, depositUsdc });
+  return { channel_id: channelId, deposit_tx: `0xmock_deposit_${channelId}` };
+}
+
+function mockProposeUpdate({ channelId, nonce, balances }) {
+  const stateHash = `0x${Buffer.from(JSON.stringify({ channelId, nonce, balances })).toString('hex').slice(0,64).padEnd(64,'0')}`;
+  const operatorSig = `0xmock_opsig_${nonce}`;
+  logger.info('[MOCK] proposeUpdate', { channelId, nonce });
+  return { state_hash: stateHash, operator_sig: operatorSig };
+}
+
+function mockSettleChannel({ channelId }) {
+  const txHash = `0xmock_settle_${channelId.slice(-8)}_${Date.now()}`;
+  logger.info('[MOCK] settleChannel', { channelId, txHash });
+  return { tx_hash: txHash };
+}
 
 // ── Helper: wrap gRPC call in a Promise ────────────────────────────────────
 
@@ -79,6 +111,7 @@ async function openChannel(params) {
       deposit_usdc: params.depositUsdc,
     });
   }
+  if (!process.env.PERUN_REST_FALLBACK_URL) return mockOpenChannel(params);
   return restCall('/channels/open', params);
 }
 
@@ -97,6 +130,7 @@ async function proposeUpdate(params) {
       balance_operator: params.balances.operator,
     });
   }
+  if (!process.env.PERUN_REST_FALLBACK_URL) return mockProposeUpdate(params);
   return restCall('/channels/update', params);
 }
 
@@ -113,6 +147,7 @@ async function settleChannel(params) {
       final_state: JSON.stringify(params.finalState),
     });
   }
+  if (!process.env.PERUN_REST_FALLBACK_URL) return mockSettleChannel(params);
   return restCall('/channels/settle', params);
 }
 
@@ -131,4 +166,48 @@ async function disputeChannel(params) {
   return restCall('/channels/dispute', params);
 }
 
-module.exports = { openChannel, proposeUpdate, settleChannel, disputeChannel };
+
+/**
+ * Perun 노드 연결 상태 확인 (healthcheck용)
+ * @returns {{ connected: boolean, mode: string, host: string|null }}
+ */
+async function pingPerun() {
+  if (!useGrpc) {
+    return { connected: false, mode: 'mock', host: null };
+  }
+  try {
+    // gRPC deadline 2초로 빠른 ping
+    await new Promise((resolve, reject) => {
+      const deadline = new Date(Date.now() + 2000);
+      perunStub.ListOpenChannels({}, { deadline }, (err, resp) => {
+        if (err) reject(err);
+        else resolve(resp);
+      });
+    });
+    const host = process.env.PERUN_GRPC_HOST;
+    const port = process.env.PERUN_GRPC_PORT;
+    return { connected: true, mode: 'grpc', host: `${host}:${port}` };
+  } catch (err) {
+    logger.warn('Perun ping failed', { error: err.message });
+    return { connected: false, mode: 'grpc_unavailable', host: process.env.PERUN_GRPC_HOST, error: err.message };
+  }
+}
+
+/**
+ * gRPC 재연결 시도 (환경변수 변경 후 런타임 재초기화)
+ */
+function reinitGrpc() {
+  perunStub = null;
+  useGrpc = false;
+  initGrpc();
+  return { mode: useGrpc ? 'grpc' : 'mock' };
+}
+
+module.exports = {
+  openChannel,
+  proposeUpdate,
+  settleChannel,
+  disputeChannel,
+  pingPerun,
+  reinitGrpc,
+};

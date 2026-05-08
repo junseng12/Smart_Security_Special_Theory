@@ -149,16 +149,17 @@ async function runMigrations() {
     CREATE TABLE IF NOT EXISTS escrow_locks (
       id               SERIAL PRIMARY KEY,
       session_id       TEXT NOT NULL UNIQUE,
+      escrow_id_bytes  TEXT,
       channel_id       TEXT,
       case_id          TEXT,
       user_address     TEXT NOT NULL,
-      merchant_address TEXT NOT NULL,
+      seller_address   TEXT NOT NULL,
       amount_usdc      NUMERIC NOT NULL,
-      lock_tx          TEXT,
+      hold_deadline    TIMESTAMPTZ,
+      create_tx        TEXT,
       release_tx       TEXT,
-      outcome          TEXT DEFAULT 'pending',
+      state            TEXT NOT NULL DEFAULT 'Held',
       locked_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      release_after    TIMESTAMPTZ NOT NULL,
       released_at      TIMESTAMPTZ
     );
 
@@ -185,7 +186,7 @@ async function runMigrations() {
     CREATE INDEX IF NOT EXISTS idx_refund_cases_user    ON refund_cases(user_address);
     CREATE INDEX IF NOT EXISTS idx_refund_cases_status  ON refund_cases(status);
     CREATE INDEX IF NOT EXISTS idx_escrow_session       ON escrow_locks(session_id);
-    CREATE INDEX IF NOT EXISTS idx_escrow_outcome       ON escrow_locks(outcome);
+    CREATE INDEX IF NOT EXISTS idx_escrow_state         ON escrow_locks(state);
   `);
 
   logger.info('DB migrations complete — all tables ready');
