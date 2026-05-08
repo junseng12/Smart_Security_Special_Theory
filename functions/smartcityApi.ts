@@ -12,20 +12,27 @@ export default async function handler(req: Request): Promise<Response> {
     });
   }
 
-  const url = new URL(req.url);
-  const path = url.searchParams.get("path") || "/health";
-  const targetUrl = `${BACKEND}${path}`;
+  let reqBody: any = {};
+  try {
+    reqBody = await req.json();
+  } catch {}
 
-  let body: string | undefined;
-  if (req.method !== "GET" && req.method !== "HEAD") {
-    body = await req.text();
+  const { path, method = "GET", body } = reqBody;
+
+  if (!path) {
+    return new Response(JSON.stringify({ error: "path is required" }), {
+      status: 400,
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    });
   }
+
+  const targetUrl = `${BACKEND}${path}`;
 
   try {
     const res = await fetch(targetUrl, {
-      method: req.method,
+      method,
       headers: { "Content-Type": "application/json" },
-      body: body || undefined,
+      body: method !== "GET" && body ? JSON.stringify(body) : undefined,
     });
 
     const data = await res.text();
