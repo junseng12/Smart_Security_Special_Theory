@@ -3,23 +3,23 @@ const logger = require('../utils/logger');
 
 let client;
 
-/**
- * Connect to Redis.
- * REDIS_URL 환경변수가 있으면 URL 방식 (Upstash 등 클라우드)
- * 없으면 HOST/PORT 방식 (로컬)
- */
 async function connectRedis() {
   const redisUrl = process.env.REDIS_URL;
 
   if (redisUrl) {
-    // Upstash 등 TLS Redis — URL 방식
-    client = new Redis(redisUrl, {
-      tls: redisUrl.startsWith('rediss://') ? {} : undefined,
+    // Upstash 등 클라우드 Redis — URL 파싱 후 명시적 옵션으로 연결
+    const parsed = new URL(redisUrl);
+    client = new Redis({
+      host:     parsed.hostname,
+      port:     parseInt(parsed.port),
+      username: parsed.username || 'default',
+      password: parsed.password,
+      tls: redisUrl.startsWith('rediss://') ? { rejectUnauthorized: false } : undefined,
       retryStrategy: (times) => Math.min(times * 200, 5000),
       lazyConnect: true,
     });
   } else {
-    // 로컬 Redis — HOST/PORT 방식
+    // 로컬 Redis
     client = new Redis({
       host:     process.env.REDIS_HOST     || 'localhost',
       port:     parseInt(process.env.REDIS_PORT) || 6379,
@@ -30,9 +30,9 @@ async function connectRedis() {
     });
   }
 
-  client.on('error', (err) => logger.error('Redis error', { error: err.message }));
-  client.on('reconnecting', () => logger.warn('Redis reconnecting...'));
-  client.on('connect', () => logger.info('Redis connected'));
+  client.on('error',       (err) => logger.error('Redis error', { error: err.message }));
+  client.on('reconnecting',()    => logger.warn('Redis reconnecting...'));
+  client.on('connect',     ()    => logger.info('Redis connected'));
 
   await client.connect();
   return client;
@@ -43,10 +43,8 @@ function getRedis() {
   return client;
 }
 
-// ── Channel state helpers ─────────────────────────────────────────────────────
-
 const CHANNEL_KEY = (channelId) => `channel:${channelId}`;
-const CHANNEL_TTL  = 60 * 60 * 24 * 30; // 30일
+const CHANNEL_TTL  = 60 * 60 * 24 * 30;
 
 async function saveChannelState(channelId, state) {
   await getRedis().set(CHANNEL_KEY(channelId), JSON.stringify(state), 'EX', CHANNEL_TTL);
