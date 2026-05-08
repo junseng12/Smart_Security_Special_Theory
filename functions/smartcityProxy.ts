@@ -1,7 +1,6 @@
-const BACKEND_URL = "https://smartcity-payment-backend-production.up.railway.app";
-
 export default async function handler(req: Request): Promise<Response> {
-  // CORS preflight
+  const BACKEND = "https://smartcity-payment-backend-production.up.railway.app";
+
   if (req.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
@@ -15,25 +14,23 @@ export default async function handler(req: Request): Promise<Response> {
 
   const url = new URL(req.url);
   const path = url.searchParams.get("path") || "/health";
-  const method = req.method;
-  const targetUrl = `${BACKEND_URL}${path}`;
+  const targetUrl = `${BACKEND}${path}`;
 
   let body: string | undefined;
-  if (method !== "GET" && method !== "HEAD") {
+  if (req.method !== "GET" && req.method !== "HEAD") {
     body = await req.text();
   }
 
   try {
-    const response = await fetch(targetUrl, {
-      method,
+    const res = await fetch(targetUrl, {
+      method: req.method,
       headers: { "Content-Type": "application/json" },
       body: body || undefined,
     });
 
-    const data = await response.text();
-
+    const data = await res.text();
     return new Response(data, {
-      status: response.status,
+      status: res.status,
       headers: {
         "Content-Type": "application/json",
         "Access-Control-Allow-Origin": "*",
@@ -42,10 +39,7 @@ export default async function handler(req: Request): Promise<Response> {
   } catch (err: any) {
     return new Response(JSON.stringify({ error: err.message }), {
       status: 500,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
     });
   }
 }
