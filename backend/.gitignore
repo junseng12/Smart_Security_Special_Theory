@@ -1,0 +1,26 @@
+node_modules/
+.env
+.env.local
+.env.*.local
+
+# 빌드 캐시
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 테스트 커버리지
+coverage/
+.nyc_output/
+
+# Private Key 절대 커밋 금지
+*.pem
+*.key
