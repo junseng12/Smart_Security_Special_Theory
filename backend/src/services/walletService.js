@@ -51,11 +51,24 @@ function init() {
  * Build the canonical state message that both sides sign.
  * Format: keccak256(abi.encodePacked(channelId, nonce, balanceUser, balanceOperator))
  */
+/**
+ * channelId → bytes32 변환
+ * - 0x로 시작하는 hex는 그대로 zero-pad
+ * - 일반 문자열(mock ID 등)은 keccak256(utf8)로 변환
+ */
+function channelIdToBytes32(channelId) {
+  if (typeof channelId === 'string' && channelId.startsWith('0x')) {
+    return ethers.zeroPadValue(channelId, 32);
+  }
+  // 문자열 → keccak256 (bytes32)
+  return ethers.keccak256(ethers.toUtf8Bytes(channelId));
+}
+
 function buildStateMessage(channelId, nonce, balanceUser, balanceOperator) {
   return ethers.solidityPackedKeccak256(
     ['bytes32', 'uint256', 'uint256', 'uint256'],
     [
-      ethers.zeroPadValue(ethers.toBeHex(channelId), 32),
+      channelIdToBytes32(channelId),
       BigInt(nonce),
       BigInt(balanceUser),
       BigInt(balanceOperator),
