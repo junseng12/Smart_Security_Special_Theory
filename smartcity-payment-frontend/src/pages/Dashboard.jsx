@@ -122,7 +122,7 @@ export default function Dashboard() {
 
   const handleLogout = () => {
     clearMetaMaskStorage();
-    base44.auth.logout('/');
+    base44.auth.logout(window.location.href);
   };
 
   // 경과 시간 포맷
