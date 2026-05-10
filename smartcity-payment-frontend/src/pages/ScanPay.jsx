@@ -188,12 +188,17 @@ export default function ScanPay() {
 
     // 2) 백엔드 세션 종료
     try {
-      await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
+      const endData = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
         channelId: sessionData.channelId,
         userAddress: mmAddress,
         userFinalSig: "0xmock_signature_for_demo",
       });
       addLog(`🏁 백엔드 세션 종료 완료`, "success");
+      // 에스크로 온체인 정산 결과 표시
+      if (endData?.escrow?.txHash) {
+        addLog(`🔐 에스크로 잠금 완료 → ${endData.escrow.txHash.slice(0,14)}...`, "success");
+        addLog(`⏳ ${Math.round((new Date(endData.escrow.holdDeadline) - Date.now()) / 1000)}초 후 서비스 제공자에게 자동 정산`, "info");
+      }
     } catch (e) {
       addLog(`⚠️ 세션 종료 API 오류 (로컬 정산 진행): ${e.message}`, "error");
     }
