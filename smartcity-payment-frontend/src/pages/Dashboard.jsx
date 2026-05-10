@@ -8,7 +8,7 @@ import BottomNav from '@/components/wallet/BottomNav';
 import BalanceCard from '@/components/wallet/BalanceCard';
 import QuickActions from '@/components/wallet/QuickActions';
 import RecentTransactions from '@/components/wallet/RecentTransactions';
-import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage } from '@/lib/walletUtils';
+import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage, getConnectedMetaMaskAddress } from '@/lib/walletUtils';
 
 const SESSION_KEY = "active_session";
 
@@ -23,7 +23,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const [showBalance, setShowBalance] = useState(true);
   const [user, setUser] = useState(null);
-  const [mmAddress, setMmAddress] = useState(() => localStorage.getItem("mm_address") || null);
+  const [mmAddress, setMmAddress] = useState(null);
   const [mmBalance, setMmBalance] = useState(null);
   const [mmConnecting, setMmConnecting] = useState(false);
   const [mmError, setMmError] = useState(null);
@@ -32,6 +32,58 @@ export default function Dashboard() {
 
   useEffect(() => {
     base44.auth.me().then(setUser).catch(() => {});
+  }, []);
+
+  // MetaMask 실제 연결 상태 확인 (앱 로드 시 + 계정 변경 감지)
+  useEffect(() => {
+    const syncMetaMask = async () => {
+      const actualAddr = await getConnectedMetaMaskAddress();
+      const storedAddr = localStorage.getItem("mm_address");
+
+      if (!actualAddr) {
+        // MetaMask에서 실제로 연결 해제된 경우 → localStorage 초기화
+        if (storedAddr) {
+          localStorage.removeItem("mm_address");
+          localStorage.removeItem("mm_balance");
+        }
+        setMmAddress(null);
+        setMmBalance(null);
+      } else if (actualAddr.toLowerCase() === storedAddr?.toLowerCase()) {
+        // 연결된 주소가 동일 → 복원
+        setMmAddress(actualAddr);
+        getUsdcBalance(actualAddr).then(bal => {
+          setMmBalance(bal);
+          localStorage.setItem("mm_balance", bal);
+        }).catch(() => {});
+      } else {
+        // 주소가 바뀐 경우 → 초기화
+        localStorage.removeItem("mm_address");
+        localStorage.removeItem("mm_balance");
+        setMmAddress(null);
+        setMmBalance(null);
+      }
+    };
+
+    syncMetaMask();
+
+    // MetaMask 계정 변경 이벤트 감지
+    if (window.ethereum) {
+      const onAccountsChanged = (accounts) => {
+        if (!accounts || accounts.length === 0) {
+          // MetaMask에서 연결 해제
+          clearMetaMaskStorage();
+          setMmAddress(null);
+          setMmBalance(null);
+        } else if (accounts[0].toLowerCase() !== mmAddress?.toLowerCase()) {
+          // 계정 전환 → 초기화 (재연결 필요)
+          clearMetaMaskStorage();
+          setMmAddress(null);
+          setMmBalance(null);
+        }
+      };
+      window.ethereum.on('accountsChanged', onAccountsChanged);
+      return () => window.ethereum.removeListener('accountsChanged', onAccountsChanged);
+    }
   }, []);
 
   // 진행 중인 세션 복원
@@ -122,7 +174,7 @@ export default function Dashboard() {
 
   const handleLogout = () => {
     clearMetaMaskStorage();
-    base44.auth.logout(window.location.href);
+    base44.auth.logout('/');
   };
 
   // 경과 시간 포맷
