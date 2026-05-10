@@ -38,14 +38,14 @@ const AuthenticatedApp = () => {
 
   return (
     <Routes>
-      <Route path="/"        element={<Dashboard />} />
-      <Route path="/scan"    element={<ScanPay />} />
+      <Route path="/" element={<Dashboard />} />
+      <Route path="/scan" element={<ScanPay />} />
       <Route path="/deposit" element={<Deposit />} />
-      <Route path="/send"    element={<Send />} />
+      <Route path="/send" element={<Send />} />
       <Route path="/history" element={<TransactionHistory />} />
       <Route path="/profile" element={<Profile />} />
-      <Route path="/refund"  element={<RefundCenter />} />
-      <Route path="*"        element={<PageNotFound />} />
+      <Route path="/refund" element={<RefundCenter />} />
+      <Route path="*" element={<PageNotFound />} />
     </Routes>
   );
 };
