@@ -47,7 +47,7 @@ export default function Profile() {
     localStorage.removeItem("mm_address");
     localStorage.removeItem("mm_balance");
     localStorage.removeItem("active_session");
-    base44.auth.logout('/');
+    base44.auth.logout(window.location.href);
   };
 
   return (
