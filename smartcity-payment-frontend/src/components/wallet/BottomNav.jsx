@@ -3,11 +3,11 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { Home, QrCode, Clock, Shield, User } from 'lucide-react';
 
 const NAV = [
-  { path: '/',        icon: Home,   label: '홈' },
-  { path: '/scan',    icon: QrCode, label: '결제' },
-  { path: '/history', icon: Clock,  label: '내역' },
-  { path: '/refund',  icon: Shield, label: '환불' },
-  { path: '/profile', icon: User,   label: '계정' },
+  { path: '/', icon: Home, label: '홈' },
+  { path: '/scan', icon: QrCode, label: '결제' },
+  { path: '/history', icon: Clock, label: '내역' },
+  { path: '/refund', icon: Shield, label: '환불' },
+  { path: '/profile', icon: User, label: '계정' },
 ];
 
 export default function BottomNav() {
