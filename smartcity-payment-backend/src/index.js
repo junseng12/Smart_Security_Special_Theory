@@ -17,6 +17,7 @@ const errorHandler   = require('./middleware/errorHandler');
 const requestValidator = require('./middleware/requestValidator');
 
 const app = express();
+app.set('trust proxy', 1);
 
 // ── Security ─────────────────────────────────────────────────────────────────
 app.use(helmet({ crossOriginResourcePolicy: false }));
