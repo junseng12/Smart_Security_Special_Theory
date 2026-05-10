@@ -10,7 +10,8 @@ import { sendUsdcOnChain, getUsdcBalance } from '@/lib/walletUtils';
 
 const BACKEND = "https://smartcity-payment-backend-production.up.railway.app";
 // 결제 수취 주소 (서비스 운영자 에스크로 주소 — 테스트넷)
-const ESCROW_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
+// 운영자 지갑이 아닌 SmartCityEscrow 컨트랙트 주소
+const ESCROW_ADDRESS = "0xf6B7d5c6C7a907D906419125B9dD2EeeCb26De3c";
 
 async function apiCall(path, method = "GET", body = null) {
   const res = await fetch(`${BACKEND}${path}`, {
