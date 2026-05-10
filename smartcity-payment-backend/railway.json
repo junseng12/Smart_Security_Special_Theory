@@ -1,6 +1,6 @@
 {
   "build": {
-    "builder": "NIXPACKS"
+    "builder": "RAILPACK"
   },
   "deploy": {
     "startCommand": "node src/index.js",
