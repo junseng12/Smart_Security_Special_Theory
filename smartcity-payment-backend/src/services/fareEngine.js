@@ -1,5 +1,6 @@
 /**
  * Fare Engine v2 — always uses hardcoded numeric policies (no DB cache issue)
+ * 무료구간 없음. 최소 1분 기준 청구. 5초 사용해도 1분 요금 적용.
  */
 const logger = require('../utils/logger');
 const { getPool } = require('./db');
@@ -7,7 +8,8 @@ const { getPool } = require('./db');
 const DEFAULT_POLICIES = {
   bicycle: {
     id: 'policy_bicycle_v1.0', version: 'v1.0', type: 'time_based',
-    ratePerMinute: 0.01, minimumFare: 0.10, cap: 5.00, freeMinutes: 2, penaltyLate: 1.00,
+    ratePerMinute: 0.01, minimumFare: 0.10, cap: 5.00,
+    penaltyLate: 1.00,
   },
   ev_charging: {
     id: 'policy_ev_charging_v1.0', version: 'v1.0', type: 'energy_based',
@@ -15,7 +17,8 @@ const DEFAULT_POLICIES = {
   },
   parking: {
     id: 'policy_parking_v1.0', version: 'v1.0', type: 'time_based',
-    ratePerMinute: 0.02, minimumFare: 0.20, cap: 10.00, freeMinutes: 10, penaltyOverstay: 2.00,
+    ratePerMinute: 0.02, minimumFare: 0.20, cap: 10.00,
+    penaltyOverstay: 2.00,
   },
 };
 
@@ -52,9 +55,10 @@ async function calculateFare({ sessionId, serviceType, usage }) {
 
   if (policy.type === 'time_based') {
     const rawMinutes = Number(usage.durationMinutes) || 0;
-    const billable = Math.max(0, rawMinutes - policy.freeMinutes);
+    // 무료구간 없음 — 최소 1분으로 올림 처리
+    const billable = Math.max(1, Math.ceil(rawMinutes));
     baseFare = billable * policy.ratePerMinute;
-    logger.info('Fare calc', { serviceType, rawMinutes, freeMinutes: policy.freeMinutes, billable, rate: policy.ratePerMinute, baseFare });
+    logger.info('Fare calc', { serviceType, rawMinutes, billable, rate: policy.ratePerMinute, baseFare });
 
     if (usage.isLate && policy.penaltyLate) {
       adjustments.push({ type: 'late_penalty', amount: policy.penaltyLate });
@@ -74,7 +78,8 @@ async function calculateFare({ sessionId, serviceType, usage }) {
     }
   }
 
-  if (baseFare > 0 && baseFare < policy.minimumFare) {
+  // minimumFare 적용 (baseFare > 0 조건 없이 항상 적용)
+  if (baseFare < policy.minimumFare) {
     adjustments.push({ type: 'minimum_fare_applied', amount: policy.minimumFare - baseFare });
     baseFare = policy.minimumFare;
   }
