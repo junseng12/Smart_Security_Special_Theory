@@ -2,6 +2,20 @@ export const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 export const BASE_SEPOLIA_RPC = "https://sepolia.base.org";
 export const BASE_SEPOLIA_CHAIN_ID = "0x14a34"; // 84532
 
+/**
+ * MetaMask 실제 연결 상태 확인
+ * localStorage가 아닌 window.ethereum 기준
+ */
+export async function getConnectedMetaMaskAddress() {
+  if (!window.ethereum) return null;
+  try {
+    const accounts = await window.ethereum.request({ method: "eth_accounts" });
+    return accounts && accounts.length > 0 ? accounts[0] : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function connectMetaMask() {
   if (!window.ethereum) throw new Error("MetaMask가 설치되지 않았습니다");
   try {
@@ -44,17 +58,9 @@ export async function getUsdcBalance(address) {
   return Number(raw) / 1e6;
 }
 
-/**
- * MetaMask로 USDC transfer 트랜잭션을 서명 & 브로드캐스트
- * @param {string} fromAddress - 보내는 주소 (MetaMask 연결 주소)
- * @param {string} toAddress   - 받는 주소
- * @param {number} amountUsdc  - USDC 금액 (소수점 포함)
- * @returns {string} txHash
- */
 export async function sendUsdcOnChain(fromAddress, toAddress, amountUsdc) {
   if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
 
-  // ERC-20 transfer(address,uint256) selector: 0xa9059cbb
   const amountMicro = BigInt(Math.round(amountUsdc * 1e6));
   const toHex = toAddress.replace("0x", "").toLowerCase().padStart(64, "0");
   const amountHex = amountMicro.toString(16).padStart(64, "0");
@@ -66,15 +72,11 @@ export async function sendUsdcOnChain(fromAddress, toAddress, amountUsdc) {
       from: fromAddress,
       to: USDC_ADDRESS,
       data,
-      // gas는 MetaMask가 자동 추정
     }],
   });
   return txHash;
 }
 
-/**
- * localStorage MetaMask 데이터 전체 초기화
- */
 export function clearMetaMaskStorage() {
   localStorage.removeItem("mm_address");
   localStorage.removeItem("mm_balance");
