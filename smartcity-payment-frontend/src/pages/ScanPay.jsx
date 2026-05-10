@@ -126,7 +126,6 @@ export default function ScanPay() {
         userAddress: mmAddress,
         serviceType: service.id,
         depositUsdc: String(service.depositUsdc),
-        depositTxHash: txHash,
       });
 
       const now = Date.now();
@@ -181,7 +180,10 @@ export default function ScanPay() {
       });
       settlementAmount = parseFloat(chargeData.fare?.fareUsdc || "0");
       setFareInfo(chargeData.fare);
-      addLog(`💰 요금 계산: ${chargeData.fare?.fareUsdc || "0"} USDC`, "success");
+      const fareDisplay = parseFloat(chargeData.fare?.fareUsdc || "0") === 0
+        ? "0 USDC (무료 구간)"
+        : `${chargeData.fare?.fareUsdc} USDC`;
+      addLog(`💰 요금 계산: ${fareDisplay}`, "success");
     } catch (e) {
       addLog(`⚠️ 요금 계산 실패 (계속 진행): ${e.message}`, "error");
     }
@@ -192,7 +194,6 @@ export default function ScanPay() {
         channelId: sessionData.channelId,
         userAddress: mmAddress,
         userFinalSig: "0xmock_signature_for_demo",
-        usage: { durationMinutes },
       });
       addLog(`🏁 백엔드 세션 종료 완료`, "success");
     } catch (e) {
@@ -212,9 +213,10 @@ export default function ScanPay() {
         wallet_id: wallet?.id,
       });
 
-      // 4) 잔액 갱신 (온체인 실제 잔액 기준)
+      // 4) 잔액 갱신 (온체인 실제 잔액 기준 - 에스크로 예치분 제외 잔액)
       const newBal = await getUsdcBalance(mmAddress);
       localStorage.setItem("mm_balance", newBal);
+      addLog(`💳 현재 지갑 잔액: ${newBal.toFixed(2)} USDC`, "info");
       if (wallet) {
         await base44.entities.Wallet.update(wallet.id, { balance: newBal });
       }
