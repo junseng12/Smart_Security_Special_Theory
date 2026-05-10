@@ -123,44 +123,50 @@ async function calculateFare({ sessionId, serviceType, usage }) {
   const adjustments = [];
 
   // ── 서비스별 계산 ──────────────────────────────────────────────────────────
-  if (policy.type === 'time_based') {
-    const billableMinutes = Math.max(0, (usage.durationMinutes || 0) - (policy.freeMinutes || 0));
-    baseFare = billableMinutes * parseFloat(policy.ratePerMinute);
+  // DB에서 읽은 JSONB 필드는 문자열일 수 있으므로 강제 변환
+  const ratePerMinute  = parseFloat(policy.ratePerMinute  || 0);
+  const ratePerKwh     = parseFloat(policy.ratePerKwh     || 0);
+  const freeMinutes    = parseFloat(policy.freeMinutes    || 0);
+  const penaltyLate    = parseFloat(policy.penaltyLate    || 0);
+  const penaltyOverstay= parseFloat(policy.penaltyOverstay|| 0);
+  const minimumFare    = parseFloat(policy.minimumFare    || 0);
+  const capFare        = parseFloat(policy.cap            || 999);
+  const sessionFee     = parseFloat(policy.sessionFee     || 0);
 
-    if (usage.isLate && policy.penaltyLate) {
-      const penalty = parseFloat(policy.penaltyLate);
-      adjustments.push({ type: 'late_penalty', amount: penalty });
-      baseFare += penalty;
+  if (policy.type === 'time_based') {
+    const billableMinutes = Math.max(0, (usage.durationMinutes || 0) - freeMinutes);
+    baseFare = billableMinutes * ratePerMinute;
+
+    if (usage.isLate && penaltyLate) {
+      adjustments.push({ type: 'late_penalty', amount: penaltyLate });
+      baseFare += penaltyLate;
     }
 
-    if (usage.isOverstay && policy.penaltyOverstay) {
+    if (usage.isOverstay && penaltyOverstay) {
       const overstayHours = Math.ceil((usage.overstayMinutes || 0) / 60);
-      const penalty = overstayHours * parseFloat(policy.penaltyOverstay);
+      const penalty = overstayHours * penaltyOverstay;
       adjustments.push({ type: 'overstay_penalty', amount: penalty });
       baseFare += penalty;
     }
   } else if (policy.type === 'energy_based') {
-    baseFare = (usage.energyKwh || 0) * parseFloat(policy.ratePerKwh);
-    if (policy.sessionFee) {
-      const fee = parseFloat(policy.sessionFee);
-      adjustments.push({ type: 'session_fee', amount: fee });
-      baseFare += fee;
+    baseFare = (usage.energyKwh || 0) * ratePerKwh;
+    if (sessionFee) {
+      adjustments.push({ type: 'session_fee', amount: sessionFee });
+      baseFare += sessionFee;
     }
   }
 
   // ── 정책 적용 ──────────────────────────────────────────────────────────────
-  // 최소 요금
-  const minimum = parseFloat(policy.minimumFare || 0);
-  if (baseFare < minimum && baseFare > 0) {
-    adjustments.push({ type: 'minimum_fare_applied', amount: minimum - baseFare });
-    baseFare = minimum;
+  // 최소 요금 (baseFare > 0 조건 제거 — 0분이어도 최소 요금 적용)
+  if (baseFare > 0 && baseFare < minimumFare) {
+    adjustments.push({ type: 'minimum_fare_applied', amount: minimumFare - baseFare });
+    baseFare = minimumFare;
   }
 
   // 상한 (cap)
-  const cap = parseFloat(policy.cap || Infinity);
-  if (baseFare > cap) {
-    adjustments.push({ type: 'cap_applied', originalAmount: baseFare, cappedTo: cap });
-    baseFare = cap;
+  if (baseFare > capFare) {
+    adjustments.push({ type: 'cap_applied', originalAmount: baseFare, cappedTo: capFare });
+    baseFare = capFare;
   }
 
   const finalFare = Math.round(baseFare * 1_000_000) / 1_000_000; // 6 decimal
