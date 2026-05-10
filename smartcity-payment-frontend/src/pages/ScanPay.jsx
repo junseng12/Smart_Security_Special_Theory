@@ -180,10 +180,7 @@ export default function ScanPay() {
       });
       settlementAmount = parseFloat(chargeData.fare?.fareUsdc || "0");
       setFareInfo(chargeData.fare);
-      const fareDisplay = parseFloat(chargeData.fare?.fareUsdc || "0") === 0
-        ? "0 USDC (무료 구간)"
-        : `${chargeData.fare?.fareUsdc} USDC`;
-      addLog(`💰 요금 계산: ${fareDisplay}`, "success");
+      addLog(`💰 요금 계산: ${chargeData.fare?.fareUsdc} USDC`, "success");
     } catch (e) {
       addLog(`⚠️ 요금 계산 실패 (계속 진행): ${e.message}`, "error");
     }
