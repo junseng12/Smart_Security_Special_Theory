@@ -64,6 +64,7 @@ async function runMigrations() {
       channel_id      TEXT,
       status          TEXT NOT NULL DEFAULT 'Active',
       deposit_usdc    NUMERIC,
+      charged_usdc    NUMERIC DEFAULT 0,
       fare_policy_id  TEXT,
       started_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       ended_at        TIMESTAMPTZ,
@@ -72,6 +73,7 @@ async function runMigrations() {
       created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE sessions ADD COLUMN IF NOT EXISTS charged_usdc NUMERIC DEFAULT 0;
 
     -- ── 요금 정책 ──────────────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS fare_policies (
@@ -145,23 +147,38 @@ async function runMigrations() {
       closed_at       TIMESTAMPTZ
     );
 
-    -- ── 에스크로 잠금 ──────────────────────────────────────────────────────
+    -- ── 에스크로 잠금 (V3 schema — escrowPayoutService.js 와 통일) ──────────
     CREATE TABLE IF NOT EXISTS escrow_locks (
-      id               SERIAL PRIMARY KEY,
-      session_id       TEXT NOT NULL UNIQUE,
-      escrow_id_bytes  TEXT,
-      channel_id       TEXT,
-      case_id          TEXT,
-      user_address     TEXT NOT NULL,
-      seller_address   TEXT NOT NULL,
-      amount_usdc      NUMERIC NOT NULL,
-      hold_deadline    TIMESTAMPTZ,
-      create_tx        TEXT,
-      release_tx       TEXT,
-      state            TEXT NOT NULL DEFAULT 'Held',
-      locked_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      released_at      TIMESTAMPTZ
+      id                  SERIAL PRIMARY KEY,
+      session_id          TEXT NOT NULL UNIQUE,
+      escrow_id_bytes     TEXT NOT NULL,
+      channel_id          TEXT,
+      case_id             TEXT,
+      user_address        TEXT NOT NULL,
+      operator_address    TEXT NOT NULL,
+      user_deposit        NUMERIC DEFAULT 0,
+      operator_deposit    NUMERIC DEFAULT 0,
+      fare_amount         NUMERIC DEFAULT 0,
+      hold_deadline       TIMESTAMPTZ NOT NULL,
+      user_deposit_tx     TEXT,
+      operator_deposit_tx TEXT,
+      settle_tx           TEXT,
+      state               TEXT NOT NULL DEFAULT 'UserDeposited',
+      locked_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      settled_at          TIMESTAMPTZ
     );
+    -- V2→V3 마이그레이션: 구버전 컬럼 ADD IF NOT EXISTS (이미 생성된 DB 대응)
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS operator_address    TEXT;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS user_deposit        NUMERIC DEFAULT 0;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS operator_deposit    NUMERIC DEFAULT 0;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS fare_amount         NUMERIC DEFAULT 0;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS user_deposit_tx     TEXT;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS operator_deposit_tx TEXT;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS settle_tx           TEXT;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS settled_at          TIMESTAMPTZ;
+    -- NOT NULL 없는 구버전 컬럼엔 기본값 채우기
+    UPDATE escrow_locks SET operator_address = user_address WHERE operator_address IS NULL;
+    UPDATE escrow_locks SET escrow_id_bytes  = '' WHERE escrow_id_bytes IS NULL;
 
     -- ── 환불 트랜잭션 (기존 호환) ──────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS refund_transactions (

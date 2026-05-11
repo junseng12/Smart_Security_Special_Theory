@@ -6,7 +6,7 @@ import { motion } from 'framer-motion';
 import { CheckCircle2, Zap, AlertCircle, ArrowLeft, Loader2, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import BottomNav from '@/components/wallet/BottomNav';
-import { approveUsdcForEscrow, userDeposit, getUsdcBalance, ESCROW_V3_ADDRESS, OPERATOR_ADDRESS } from '@/lib/walletUtils';
+import { approveUsdcForEscrow, userDeposit, waitForTx, getUsdcBalance, ESCROW_V3_ADDRESS, OPERATOR_ADDRESS } from '@/lib/walletUtils';
 
 const BACKEND = "https://smartcity-payment-backend-production.up.railway.app";
 
@@ -133,6 +133,8 @@ export default function ScanPay() {
       addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC userDeposit 요청 중...`, "info");
       const txHash = await userDeposit(mmAddress, escrowId, OPERATOR_ADDRESS, service.depositUsdc, holdDeadline);
       setDepositTxHash(txHash);
+      addLog(`⏳ TX 확인 대기 중...`, "info");
+      await waitForTx(txHash, 60000); // 최대 60초 대기
       addLog(`✅ 온체인 예치 완료 — ${txHash.slice(0, 16)}...`, "success");
 
       // 4) 백엔드 deposit 기록
