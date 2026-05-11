@@ -104,6 +104,12 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
        ADD COLUMN IF NOT EXISTS settle_tx           TEXT,
        ADD COLUMN IF NOT EXISTS settled_at          TIMESTAMPTZ`
   );
+  // 구버전 NOT NULL 제약 제거 (seller_address, amount_usdc)
+  await getPool().query(`
+    ALTER TABLE escrow_locks
+      ALTER COLUMN seller_address DROP NOT NULL,
+      ALTER COLUMN amount_usdc    DROP NOT NULL
+  `).catch(() => {}); // 컬럼 없으면 무시
 
   await getPool().query(
     `INSERT INTO escrow_locks
