@@ -90,15 +90,32 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
   const escrowId = toEscrowId(sessionId);
   const opAddr   = operatorAddress || process.env.OPERATOR_ADDRESS;
 
+  // 기존 DB가 구버전 schema(seller_address, amount_usdc)로 생성된 경우 대비
+  // 컬럼 존재 여부 확인 후 안전 INSERT
+  await getPool().query(
+    `ALTER TABLE escrow_locks
+       ADD COLUMN IF NOT EXISTS escrow_id_bytes     TEXT,
+       ADD COLUMN IF NOT EXISTS operator_address    TEXT,
+       ADD COLUMN IF NOT EXISTS user_deposit        NUMERIC DEFAULT 0,
+       ADD COLUMN IF NOT EXISTS operator_deposit    NUMERIC DEFAULT 0,
+       ADD COLUMN IF NOT EXISTS fare_amount         NUMERIC DEFAULT 0,
+       ADD COLUMN IF NOT EXISTS user_deposit_tx     TEXT,
+       ADD COLUMN IF NOT EXISTS operator_deposit_tx TEXT,
+       ADD COLUMN IF NOT EXISTS settle_tx           TEXT,
+       ADD COLUMN IF NOT EXISTS settled_at          TIMESTAMPTZ`
+  );
+
   await getPool().query(
     `INSERT INTO escrow_locks
-     (session_id, escrow_id_bytes, channel_id, user_address, operator_address,
-      user_deposit, hold_deadline, user_deposit_tx, state)
+       (session_id, escrow_id_bytes, channel_id, user_address, operator_address,
+        user_deposit, hold_deadline, user_deposit_tx, state)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'UserDeposited')
      ON CONFLICT (session_id) DO UPDATE
-     SET user_deposit=$6, hold_deadline=$7, user_deposit_tx=$8, state='UserDeposited', locked_at=NOW()`,
-    [sessionId, escrowId, channelId, userAddress, opAddr, depositUsdc,
-     new Date(holdDeadline * 1000), depositTxHash]
+       SET escrow_id_bytes=$2, user_deposit=$6, hold_deadline=$7,
+           user_deposit_tx=$8, operator_address=$5,
+           state='UserDeposited', locked_at=NOW()`,
+    [sessionId, escrowId, channelId, userAddress, opAddr,
+     depositUsdc, new Date(holdDeadline * 1000), depositTxHash]
   );
 
   logger.info('User deposit recorded', { sessionId, depositUsdc, depositTxHash });
