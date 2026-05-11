@@ -27,6 +27,6 @@ module.exports = function errorHandler(err, req, res, next) {
   // Generic 500
   res.status(500).json({
     ok: false,
-    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+    error: err.message, // DEBUG: 임시 에러 노출
   });
 };
