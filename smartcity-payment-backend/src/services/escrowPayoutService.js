@@ -48,6 +48,9 @@ const USDC_ABI = [
 const STATE_LABELS = ['None','UserDeposited','FullyFunded','RefundIssue','Released','Refunded'];
 
 function getOperatorWallet() {
+  if (!process.env.OPERATOR_PRIVATE_KEY) {
+    throw new Error('OPERATOR_PRIVATE_KEY 환경변수가 설정되지 않았습니다. Railway 환경변수를 확인하세요.');
+  }
   const rpc = process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com';
   const provider = new ethers.JsonRpcProvider(rpc);
   return new ethers.Wallet(process.env.OPERATOR_PRIVATE_KEY, provider);
@@ -65,28 +68,17 @@ function toEscrowId(sessionId) {
 }
 
 async function ensureEscrowTable() {
+  // db.js runMigrations()에서 이미 생성 + ALTER 처리됨 — 중복 CREATE 불필요
+  // NOT NULL 컬럼 호환을 위해 operator_address 기본값 보장만 수행
   await getPool().query(`
-    CREATE TABLE IF NOT EXISTS escrow_locks (
-      id                SERIAL PRIMARY KEY,
-      session_id        TEXT NOT NULL UNIQUE,
-      escrow_id_bytes   TEXT NOT NULL,
-      channel_id        TEXT,
-      case_id           TEXT,
-      user_address      TEXT NOT NULL,
-      operator_address  TEXT NOT NULL,
-      user_deposit      NUMERIC DEFAULT 0,
-      operator_deposit  NUMERIC DEFAULT 0,
-      fare_amount       NUMERIC DEFAULT 0,
-      hold_deadline     TIMESTAMPTZ NOT NULL,
-      user_deposit_tx   TEXT,
-      operator_deposit_tx TEXT,
-      settle_tx         TEXT,
-      state             TEXT NOT NULL DEFAULT 'UserDeposited',
-      locked_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      settled_at        TIMESTAMPTZ
-    );
-    CREATE INDEX IF NOT EXISTS idx_escrow_session ON escrow_locks(session_id);
-    CREATE INDEX IF NOT EXISTS idx_escrow_state   ON escrow_locks(state);
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS operator_address    TEXT;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS user_deposit        NUMERIC DEFAULT 0;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS operator_deposit    NUMERIC DEFAULT 0;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS fare_amount         NUMERIC DEFAULT 0;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS user_deposit_tx     TEXT;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS operator_deposit_tx TEXT;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS settle_tx           TEXT;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS settled_at          TIMESTAMPTZ;
   `);
 }
 
