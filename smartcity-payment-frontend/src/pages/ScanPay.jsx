@@ -61,7 +61,54 @@ export default function ScanPay() {
     queryFn: () => base44.entities.Wallet.list(),
   });
   const wallet = wallets[0];
-  const mmAddress = localStorage.getItem("mm_address");
+
+  // ── 실시간 MetaMask 계정 동기화 ──────────────────────────────────────────────
+  // localStorage 캐시 대신 eth_accounts로 항상 현재 선택된 계정 사용
+  const [mmAddress, setMmAddress] = useState(localStorage.getItem("mm_address"));
+  const OPERATOR_ADDR_LOWER = "0x1e506de9edeb3f7c3c1f39edc5c38625944345c7";
+
+  useEffect(() => {
+    const syncAccount = async () => {
+      if (!window.ethereum) return;
+      try {
+        const accounts = await window.ethereum.request({ method: "eth_accounts" });
+        if (!accounts || accounts.length === 0) {
+          setMmAddress(null);
+          return;
+        }
+        const current = accounts[0];
+        // operator 계정이 선택된 경우 → 사용자에게 계정 전환 요청
+        if (current.toLowerCase() === OPERATOR_ADDR_LOWER) {
+          setError("⚠️ MetaMask에서 사용자 계정을 선택해주세요. 현재 운영자 계정(0x1E50...)이 선택되어 있습니다.");
+          setMmAddress(null);
+          return;
+        }
+        if (current !== mmAddress) {
+          setMmAddress(current);
+          localStorage.setItem("mm_address", current);
+        }
+      } catch {}
+    };
+    syncAccount();
+
+    // 계정 전환 감지
+    const handler = (accounts) => {
+      if (!accounts || accounts.length === 0) {
+        setMmAddress(null);
+        return;
+      }
+      const newAddr = accounts[0];
+      if (newAddr.toLowerCase() === OPERATOR_ADDR_LOWER) {
+        setError("⚠️ 사용자 계정으로 전환해주세요. 운영자 계정은 결제에 사용할 수 없습니다.");
+        setMmAddress(null);
+        return;
+      }
+      setMmAddress(newAddr);
+      localStorage.setItem("mm_address", newAddr);
+    };
+    window.ethereum?.on("accountsChanged", handler);
+    return () => window.ethereum?.removeListener("accountsChanged", handler);
+  }, []);
 
   // 앱 재진입 시 세션 복원
   useEffect(() => {
@@ -107,20 +154,45 @@ export default function ScanPay() {
       return;
     }
 
+    // ── MetaMask 현재 계정 실시간 재확인 ─────────────────────────────────────
+    let activeAddress = mmAddress;
+    if (window.ethereum) {
+      try {
+        const accounts = await window.ethereum.request({ method: "eth_accounts" });
+        if (!accounts || accounts.length === 0) {
+          setError("MetaMask 연결이 해제되었습니다. 다시 연결해주세요.");
+          return;
+        }
+        activeAddress = accounts[0];
+        if (activeAddress.toLowerCase() === OPERATOR_ADDR_LOWER) {
+          setError("⚠️ MetaMask에서 사용자 계정을 선택해야 합니다. 현재 운영자 계정이 선택되어 있습니다.\n MetaMask → 계정 전환 후 다시 시도해주세요.");
+          return;
+        }
+        if (activeAddress !== mmAddress) {
+          setMmAddress(activeAddress);
+          localStorage.setItem("mm_address", activeAddress);
+        }
+      } catch (e) {
+        setError("MetaMask 계정 확인 실패: " + e.message);
+        return;
+      }
+    }
+
     setSelectedService(service);
     setStep("scanning");
     setError(null);
     addLog(`QR 스캔: ${service.serviceId}`, "info");
+    addLog(`✅ 사용자 계정: ${activeAddress.slice(0,8)}...${activeAddress.slice(-4)}`, "info");
 
     try {
       // 1) USDC approve
       addLog(`🔓 MetaMask에서 USDC approve 요청 중...`, "info");
-      const approveTxHash = await approveUsdcForEscrow(mmAddress, ESCROW_V3_ADDRESS, service.depositUsdc);
+      const approveTxHash = await approveUsdcForEscrow(activeAddress, ESCROW_V3_ADDRESS, service.depositUsdc);
       addLog(`✅ Approve 완료 — ${approveTxHash.slice(0, 16)}...`, "success");
 
       // 2) 백엔드 세션 시작 (escrowId, holdDeadline 수신)
       const data = await apiCall("/api/v1/sessions/start", "POST", {
-        userAddress: mmAddress,
+        userAddress: activeAddress,
         serviceType: service.id,
         depositUsdc: String(service.depositUsdc),
       });
@@ -131,7 +203,7 @@ export default function ScanPay() {
         ? Math.floor(new Date(data.holdDeadline).getTime() / 1000)
         : Math.floor(Date.now() / 1000) + 3600;
       addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC userDeposit 요청 중...`, "info");
-      const txHash = await userDeposit(mmAddress, escrowId, OPERATOR_ADDRESS, service.depositUsdc, holdDeadline);
+      const txHash = await userDeposit(activeAddress, escrowId, OPERATOR_ADDRESS, service.depositUsdc, holdDeadline);
       setDepositTxHash(txHash);
       addLog(`⏳ TX 확인 대기 중...`, "info");
       await waitForTx(txHash, 60000); // 최대 60초 대기
@@ -141,7 +213,7 @@ export default function ScanPay() {
       try {
         await apiCall(`/api/v1/sessions/${data.sessionId}/deposit`, "POST", {
           channelId:       data.channelId,
-          userAddress:     mmAddress,
+          userAddress:     activeAddress,
           operatorAddress: OPERATOR_ADDRESS,
           depositUsdc:     String(service.depositUsdc),
           holdDeadline,
@@ -162,7 +234,7 @@ export default function ScanPay() {
         amount: service.depositUsdc,
         status: 'active',
         to_address: ESCROW_V3_ADDRESS,
-        from_address: mmAddress,
+        from_address: activeAddress,
         merchant_name: `${service.emoji} ${service.label}`,
         tx_hash: txHash,
         wallet_id: wallet?.id,
@@ -170,10 +242,10 @@ export default function ScanPay() {
       });
 
       // 4) 잔액 갱신
-      const newBal = await getUsdcBalance(mmAddress);
+      const newBal = await getUsdcBalance(activeAddress);
       localStorage.setItem("mm_balance", newBal);
       if (wallet) {
-        await base44.entities.Wallet.update(wallet.id, { balance: newBal });
+        await base44.entities.Wallet.update(wallet.id, { balance: newBal, address: activeAddress });
       }
       queryClient.invalidateQueries({ queryKey: ['transactions'] });
       queryClient.invalidateQueries({ queryKey: ['wallets'] });
@@ -190,6 +262,21 @@ export default function ScanPay() {
     setEnding(true);
     const durationMinutes = Math.max(elapsed / 60, 0.1);
 
+    // 실시간 계정 재확인
+    let currentAddress = mmAddress;
+    if (window.ethereum) {
+      try {
+        const accounts = await window.ethereum.request({ method: "eth_accounts" });
+        if (accounts && accounts.length > 0) {
+          currentAddress = accounts[0];
+          if (currentAddress !== mmAddress) {
+            setMmAddress(currentAddress);
+            localStorage.setItem("mm_address", currentAddress);
+          }
+        }
+      } catch {}
+    }
+
     // 1) charge — fareUsdc + stateHash + nonce + newBalances 수신
     let settlementAmount = 0;
     let chargeData = null;
@@ -198,7 +285,7 @@ export default function ScanPay() {
     try {
       chargeData = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/charge`, "POST", {
         channelId: sessionData.channelId,
-        userAddress: mmAddress,
+        userAddress: currentAddress,
         serviceType: selectedService.id,
         usage: { durationMinutes },
       });
@@ -227,7 +314,7 @@ export default function ScanPay() {
         addLog(`✍️ MetaMask에서 채널 상태 서명 요청 중...`, "info");
         userFinalSig = await window.ethereum.request({
           method: "personal_sign",
-          params: [stateHash, mmAddress],
+          params: [stateHash, currentAddress],
         });
         addLog(`✅ 서명 완료`, "success");
 
@@ -235,7 +322,7 @@ export default function ScanPay() {
         try {
           await apiCall(`/api/v1/sessions/${sessionData.sessionId}/sign`, "POST", {
             channelId: sessionData.channelId,
-            userAddress: mmAddress,
+            userAddress: currentAddress,
             stateHash,
             nonce: sigNonce,
             newBalances: sigNewBalances,
@@ -255,7 +342,7 @@ export default function ScanPay() {
     try {
       const endData = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
         channelId: sessionData.channelId,
-        userAddress: mmAddress,
+        userAddress: currentAddress,
         userFinalSig,
         fareUsdc: String(settlementAmount),
       });
@@ -288,14 +375,14 @@ export default function ScanPay() {
         amount: settlementAmount,
         status: 'completed',
         to_address: selectedService.serviceId,
-        from_address: mmAddress,
+        from_address: currentAddress,
         merchant_name: `${selectedService.emoji} ${selectedService.label}`,
         tx_hash: sessionData.sessionId,
         wallet_id: wallet?.id,
       });
 
       // 4) 잔액 갱신 (온체인 실제 잔액 기준)
-      const newBal = await getUsdcBalance(mmAddress);
+      const newBal = await getUsdcBalance(currentAddress);
       localStorage.setItem("mm_balance", newBal);
       if (wallet) {
         await base44.entities.Wallet.update(wallet.id, { balance: newBal });
@@ -336,6 +423,15 @@ export default function ScanPay() {
       <p className="text-sm text-muted-foreground text-center mb-6">
         QR 결제는 MetaMask 지갑 연결 후 이용할 수 있습니다.<br/>
         테스트넷 USDC가 실제로 전송됩니다.
+      </p>
+      {error && (
+        <div className="w-full max-w-xs mb-4 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-xs text-destructive text-center">
+          {error}
+        </div>
+      )}
+      <p className="text-xs text-muted-foreground text-center mb-4">
+        💡 <strong>MetaMask에서 사용자 계정(운영자 계정 아님)을 선택</strong>하고<br/>
+        홈 화면에서 MetaMask 연결 버튼을 눌러주세요.
       </p>
       <Button onClick={() => navigate('/')} className="rounded-xl px-6">
         홈으로 돌아가기

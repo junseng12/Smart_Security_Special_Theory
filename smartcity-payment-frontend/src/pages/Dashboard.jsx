@@ -138,6 +138,12 @@ export default function Dashboard() {
     setMmError(null);
     try {
       const addr = await connectMetaMask();
+      // ── 운영자 계정 차단 ──────────────────────────────────────────────────
+      if (addr.toLowerCase() === "0x1e506de9edeb3f7c3c1f39edc5c38625944345c7") {
+        setMmError("⚠️ 운영자 계정(0x1E50...)으로는 결제할 수 없습니다.\nMetaMask에서 사용자 계정으로 전환 후 다시 시도해주세요.");
+        setMmConnecting(false);
+        return;
+      }
       const bal = await getUsdcBalance(addr);
       setMmAddress(addr);
       setMmBalance(bal);
