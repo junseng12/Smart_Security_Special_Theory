@@ -175,50 +175,82 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   const dbRes = await getPool().query(
     'SELECT * FROM escrow_locks WHERE session_id=$1', [sessionId]
   );
+  const row = dbRes.rows[0] || null;
 
-  if (!dbRes.rows.length) {
-    // DB 레코드 없음 (userDeposit 미완료) — 스킵
-    logger.warn('No escrow record for settleAndRelease, skipping', { sessionId });
+  // ── OPERATOR_PRIVATE_KEY 없으면 온체인 정산 불가 → DB 기록만 ──
+  if (!process.env.OPERATOR_PRIVATE_KEY || !process.env.ESCROW_CONTRACT_ADDRESS) {
+    logger.warn('Escrow env 미설정 — DB 기록만 처리', { sessionId });
+    if (row) {
+      await getPool().query(
+        `UPDATE escrow_locks SET state='Released', settled_at=NOW(), fare_amount=$2 WHERE session_id=$1`,
+        [sessionId, fareUsdc || '0']
+      );
+    }
+    return { skipped: true, reason: 'env_not_configured', fareUsdc };
+  }
+
+  if (!row) {
+    logger.warn('No escrow record for settleAndRelease — DB only', { sessionId });
     return { skipped: true, reason: 'no_escrow_record' };
   }
 
-  const row = dbRes.rows[0];
+  // ── holdDeadline 대기 ──
+  // DB hold_deadline = 컨트랙트에 등록된 값과 동일해야 함 (백엔드 /start 기준)
   const holdDeadline = new Date(row.hold_deadline).getTime();
   const waitMs = holdDeadline - Date.now();
 
-  // holdDeadline 대기 (최대 5분)
-  if (waitMs > 0 && waitMs < 300000) {
-    logger.info(`Waiting ${Math.ceil(waitMs/1000)}s for holdDeadline...`, { sessionId });
-    await new Promise(r => setTimeout(r, waitMs + 2000));
+  if (waitMs > 0) {
+    const capMs = Math.min(waitMs + 2000, 300000); // 최대 5분 대기
+    logger.info(`HoldDeadline 대기 ${Math.ceil(capMs/1000)}s`, { sessionId });
+    await new Promise(r => setTimeout(r, capMs));
   }
 
-  const wallet  = getOperatorWallet();
-  const escrow  = getEscrowContract(wallet);
+  const wallet   = getOperatorWallet();
+  const escrow   = getEscrowContract(wallet);
   const escrowId = toEscrowId(sessionId);
   const fareWei  = ethers.parseUnits(String(fareUsdc || '0'), 6);
+
+  // ── 온체인 getEscrowStatus로 상태 확인 후 호출 ──
+  let onchainStatus = null;
+  try {
+    const s = await escrow.getEscrowStatus(escrowId);
+    onchainStatus = { state: Number(s[0]), userDeposit: s[1], operatorDeposit: s[2] };
+    logger.info('On-chain escrow status', { sessionId, state: STATE_LABELS[onchainStatus.state] });
+
+    // 이미 Released/Refunded면 스킵
+    if (onchainStatus.state >= 4) {
+      logger.info('Already settled on-chain, skip', { sessionId });
+      return { skipped: true, reason: 'already_settled', onchainState: STATE_LABELS[onchainStatus.state] };
+    }
+    // None이면 userDeposit 안 된 것 → 스킵
+    if (onchainStatus.state === 0) {
+      logger.warn('Escrow state is None on-chain — userDeposit 미완료', { sessionId });
+      return { skipped: true, reason: 'no_onchain_deposit' };
+    }
+  } catch (statusErr) {
+    logger.warn('getEscrowStatus 실패 — 상태 확인 없이 진행', { sessionId, error: statusErr.message });
+  }
 
   logger.info('Calling settleAndRelease on-chain', { sessionId, fareUsdc });
   const tx      = await escrow.settleAndRelease(escrowId, fareWei);
   const receipt = await tx.wait();
 
-  const userDeposit    = parseFloat(row.user_deposit || 0);
-  const operatorDeposit = parseFloat(row.operator_deposit || 0);
-  const refundUsdc     = (userDeposit - parseFloat(fareUsdc || 0)).toFixed(6);
+  const userDep  = parseFloat(row.user_deposit || 0);
+  const opDep    = parseFloat(row.operator_deposit || 0);
+  const refundUsdc = (userDep - parseFloat(fareUsdc || 0)).toFixed(6);
 
   await getPool().query(
-    `UPDATE escrow_locks
-     SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3
-     WHERE session_id=$1`,
+    `UPDATE escrow_locks SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3 WHERE session_id=$1`,
     [sessionId, receipt.hash, fareUsdc]
   );
 
-  logger.info('settleAndRelease complete', { sessionId, txHash: receipt.hash, fareUsdc, refundUsdc });
+  logger.info('settleAndRelease complete ✅', { sessionId, txHash: receipt.hash, fareUsdc, refundUsdc });
   return {
     txHash: receipt.hash,
     escrowId,
     fareUsdc,
     refundUsdc,
-    operatorDepositReturned: String(operatorDeposit),
+    operatorDepositReturned: String(opDep),
     mode: 'settle_and_release_v3',
   };
 }

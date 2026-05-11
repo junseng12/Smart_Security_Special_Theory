@@ -238,9 +238,7 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
 
       escrowResult = await escrowSvc.settleAndRelease({
         sessionId,
-        channelId,
         fareUsdc,
-        holdSeconds: parseInt(process.env.ESCROW_HOLD_SECONDS) || 60,
       });
       logger.info('Escrow V2 settled', { sessionId, ...escrowResult });
     } catch (err) {

@@ -153,6 +153,45 @@ export async function userDeposit(fromAddress, escrowId, operator, amountUsdc, h
   });
 }
 
+
+/**
+ * TX hash가 확정(receipt)될 때까지 대기
+ * @param {string} txHash - 트랜잭션 해시
+ * @param {number} timeoutMs - 최대 대기 시간(ms), 기본 60초
+ */
+export async function waitForTx(txHash, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  const pollInterval = 2000; // 2초마다 폴링
+  while (Date.now() < deadline) {
+    for (const rpc of RPC_LIST) {
+      try {
+        const res = await fetch(rpc, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1,
+            method: "eth_getTransactionReceipt",
+            params: [txHash],
+          }),
+        });
+        const json = await res.json();
+        if (json.result && json.result.blockNumber) {
+          // status 0x0 = reverted
+          if (json.result.status === "0x0") {
+            throw new Error(`TX reverted on-chain: ${txHash}`);
+          }
+          return json.result; // ✅ confirmed
+        }
+      } catch (e) {
+        if (e.message.includes("reverted")) throw e;
+        // RPC 오류 → 다음 RPC로
+      }
+    }
+    await new Promise(r => setTimeout(r, pollInterval));
+  }
+  throw new Error(`TX confirmation timeout after ${timeoutMs}ms: ${txHash}`);
+}
+
 /**
  * localStorage MetaMask 데이터 전체 초기화
  */
