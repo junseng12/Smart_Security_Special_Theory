@@ -16,6 +16,7 @@ const sigMgr = require('../services/signatureManager');
 const sessionMgr = require('../services/sessionManager');
 const { isValidAddress } = require('../services/walletService');
 const { getSettlement } = require('../services/settlementManager');
+const escrowSvc = require('../services/escrowPayoutService');
 const sseClients = require('../utils/sseClients');
 const logger = require('../utils/logger');
 
@@ -74,15 +75,17 @@ router.post('/:id/charge', validate(chargeSchema), async (req, res, next) => {
       ...req.body,
     });
 
-    // SSE 알림 — 서명 필요
-    sseClients.broadcast(req.body.userAddress, {
-      event: 'sign_required',
-      sessionId: req.params.id,
-      channelId: req.body.channelId,
-      requestId: result.signatureRequest.requestId,
-      stateHash: result.signatureRequest.stateHash,
-      fareUsdc:  result.fare.fareUsdc,
-    });
+    // SSE 알림 — 서명 필요 (signatureRequest가 있을 때만)
+    if (result.signatureRequest?.stateHash) {
+      sseClients.broadcast(req.body.userAddress, {
+        event: 'sign_required',
+        sessionId: req.params.id,
+        channelId: req.body.channelId,
+        stateHash: result.signatureRequest.stateHash,
+        nonce:     result.signatureRequest.nonce,
+        fareUsdc:  result.fare.fareUsdc,
+      });
+    }
 
     res.json({ ok: true, data: result });
   } catch (err) { next(err); }
@@ -119,14 +122,19 @@ const endSchema = Joi.object({
   channelId:    Joi.string().required(),
   userAddress:  ethAddress().required(),
   userFinalSig: Joi.string().required(),
+  fareUsdc:     Joi.string().optional(),   // charge에서 받은 요금 직접 전달
   adjustment:   Joi.object({ creditUsdc: usdcAmount() }).optional(),
 });
 
 router.post('/:id/end', validate(endSchema), async (req, res, next) => {
   try {
     const result = await orchestrator.endSessionAndSettle({
-      sessionId: req.params.id,
-      ...req.body,
+      sessionId:    req.params.id,
+      channelId:    req.body.channelId,
+      userAddress:  req.body.userAddress,
+      userFinalSig: req.body.userFinalSig,
+      fareUsdc:     req.body.fareUsdc,      // ★ charge 요금 직접 전달
+      adjustment:   req.body.adjustment,
     });
 
     sseClients.broadcast(req.body.userAddress, {
@@ -136,6 +144,46 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
     });
 
     res.json({ ok: true, data: result });
+  } catch (err) { next(err); }
+});
+
+// ── POST /sessions/:id/deposit — 프론트 buyerDeposit 완료 후 DB 기록 ────────────
+router.post('/:id/deposit', async (req, res, next) => {
+  try {
+    const { channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash } = req.body;
+
+    // 1) DB에 사용자 예치 기록
+    const result = await escrowSvc.recordUserDeposit({
+      sessionId:       req.params.id,
+      channelId,
+      userAddress,
+      operatorAddress: operatorAddress || process.env.OPERATOR_ADDRESS,
+      depositUsdc,
+      holdDeadline,
+      depositTxHash,
+    });
+
+    // 2) operator 보증금 자동 예치 (비동기 — 실패해도 세션 진행)
+    const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
+    if (canEscrow) {
+      const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '1.0'; // 기본 보증금
+      escrowSvc.operatorDeposit(req.params.id, opDepositUsdc).then(r => {
+        // 성공 로그는 서비스 내부에서 처리
+      }).catch(err => {
+        const logger = require('../utils/logger');
+        logger.warn('Operator deposit failed (non-fatal)', { sessionId: req.params.id, error: err.message });
+      });
+    }
+
+    res.json({ ok: true, data: result });
+  } catch (err) { next(err); }
+});
+
+// ── GET /sessions/:id/escrow-id — 프론트 buyerDeposit 호출 전 escrowId 조회 ─────
+router.get('/:id/escrow-id', async (req, res, next) => {
+  try {
+    const escrowId = escrowSvc.toEscrowId(req.params.id);
+    res.json({ ok: true, data: { escrowId, sessionId: req.params.id } });
   } catch (err) { next(err); }
 });
 

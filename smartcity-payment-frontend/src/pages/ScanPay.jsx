@@ -6,12 +6,9 @@ import { motion } from 'framer-motion';
 import { CheckCircle2, Zap, AlertCircle, ArrowLeft, Loader2, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import BottomNav from '@/components/wallet/BottomNav';
-import { sendUsdcOnChain, getUsdcBalance } from '@/lib/walletUtils';
+import { approveUsdcForEscrow, userDeposit, getUsdcBalance, ESCROW_V3_ADDRESS, OPERATOR_ADDRESS } from '@/lib/walletUtils';
 
 const BACKEND = "https://smartcity-payment-backend-production.up.railway.app";
-// 결제 수취 주소 (서비스 운영자 에스크로 주소 — 테스트넷)
-// 운영자 지갑이 아닌 SmartCityEscrow 컨트랙트 주소
-const ESCROW_ADDRESS = "0xf6B7d5c6C7a907D906419125B9dD2EeeCb26De3c";
 
 async function apiCall(path, method = "GET", body = null) {
   const res = await fetch(`${BACKEND}${path}`, {
@@ -116,18 +113,41 @@ export default function ScanPay() {
     addLog(`QR 스캔: ${service.serviceId}`, "info");
 
     try {
-      // 1) 실제 온체인 USDC 예치 (MetaMask 서명)
-      addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC 예치 승인 요청 중...`, "info");
-      const txHash = await sendUsdcOnChain(mmAddress, ESCROW_ADDRESS, service.depositUsdc);
-      setDepositTxHash(txHash);
-      addLog(`✅ 온체인 예치 완료 — ${txHash.slice(0, 16)}...`, "success");
+      // 1) USDC approve
+      addLog(`🔓 MetaMask에서 USDC approve 요청 중...`, "info");
+      const approveTxHash = await approveUsdcForEscrow(mmAddress, ESCROW_V3_ADDRESS, service.depositUsdc);
+      addLog(`✅ Approve 완료 — ${approveTxHash.slice(0, 16)}...`, "success");
 
-      // 2) 백엔드 세션 시작
+      // 2) 백엔드 세션 시작 (escrowId, holdDeadline 수신)
       const data = await apiCall("/api/v1/sessions/start", "POST", {
         userAddress: mmAddress,
         serviceType: service.id,
         depositUsdc: String(service.depositUsdc),
       });
+
+      // 3) 에스크로 V3 userDeposit 온체인 호출
+      const escrowId = data.escrowId || data.sessionId;
+      const holdDeadline = data.holdDeadline
+        ? Math.floor(new Date(data.holdDeadline).getTime() / 1000)
+        : Math.floor(Date.now() / 1000) + 3600;
+      addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC userDeposit 요청 중...`, "info");
+      const txHash = await userDeposit(mmAddress, escrowId, OPERATOR_ADDRESS, service.depositUsdc, holdDeadline);
+      setDepositTxHash(txHash);
+      addLog(`✅ 온체인 예치 완료 — ${txHash.slice(0, 16)}...`, "success");
+
+      // 4) 백엔드 deposit 기록
+      try {
+        await apiCall(`/api/v1/sessions/${data.sessionId}/deposit`, "POST", {
+          channelId:       data.channelId,
+          userAddress:     mmAddress,
+          operatorAddress: OPERATOR_ADDRESS,
+          depositUsdc:     String(service.depositUsdc),
+          holdDeadline,
+          depositTxHash:   txHash,
+        });
+      } catch (e) {
+        addLog(`⚠️ deposit 기록 실패 (계속 진행): ${e.message}`, "error");
+      }
 
       const now = Date.now();
       startedAtRef.current = now;
@@ -135,13 +155,11 @@ export default function ScanPay() {
       saveSession(service, data, now, txHash);
       setStep("active");
       addLog(`✅ 세션 시작 — ${data.sessionId?.slice(0, 12)}...`, "success");
-
-      // 3) DB 기록
       await base44.entities.Transaction.create({
         type: 'session_start',
         amount: service.depositUsdc,
         status: 'active',
-        to_address: ESCROW_ADDRESS,
+        to_address: ESCROW_V3_ADDRESS,
         from_address: mmAddress,
         merchant_name: `${service.emoji} ${service.label}`,
         tx_hash: txHash,
@@ -170,31 +188,89 @@ export default function ScanPay() {
     setEnding(true);
     const durationMinutes = Math.max(elapsed / 60, 0.1);
 
-    // 1) charge (실패해도 계속)
+    // 1) charge — fareUsdc + stateHash + nonce + newBalances 수신
     let settlementAmount = 0;
+    let chargeData = null;
+    let userFinalSig = "0xmock_signature_for_demo";
+
     try {
-      const chargeData = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/charge`, "POST", {
+      chargeData = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/charge`, "POST", {
         channelId: sessionData.channelId,
         userAddress: mmAddress,
         serviceType: selectedService.id,
         usage: { durationMinutes },
       });
-      settlementAmount = parseFloat(chargeData.fare?.fareUsdc || "0");
-      setFareInfo(chargeData.fare);
-      addLog(`💰 요금 계산: ${chargeData.fare?.fareUsdc} USDC`, "success");
+      const rawFare =
+        chargeData.fare_amount ??
+        chargeData.fare?.fareUsdc ??
+        chargeData.fareUsdc ??
+        "0";
+      settlementAmount = parseFloat(rawFare);
+      setFareInfo(chargeData.fare ?? { fareUsdc: rawFare });
+      addLog(`💰 요금 계산: ${rawFare} USDC`, "success");
     } catch (e) {
       addLog(`⚠️ 요금 계산 실패 (계속 진행): ${e.message}`, "error");
     }
 
-    // 2) 백엔드 세션 종료
+    // 2) MetaMask 실서명 (stateHash가 있을 때만)
+    // signatureRequest 안에 stateHash가 있음 (백엔드 charge 응답 구조 맞춤)
+    const stateHash = chargeData?.signatureRequest?.stateHash
+                   ?? chargeData?.stateHash
+                   ?? chargeData?.state_hash
+                   ?? null;
+    const sigNonce       = chargeData?.signatureRequest?.nonce       ?? chargeData?.nonce;
+    const sigNewBalances = chargeData?.signatureRequest?.newBalances  ?? chargeData?.newBalances;
+    if (stateHash && window.ethereum) {
+      try {
+        addLog(`✍️ MetaMask에서 채널 상태 서명 요청 중...`, "info");
+        userFinalSig = await window.ethereum.request({
+          method: "personal_sign",
+          params: [stateHash, mmAddress],
+        });
+        addLog(`✅ 서명 완료`, "success");
+
+        // 3) /sign API — 채널 state 서명 확정
+        try {
+          await apiCall(`/api/v1/sessions/${sessionData.sessionId}/sign`, "POST", {
+            channelId: sessionData.channelId,
+            userAddress: mmAddress,
+            stateHash,
+            nonce: sigNonce,
+            newBalances: sigNewBalances,
+            userSig: userFinalSig,
+          });
+          addLog(`🔏 채널 상태 서명 확정`, "success");
+        } catch (e) {
+          addLog(`⚠️ /sign API 실패 (계속 진행): ${e.message}`, "error");
+        }
+      } catch (e) {
+        addLog(`⚠️ MetaMask 서명 거부 — mock 서명으로 진행`, "error");
+        userFinalSig = "0xmock_signature_for_demo";
+      }
+    }
+
+    // 4) 백엔드 세션 종료 — 실서명 + fareUsdc 전달
     try {
       const endData = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
         channelId: sessionData.channelId,
         userAddress: mmAddress,
-        userFinalSig: "0xmock_signature_for_demo",
+        userFinalSig,
+        fareUsdc: String(settlementAmount),
       });
       addLog(`🏁 백엔드 세션 종료 완료`, "success");
-      // 에스크로 온체인 정산 결과 표시
+
+      // 요금 우선순위: 1) escrow_locks.fare_amount, 2) settlements.operator_earn_usdc, 3) chargeData
+      const settledFare =
+        endData?.fare_amount ??
+        endData?.settlement?.operator_earn_usdc ??
+        endData?.escrow?.fareUsdc ??
+        null;
+      if (settledFare !== null && parseFloat(settledFare) > 0) {
+        settlementAmount = parseFloat(settledFare);
+        setFareInfo(prev => ({ ...(prev ?? {}), fareUsdc: String(settledFare) }));
+        addLog(`✅ 최종 정산 요금: ${settledFare} USDC`, "success");
+      }
+
       if (endData?.escrow?.txHash) {
         addLog(`🔐 에스크로 잠금 완료 → ${endData.escrow.txHash.slice(0,14)}...`, "success");
         addLog(`⏳ ${Math.round((new Date(endData.escrow.holdDeadline) - Date.now()) / 1000)}초 후 서비스 제공자에게 자동 정산`, "info");
@@ -216,10 +292,9 @@ export default function ScanPay() {
         wallet_id: wallet?.id,
       });
 
-      // 4) 잔액 갱신 (온체인 실제 잔액 기준 - 에스크로 예치분 제외 잔액)
+      // 4) 잔액 갱신 (온체인 실제 잔액 기준)
       const newBal = await getUsdcBalance(mmAddress);
       localStorage.setItem("mm_balance", newBal);
-      addLog(`💳 현재 지갑 잔액: ${newBal.toFixed(2)} USDC`, "info");
       if (wallet) {
         await base44.entities.Wallet.update(wallet.id, { balance: newBal });
       }

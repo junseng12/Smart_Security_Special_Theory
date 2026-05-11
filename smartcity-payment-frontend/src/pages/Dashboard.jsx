@@ -34,14 +34,12 @@ export default function Dashboard() {
     base44.auth.me().then(setUser).catch(() => {});
   }, []);
 
-  // MetaMask 실제 연결 상태 확인 (앱 로드 시 + 계정 변경 감지)
   useEffect(() => {
     const syncMetaMask = async () => {
       const actualAddr = await getConnectedMetaMaskAddress();
       const storedAddr = localStorage.getItem("mm_address");
 
       if (!actualAddr) {
-        // MetaMask에서 실제로 연결 해제된 경우 → localStorage 초기화
         if (storedAddr) {
           localStorage.removeItem("mm_address");
           localStorage.removeItem("mm_balance");
@@ -49,14 +47,12 @@ export default function Dashboard() {
         setMmAddress(null);
         setMmBalance(null);
       } else if (actualAddr.toLowerCase() === storedAddr?.toLowerCase()) {
-        // 연결된 주소가 동일 → 복원
         setMmAddress(actualAddr);
         getUsdcBalance(actualAddr).then(bal => {
           setMmBalance(bal);
           localStorage.setItem("mm_balance", bal);
         }).catch(() => {});
       } else {
-        // 주소가 바뀐 경우 → 초기화
         localStorage.removeItem("mm_address");
         localStorage.removeItem("mm_balance");
         setMmAddress(null);
@@ -66,16 +62,13 @@ export default function Dashboard() {
 
     syncMetaMask();
 
-    // MetaMask 계정 변경 이벤트 감지
     if (window.ethereum) {
       const onAccountsChanged = (accounts) => {
         if (!accounts || accounts.length === 0) {
-          // MetaMask에서 연결 해제
           clearMetaMaskStorage();
           setMmAddress(null);
           setMmBalance(null);
         } else if (accounts[0].toLowerCase() !== mmAddress?.toLowerCase()) {
-          // 계정 전환 → 초기화 (재연결 필요)
           clearMetaMaskStorage();
           setMmAddress(null);
           setMmBalance(null);
@@ -174,7 +167,7 @@ export default function Dashboard() {
 
   const handleLogout = () => {
     clearMetaMaskStorage();
-    base44.auth.logout('/');
+    base44.auth.logout(window.location.href);
   };
 
   // 경과 시간 포맷
