@@ -135,7 +135,11 @@ async function calculateFare({ sessionId, serviceType, usage }) {
     }
 
   } else if (policy.type === 'energy_based') {
-    const kwh = Math.max(0, usage.energyKwh || 0);
+    let kwh = Math.max(0, usage.energyKwh || 0);
+    // energyKwh 없이 durationMinutes만 넘어올 경우 → 7kW 충전기 기준 변환 (7kW * 분/60)
+    if (!kwh && usage.durationMinutes) {
+      kwh = (7 * Math.max(0, usage.durationMinutes)) / 60;
+    }
     baseFare = kwh * policy.ratePerKwh;
     if (policy.sessionFee > 0) {
       adjustments.push({ type: 'session_fee', amount: policy.sessionFee });
