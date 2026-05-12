@@ -214,13 +214,13 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
       // finalState.balances.operator는 wei 단위 → 소수점 변환
       let fareUsdc = '0';
 
-      // 우선순위 0: 프론트에서 직접 전달한 fareUsdc (charge 응답값, 0보다 클 때)
+      // 우선순위 0: 프론트에서 직접 전달한 fareUsdc
       if (passedFareUsdc && parseFloat(passedFareUsdc) > 0) {
         fareUsdc = String(passedFareUsdc);
         logger.info('fareUsdc from request body', { sessionId, fareUsdc });
       }
-      // 우선순위 0-b: sessions.charged_usdc (charge API가 업데이트한 값)
-      else {
+      // 우선순위 0-b: sessions.charged_usdc
+      if (!fareUsdc || parseFloat(fareUsdc) === 0) {
         const chargedRow = await require('./db').getPool().query(
           'SELECT charged_usdc FROM sessions WHERE id=$1', [sessionId]
         ).then(r => r.rows[0]).catch(() => null);
@@ -234,35 +234,32 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
         const escrowLock = await require('./db').getPool().query(
           'SELECT fare_amount FROM escrow_locks WHERE session_id=$1', [sessionId]
         ).then(r => r.rows[0]).catch(() => null);
-
         if (escrowLock?.fare_amount && parseFloat(escrowLock.fare_amount) > 0) {
           fareUsdc = String(escrowLock.fare_amount);
           logger.info('fareUsdc from escrow_locks', { sessionId, fareUsdc });
         }
-        // 우선순위 2: Perun finalState.balances.operator (wei → USDC)
-        if (!fareUsdc || parseFloat(fareUsdc) === 0) {
-          if (finalState?.balances?.operator && BigInt(finalState.balances.operator) > 0n) {
-            const { ethers } = require('ethers');
-            fareUsdc = ethers.formatUnits(BigInt(finalState.balances.operator), 6);
-            logger.info('fareUsdc from finalState', { sessionId, fareUsdc });
-          }
+      }
+      // 우선순위 2: finalState.balances.operator (wei → USDC)
+      if (!fareUsdc || parseFloat(fareUsdc) === 0) {
+        if (finalState?.balances?.operator && BigInt(finalState.balances.operator) > 0n) {
+          const { ethers } = require('ethers');
+          fareUsdc = ethers.formatUnits(BigInt(finalState.balances.operator), 6);
+          logger.info('fareUsdc from finalState', { sessionId, fareUsdc });
         }
-        // 우선순위 3: settlements
-        if (!fareUsdc || parseFloat(fareUsdc) === 0) {
-          if (settlement?.operator_earn_usdc && parseFloat(settlement.operator_earn_usdc) > 0) {
-            fareUsdc = String(settlement.operator_earn_usdc);
-            logger.info('fareUsdc from settlements', { sessionId, fareUsdc });
-          }
+      }
+      // 우선순위 3: settlements
+      if (!fareUsdc || parseFloat(fareUsdc) === 0) {
+        if (settlement?.operator_earn_usdc && parseFloat(settlement.operator_earn_usdc) > 0) {
+          fareUsdc = String(settlement.operator_earn_usdc);
+          logger.info('fareUsdc from settlements', { sessionId, fareUsdc });
         }
-      logger.info('Final fareUsdc for settleAndRelease', { sessionId, fareUsdc });
+      }
 
-      escrowResult = await escrowSvc.settleAndRelease({
-        sessionId,
-        fareUsdc,
-      });
-      logger.info('Escrow V2 settled', { sessionId, ...escrowResult });
+      logger.info('Final fareUsdc for settleAndRelease', { sessionId, fareUsdc });
+      escrowResult = await escrowSvc.settleAndRelease({ sessionId, fareUsdc });
+      logger.info('Escrow settled', { sessionId, ...escrowResult });
     } catch (err) {
-      logger.warn('Escrow V2 settle failed (non-fatal)', { sessionId, error: err.message });
+      logger.warn('Escrow settle failed (non-fatal)', { sessionId, error: err.message });
     }
   }
 
