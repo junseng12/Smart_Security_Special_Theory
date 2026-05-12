@@ -112,7 +112,10 @@ async function getSettlement(sessionId) {
   return result.rows[0] || null;
 }
 
+const getLatestSettlement = getSettlement;
+
 module.exports = {
   recordSettlement,
   getSettlement,
+  getLatestSettlement,
 };
