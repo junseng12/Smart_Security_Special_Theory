@@ -312,6 +312,7 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
 
   // ── 온체인 getEscrowStatus로 상태 확인 후 호출 ──
   let onchainStatus = null;
+  let proceedToSettle = true;  // 기본: 진행
   try {
     const s = await escrow.getEscrowStatus(escrowId);
     onchainStatus = { state: Number(s[0]), userDeposit: s[1], operatorDeposit: s[2] };
@@ -322,23 +323,20 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
       logger.info('Already settled on-chain, skip', { sessionId });
       return { skipped: true, reason: 'already_settled', onchainState: STATE_LABELS[onchainStatus.state] };
     }
-    // None이면 userDeposit 안 된 것
+    // FullyFunded(2) 또는 UserDeposited(1)만 settleAndRelease 가능
+    // None(0) 또는 기타 → 온체인 call은 revert될 것이므로 스킵
     if (onchainStatus.state === 0) {
-      // DEMO 모드: 실제 온체인 deposit 없어도 DB 기록만 처리
-      const isDemoMode = process.env.DEMO_MODE === 'true' || process.env.NODE_ENV === 'development';
-      if (isDemoMode) {
-        logger.warn('Escrow state=None (데모 모드) — DB 기록만 처리', { sessionId });
-        await getPool().query(
-          `UPDATE escrow_locks SET state='Released', settled_at=NOW(), fare_amount=$2 WHERE session_id=$1`,
-          [sessionId, fareUsdc || '0']
-        ).catch(() => {});
-        return { skipped: false, demo: true, reason: 'demo_mode_db_only', fareUsdc };
-      }
-      logger.warn('Escrow state is None on-chain — userDeposit 미완료', { sessionId });
-      return { skipped: true, reason: 'no_onchain_deposit' };
+      logger.warn('Escrow state=None — userDeposit 온체인 미완료, DB 기록만 처리', { sessionId });
+      await getPool().query(
+        `UPDATE escrow_locks SET state='Released', settled_at=NOW(), fare_amount=$2 WHERE session_id=$1`,
+        [sessionId, fareUsdc || '0']
+      ).catch(() => {});
+      return { skipped: false, dbOnly: true, reason: 'no_onchain_deposit_db_recorded', fareUsdc };
     }
   } catch (statusErr) {
-    logger.warn('getEscrowStatus 실패 — 상태 확인 없이 진행', { sessionId, error: statusErr.message });
+    // RPC 오류 or 컨트랙트 미배포 → 그냥 진행 시도
+    logger.warn('getEscrowStatus 실패 — settle 시도 진행', { sessionId, error: statusErr.message });
+    proceedToSettle = true;
   }
 
   logger.info('Calling settleAndRelease on-chain', { sessionId, fareUsdc });
