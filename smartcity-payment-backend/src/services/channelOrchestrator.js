@@ -46,7 +46,7 @@ async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsd
   const escrowIdBytes = ethers.keccak256(ethers.toUtf8Bytes(newSession.id));
 
   // holdDeadline: 백엔드 ESCROW_HOLD_SECONDS 기준 (프론트와 동기화)
-  const holdSeconds  = parseInt(process.env.ESCROW_HOLD_SECONDS || '3600');
+  const holdSeconds  = parseInt(process.env.ESCROW_HOLD_SECONDS || '300'); // 기본 5분 (operatorDeposit TX 확정 여유)
   const holdDeadline = Math.floor(Date.now() / 1000) + holdSeconds;
 
   return {
