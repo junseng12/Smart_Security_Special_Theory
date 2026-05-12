@@ -257,9 +257,10 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
 
       logger.info('Final fareUsdc for settleAndRelease', { sessionId, fareUsdc });
       escrowResult = await escrowSvc.settleAndRelease({ sessionId, fareUsdc });
-      logger.info('Escrow settled', { sessionId, ...escrowResult });
+      logger.info('Escrow settled', { sessionId, result: JSON.stringify(escrowResult) });
     } catch (err) {
-      logger.warn('Escrow settle failed (non-fatal)', { sessionId, error: err.message });
+      logger.error('Escrow settle failed', { sessionId, error: err.message, stack: err.stack?.slice(0,300) });
+      escrowResult = { skipped: true, reason: err.message };
     }
   }
 
