@@ -196,9 +196,16 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
     userAddress,
   });
 
-  // 4. 에스크로 V2 정산 — 요금→seller, 잔금→buyer
+  // 4. 에스크로 V3 정산 — 요금→operator, 잔금→user
   let escrowResult = null;
   const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
+  if (!canEscrow) {
+    logger.error('⚠️  ESCROW env 미설정 — 온체인 정산 불가! Railway 환경변수를 확인하세요.', {
+      hasContract: !!process.env.ESCROW_CONTRACT_ADDRESS,
+      hasPrivKey: !!process.env.OPERATOR_PRIVATE_KEY,
+    });
+    escrowResult = { skipped: true, reason: 'env_not_configured — Railway에 ESCROW_CONTRACT_ADDRESS, OPERATOR_PRIVATE_KEY 설정 필요' };
+  }
   if (canEscrow) {
     try {
       // 최종 요금 조회
@@ -207,13 +214,23 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
       // finalState.balances.operator는 wei 단위 → 소수점 변환
       let fareUsdc = '0';
 
-      // 우선순위 0: 프론트에서 직접 전달한 fareUsdc (charge 응답값)
+      // 우선순위 0: 프론트에서 직접 전달한 fareUsdc (charge 응답값, 0보다 클 때)
       if (passedFareUsdc && parseFloat(passedFareUsdc) > 0) {
         fareUsdc = String(passedFareUsdc);
         logger.info('fareUsdc from request body', { sessionId, fareUsdc });
       }
-      // 우선순위 1: escrow_locks.fare_amount
+      // 우선순위 0-b: sessions.charged_usdc (charge API가 업데이트한 값)
       else {
+        const chargedRow = await require('./db').getPool().query(
+          'SELECT charged_usdc FROM sessions WHERE id=$1', [sessionId]
+        ).then(r => r.rows[0]).catch(() => null);
+        if (chargedRow?.charged_usdc && parseFloat(chargedRow.charged_usdc) > 0) {
+          fareUsdc = String(chargedRow.charged_usdc);
+          logger.info('fareUsdc from sessions.charged_usdc', { sessionId, fareUsdc });
+        }
+      }
+      // 우선순위 1: escrow_locks.fare_amount
+      if (!fareUsdc || parseFloat(fareUsdc) === 0) {
         const escrowLock = await require('./db').getPool().query(
           'SELECT fare_amount FROM escrow_locks WHERE session_id=$1', [sessionId]
         ).then(r => r.rows[0]).catch(() => null);
@@ -223,17 +240,20 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
           logger.info('fareUsdc from escrow_locks', { sessionId, fareUsdc });
         }
         // 우선순위 2: Perun finalState.balances.operator (wei → USDC)
-        else if (finalState?.balances?.operator && BigInt(finalState.balances.operator) > 0n) {
-          const { ethers } = require('ethers');
-          fareUsdc = ethers.formatUnits(BigInt(finalState.balances.operator), 6);
-          logger.info('fareUsdc from finalState', { sessionId, fareUsdc });
+        if (!fareUsdc || parseFloat(fareUsdc) === 0) {
+          if (finalState?.balances?.operator && BigInt(finalState.balances.operator) > 0n) {
+            const { ethers } = require('ethers');
+            fareUsdc = ethers.formatUnits(BigInt(finalState.balances.operator), 6);
+            logger.info('fareUsdc from finalState', { sessionId, fareUsdc });
+          }
         }
         // 우선순위 3: settlements
-        else if (settlement?.operator_earn_usdc && parseFloat(settlement.operator_earn_usdc) > 0) {
-          fareUsdc = String(settlement.operator_earn_usdc);
-          logger.info('fareUsdc from settlements', { sessionId, fareUsdc });
+        if (!fareUsdc || parseFloat(fareUsdc) === 0) {
+          if (settlement?.operator_earn_usdc && parseFloat(settlement.operator_earn_usdc) > 0) {
+            fareUsdc = String(settlement.operator_earn_usdc);
+            logger.info('fareUsdc from settlements', { sessionId, fareUsdc });
+          }
         }
-      }
       logger.info('Final fareUsdc for settleAndRelease', { sessionId, fareUsdc });
 
       escrowResult = await escrowSvc.settleAndRelease({
