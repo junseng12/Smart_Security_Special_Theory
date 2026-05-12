@@ -6,7 +6,14 @@ import { motion } from 'framer-motion';
 import { CheckCircle2, Zap, AlertCircle, ArrowLeft, Loader2, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import BottomNav from '@/components/wallet/BottomNav';
-import { approveUsdcForEscrow, userDeposit, waitForTx, getUsdcBalance, ESCROW_V3_ADDRESS, OPERATOR_ADDRESS } from '@/lib/walletUtils';
+import {
+  approveAndUserDeposit,
+  waitForTx,
+  personalSign,
+  getUsdcBalance,
+  ESCROW_V3_ADDRESS,
+  OPERATOR_ADDRESS,
+} from '@/lib/walletUtils';
 
 const BACKEND = "https://smartcity-payment-backend-production.up.railway.app";
 
@@ -30,14 +37,11 @@ const SERVICE_TYPES = [
 ];
 
 const SESSION_KEY = "active_session";
-
-function saveSession(service, sessionData, startedAt) {
-  localStorage.setItem(SESSION_KEY, JSON.stringify({ service, sessionData, startedAt }));
+function saveSession(service, sessionData, startedAt, depositTxHash) {
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ service, sessionData, startedAt, depositTxHash }));
 }
-function clearSession() {
-  localStorage.removeItem(SESSION_KEY);
-}
-function loadSession() {
+function clearSession() { localStorage.removeItem(SESSION_KEY); }
+function loadSession()  {
   try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch { return null; }
 }
 
@@ -61,54 +65,7 @@ export default function ScanPay() {
     queryFn: () => base44.entities.Wallet.list(),
   });
   const wallet = wallets[0];
-
-  // ── 실시간 MetaMask 계정 동기화 ──────────────────────────────────────────────
-  // localStorage 캐시 대신 eth_accounts로 항상 현재 선택된 계정 사용
-  const [mmAddress, setMmAddress] = useState(localStorage.getItem("mm_address"));
-  const OPERATOR_ADDR_LOWER = "0x1e506de9edeb3f7c3c1f39edc5c38625944345c7";
-
-  useEffect(() => {
-    const syncAccount = async () => {
-      if (!window.ethereum) return;
-      try {
-        const accounts = await window.ethereum.request({ method: "eth_accounts" });
-        if (!accounts || accounts.length === 0) {
-          setMmAddress(null);
-          return;
-        }
-        const current = accounts[0];
-        // operator 계정이 선택된 경우 → 사용자에게 계정 전환 요청
-        if (current.toLowerCase() === OPERATOR_ADDR_LOWER) {
-          setError("⚠️ MetaMask에서 사용자 계정을 선택해주세요. 현재 운영자 계정(0x1E50...)이 선택되어 있습니다.");
-          setMmAddress(null);
-          return;
-        }
-        if (current !== mmAddress) {
-          setMmAddress(current);
-          localStorage.setItem("mm_address", current);
-        }
-      } catch {}
-    };
-    syncAccount();
-
-    // 계정 전환 감지
-    const handler = (accounts) => {
-      if (!accounts || accounts.length === 0) {
-        setMmAddress(null);
-        return;
-      }
-      const newAddr = accounts[0];
-      if (newAddr.toLowerCase() === OPERATOR_ADDR_LOWER) {
-        setError("⚠️ 사용자 계정으로 전환해주세요. 운영자 계정은 결제에 사용할 수 없습니다.");
-        setMmAddress(null);
-        return;
-      }
-      setMmAddress(newAddr);
-      localStorage.setItem("mm_address", newAddr);
-    };
-    window.ethereum?.on("accountsChanged", handler);
-    return () => window.ethereum?.removeListener("accountsChanged", handler);
-  }, []);
+  const mmAddress = localStorage.getItem("mm_address");
 
   // 앱 재진입 시 세션 복원
   useEffect(() => {
@@ -128,11 +85,9 @@ export default function ScanPay() {
   useEffect(() => {
     if (step === "active") {
       timerRef.current = setInterval(() => {
-        if (startedAtRef.current) {
-          setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
-        } else {
-          setElapsed(e => e + 1);
-        }
+        setElapsed(startedAtRef.current
+          ? Math.floor((Date.now() - startedAtRef.current) / 1000)
+          : e => e + 1);
       }, 1000);
     } else {
       clearInterval(timerRef.current);
@@ -146,111 +101,89 @@ export default function ScanPay() {
   const fmt = (s) =>
     `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 
+  // ── 세션 시작 ──────────────────────────────────────────────────────────────
   const startSession = async (service) => {
-    // ── 세션 중복 차단 ──
     const existingSession = loadSession();
     if (existingSession?.sessionData) {
-      setError(`이미 진행 중인 세션(${existingSession.service?.emoji} ${existingSession.service?.label})이 있습니다. 먼저 종료해주세요.`);
+      setError(`이미 진행 중인 세션(${existingSession.service?.emoji} ${existingSession.service?.label})이 있습니다.`);
       return;
     }
-
-    // ── MetaMask 현재 계정 실시간 재확인 ─────────────────────────────────────
-    let activeAddress = mmAddress;
-    if (window.ethereum) {
-      try {
-        const accounts = await window.ethereum.request({ method: "eth_accounts" });
-        if (!accounts || accounts.length === 0) {
-          setError("MetaMask 연결이 해제되었습니다. 다시 연결해주세요.");
-          return;
-        }
-        activeAddress = accounts[0];
-        if (activeAddress.toLowerCase() === OPERATOR_ADDR_LOWER) {
-          setError("⚠️ MetaMask에서 사용자 계정을 선택해야 합니다. 현재 운영자 계정이 선택되어 있습니다.\n MetaMask → 계정 전환 후 다시 시도해주세요.");
-          return;
-        }
-        if (activeAddress !== mmAddress) {
-          setMmAddress(activeAddress);
-          localStorage.setItem("mm_address", activeAddress);
-        }
-      } catch (e) {
-        setError("MetaMask 계정 확인 실패: " + e.message);
-        return;
-      }
-    }
-
     setSelectedService(service);
     setStep("scanning");
     setError(null);
     addLog(`QR 스캔: ${service.serviceId}`, "info");
-    addLog(`✅ 사용자 계정: ${activeAddress.slice(0,8)}...${activeAddress.slice(-4)}`, "info");
 
     try {
-      // 1) USDC approve
-      addLog(`🔓 MetaMask에서 USDC approve 요청 중...`, "info");
-      const approveTxHash = await approveUsdcForEscrow(activeAddress, ESCROW_V3_ADDRESS, service.depositUsdc);
-      addLog(`✅ Approve 완료 — ${approveTxHash.slice(0, 16)}...`, "success");
-
-      // 2) 백엔드 세션 시작 (escrowId, holdDeadline 수신)
+      // ── STEP 1: 백엔드 세션 시작 → escrowId, holdDeadline 수신 ──
+      addLog("🔄 백엔드 세션 초기화 중...", "info");
       const data = await apiCall("/api/v1/sessions/start", "POST", {
-        userAddress: activeAddress,
+        userAddress: mmAddress,
         serviceType: service.id,
         depositUsdc: String(service.depositUsdc),
       });
 
-      // 3) 에스크로 V3 userDeposit 온체인 호출
-      const escrowId = data.escrowId || data.sessionId;
-      // holdDeadline은 백엔드가 unix seconds 정수로 반환
-      // new Date(seconds)는 1970년을 반환하므로 Number()로 그대로 사용
-      const holdDeadline = data.holdDeadline
-        ? Number(data.holdDeadline)
-        : Math.floor(Date.now() / 1000) + 60;
-      addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC userDeposit 요청 중...`, "info");
-      const txHash = await userDeposit(activeAddress, escrowId, OPERATOR_ADDRESS, service.depositUsdc, holdDeadline);
+      // escrowId: 백엔드에서 keccak256(sessionId) → 0x+64hex
+      const escrowId = data.escrowId;
+      // holdDeadline: 백엔드가 unix seconds 정수로 반환 (new Date() 하면 1970년 됨)
+      const holdDeadline = Number(data.holdDeadline);
+      addLog(`📋 세션 ID: ${data.sessionId?.slice(0, 12)}...`, "info");
+      addLog(`🔑 escrowId: ${escrowId?.slice(0, 18)}...`, "info");
+      addLog(`⏰ holdDeadline: ${new Date(holdDeadline * 1000).toLocaleTimeString()} 까지`, "info");
+
+      // ── STEP 2: approve + userDeposit (MetaMask 2회 서명) ──
+      addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC approve 승인 요청...`, "info");
+      const txHash = await approveAndUserDeposit(
+        mmAddress,
+        escrowId,
+        OPERATOR_ADDRESS,
+        service.depositUsdc,
+        holdDeadline
+      );
       setDepositTxHash(txHash);
-      addLog(`⏳ TX 확인 대기 중...`, "info");
-      await waitForTx(txHash, 60000); // 최대 60초 대기
+      addLog(`⏳ userDeposit TX 확정 대기 중...`, "info");
+      await waitForTx(txHash, 90000);
       addLog(`✅ 온체인 예치 완료 — ${txHash.slice(0, 16)}...`, "success");
 
-      // 4) 백엔드 deposit 기록
-      try {
-        await apiCall(`/api/v1/sessions/${data.sessionId}/deposit`, "POST", {
-          channelId:       data.channelId,
-          userAddress:     activeAddress,
-          operatorAddress: OPERATOR_ADDRESS,
-          depositUsdc:     String(service.depositUsdc),
-          holdDeadline,
-          depositTxHash:   txHash,
-        });
-      } catch (e) {
-        addLog(`⚠️ deposit 기록 실패 (계속 진행): ${e.message}`, "error");
-      }
+      // ── STEP 3: 백엔드에 deposit 기록 → operatorDeposit 자동 트리거 ──
+      await apiCall(`/api/v1/sessions/${data.sessionId}/deposit`, "POST", {
+        channelId:       data.channelId,
+        userAddress:     mmAddress,
+        operatorAddress: OPERATOR_ADDRESS,
+        depositUsdc:     String(service.depositUsdc),
+        holdDeadline,
+        depositTxHash:   txHash,
+      });
+      addLog(`🏦 에스크로 기록 완료 — 운영자 보증금 자동 예치 진행 중...`, "info");
 
+      // ── STEP 4: 세션 활성화 ──
       const now = Date.now();
       startedAtRef.current = now;
       setSessionData(data);
       saveSession(service, data, now, txHash);
       setStep("active");
-      addLog(`✅ 세션 시작 — ${data.sessionId?.slice(0, 12)}...`, "success");
-      await base44.entities.Transaction.create({
-        type: 'session_start',
-        amount: service.depositUsdc,
-        status: 'active',
-        to_address: ESCROW_V3_ADDRESS,
-        from_address: activeAddress,
-        merchant_name: `${service.emoji} ${service.label}`,
-        tx_hash: txHash,
-        wallet_id: wallet?.id,
-        note: `세션ID: ${data.sessionId}`,
-      });
+      addLog(`✅ 세션 시작!`, "success");
 
-      // 4) 잔액 갱신
-      const newBal = await getUsdcBalance(activeAddress);
-      localStorage.setItem("mm_balance", newBal);
-      if (wallet) {
-        await base44.entities.Wallet.update(wallet.id, { balance: newBal, address: activeAddress });
+      // ── STEP 5: DB + 잔액 갱신 ──
+      try {
+        await base44.entities.Transaction.create({
+          type: 'session_start',
+          amount: service.depositUsdc,
+          status: 'active',
+          to_address: ESCROW_V3_ADDRESS,
+          from_address: mmAddress,
+          merchant_name: `${service.emoji} ${service.label}`,
+          tx_hash: txHash,
+          wallet_id: wallet?.id,
+          note: `세션ID: ${data.sessionId}`,
+        });
+        const newBal = await getUsdcBalance(mmAddress);
+        localStorage.setItem("mm_balance", newBal);
+        if (wallet) await base44.entities.Wallet.update(wallet.id, { balance: newBal });
+        queryClient.invalidateQueries({ queryKey: ['transactions'] });
+        queryClient.invalidateQueries({ queryKey: ['wallets'] });
+      } catch (e) {
+        addLog(`⚠️ DB 기록 오류 (무시): ${e.message}`, "error");
       }
-      queryClient.invalidateQueries({ queryKey: ['transactions'] });
-      queryClient.invalidateQueries({ queryKey: ['wallets'] });
 
     } catch (e) {
       setError(e.message);
@@ -259,136 +192,75 @@ export default function ScanPay() {
     }
   };
 
+  // ── 세션 종료 ──────────────────────────────────────────────────────────────
   const endSession = async () => {
     if (ending) return;
     setEnding(true);
-    const durationMinutes = Math.max(elapsed / 60, 0.1);
+    const durationMinutes = Math.max(elapsed / 60, 1/60); // 최소 1초
 
-    // 실시간 계정 재확인
-    let currentAddress = mmAddress;
-    if (window.ethereum) {
-      try {
-        const accounts = await window.ethereum.request({ method: "eth_accounts" });
-        if (accounts && accounts.length > 0) {
-          currentAddress = accounts[0];
-          if (currentAddress !== mmAddress) {
-            setMmAddress(currentAddress);
-            localStorage.setItem("mm_address", currentAddress);
-          }
-        }
-      } catch {}
-    }
-
-    // 1) charge — fareUsdc + stateHash + nonce + newBalances 수신
-    let settlementAmount = 0;
-    let chargeData = null;
-    let userFinalSig = "0xmock_signature_for_demo";
-
+    // ── STEP 1: charge → fareUsdc + stateHash 수신 ──
+    let fareUsdc = 0;
+    let stateHash = null;
+    let operatorSig = null;
     try {
-      chargeData = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/charge`, "POST", {
+      const chargeData = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/charge`, "POST", {
         channelId: sessionData.channelId,
-        userAddress: currentAddress,
+        userAddress: mmAddress,
         serviceType: selectedService.id,
         usage: { durationMinutes },
       });
-      const rawFare =
-        chargeData.fare_amount ??
-        chargeData.fare?.fareUsdc ??
-        chargeData.fareUsdc ??
-        "0";
-      settlementAmount = parseFloat(rawFare);
-      setFareInfo(chargeData.fare ?? { fareUsdc: rawFare });
-      addLog(`💰 요금 계산: ${rawFare} USDC`, "success");
+      fareUsdc = parseFloat(chargeData.fare?.fareUsdc || "0");
+      stateHash = chargeData.stateHash;
+      operatorSig = chargeData.operatorSig;
+      setFareInfo(chargeData.fare);
+      addLog(`💰 요금: ${chargeData.fare?.fareUsdc || "0"} USDC`, "success");
     } catch (e) {
       addLog(`⚠️ 요금 계산 실패 (계속 진행): ${e.message}`, "error");
     }
 
-    // 2) MetaMask 실서명 (stateHash가 있을 때만)
-    // signatureRequest 안에 stateHash가 있음 (백엔드 charge 응답 구조 맞춤)
-    const stateHash = chargeData?.signatureRequest?.stateHash
-                   ?? chargeData?.stateHash
-                   ?? chargeData?.state_hash
-                   ?? null;
-    const sigNonce       = chargeData?.signatureRequest?.nonce       ?? chargeData?.nonce;
-    const sigNewBalances = chargeData?.signatureRequest?.newBalances  ?? chargeData?.newBalances;
-    if (stateHash && window.ethereum) {
+    // ── STEP 2: MetaMask personal_sign (stateHash 있을 때만) ──
+    let userFinalSig = "0xmock_signature_for_demo";
+    if (stateHash) {
       try {
-        addLog(`✍️ MetaMask에서 채널 상태 서명 요청 중...`, "info");
-        userFinalSig = await window.ethereum.request({
-          method: "personal_sign",
-          params: [stateHash, currentAddress],
-        });
-        addLog(`✅ 서명 완료`, "success");
-
-        // 3) /sign API — 채널 state 서명 확정
-        try {
-          await apiCall(`/api/v1/sessions/${sessionData.sessionId}/sign`, "POST", {
-            channelId: sessionData.channelId,
-            userAddress: currentAddress,
-            stateHash,
-            nonce: sigNonce,
-            newBalances: sigNewBalances,
-            userSig: userFinalSig,
-          });
-          addLog(`🔏 채널 상태 서명 확정`, "success");
-        } catch (e) {
-          addLog(`⚠️ /sign API 실패 (계속 진행): ${e.message}`, "error");
-        }
+        addLog("✍️ MetaMask에서 정산 서명 요청...", "info");
+        userFinalSig = await personalSign(mmAddress, stateHash);
+        addLog("✅ 서명 완료", "success");
       } catch (e) {
-        addLog(`⚠️ MetaMask 서명 거부 — mock 서명으로 진행`, "error");
-        userFinalSig = "0xmock_signature_for_demo";
+        addLog(`⚠️ 서명 취소/실패, mock 서명 사용: ${e.message}`, "error");
       }
     }
 
-    // 4) 백엔드 세션 종료 — 실서명 + fareUsdc 전달
+    // ── STEP 3: 세션 종료 (settleAndRelease 트리거) ──
     try {
       const endData = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
-        channelId: sessionData.channelId,
-        userAddress: currentAddress,
+        channelId:    sessionData.channelId,
+        userAddress:  mmAddress,
         userFinalSig,
-        fareUsdc: String(settlementAmount),
+        fareUsdc:     fareUsdc.toFixed(6),
       });
-      addLog(`🏁 백엔드 세션 종료 완료`, "success");
-
-      // 요금 우선순위: 1) escrow_locks.fare_amount, 2) settlements.operator_earn_usdc, 3) chargeData
-      const settledFare =
-        endData?.fare_amount ??
-        endData?.settlement?.operator_earn_usdc ??
-        endData?.escrow?.fareUsdc ??
-        null;
-      if (settledFare !== null && parseFloat(settledFare) > 0) {
-        settlementAmount = parseFloat(settledFare);
-        setFareInfo(prev => ({ ...(prev ?? {}), fareUsdc: String(settledFare) }));
-        addLog(`✅ 최종 정산 요금: ${settledFare} USDC`, "success");
-      }
-
-      if (endData?.escrow?.txHash) {
-        addLog(`🔐 에스크로 잠금 완료 → ${endData.escrow.txHash.slice(0,14)}...`, "success");
-        addLog(`⏳ ${Math.round((new Date(endData.escrow.holdDeadline) - Date.now()) / 1000)}초 후 서비스 제공자에게 자동 정산`, "info");
+      addLog(`🏁 정산 완료 — TX: ${endData?.txHash?.slice(0, 16) || "처리 중"}...`, "success");
+      if (endData?.txHash) {
+        addLog(`🔗 https://sepolia.basescan.org/tx/${endData.txHash}`, "success");
       }
     } catch (e) {
-      addLog(`⚠️ 세션 종료 API 오류 (로컬 정산 진행): ${e.message}`, "error");
+      addLog(`⚠️ 세션 종료 API 오류: ${e.message}`, "error");
     }
 
-    // 3) DB 기록
+    // ── STEP 4: DB 기록 + 잔액 갱신 ──
     try {
       await base44.entities.Transaction.create({
         type: 'payment',
-        amount: settlementAmount,
+        amount: fareUsdc,
         status: 'completed',
         to_address: selectedService.serviceId,
-        from_address: currentAddress,
+        from_address: mmAddress,
         merchant_name: `${selectedService.emoji} ${selectedService.label}`,
         tx_hash: sessionData.sessionId,
         wallet_id: wallet?.id,
       });
-
-      // 4) 잔액 갱신 (온체인 실제 잔액 기준)
-      const newBal = await getUsdcBalance(currentAddress);
+      const newBal = await getUsdcBalance(mmAddress);
       localStorage.setItem("mm_balance", newBal);
-      if (wallet) {
-        await base44.entities.Wallet.update(wallet.id, { balance: newBal });
-      }
+      if (wallet) await base44.entities.Wallet.update(wallet.id, { balance: newBal });
       queryClient.invalidateQueries({ queryKey: ['transactions'] });
       queryClient.invalidateQueries({ queryKey: ['wallets'] });
     } catch (e) {
@@ -398,7 +270,6 @@ export default function ScanPay() {
     clearSession();
     setEnding(false);
     setStep("ended");
-    addLog(`🏁 정산 완료!`, "success");
   };
 
   const reset = () => {
@@ -426,18 +297,7 @@ export default function ScanPay() {
         QR 결제는 MetaMask 지갑 연결 후 이용할 수 있습니다.<br/>
         테스트넷 USDC가 실제로 전송됩니다.
       </p>
-      {error && (
-        <div className="w-full max-w-xs mb-4 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-xs text-destructive text-center">
-          {error}
-        </div>
-      )}
-      <p className="text-xs text-muted-foreground text-center mb-4">
-        💡 <strong>MetaMask에서 사용자 계정(운영자 계정 아님)을 선택</strong>하고<br/>
-        홈 화면에서 MetaMask 연결 버튼을 눌러주세요.
-      </p>
-      <Button onClick={() => navigate('/')} className="rounded-xl px-6">
-        홈으로 돌아가기
-      </Button>
+      <Button onClick={() => navigate('/')} className="rounded-xl px-6">홈으로 돌아가기</Button>
       <BottomNav />
     </div>
   );
@@ -452,182 +312,168 @@ export default function ScanPay() {
           </button>
           <div>
             <h1 className="text-lg font-semibold">QR 결제</h1>
-            <p className="text-xs text-muted-foreground">서비스를 선택하면 MetaMask에서 USDC 전송이 요청됩니다</p>
+            <p className="text-xs text-muted-foreground">서비스 선택 → MetaMask 2회 서명 (approve + deposit)</p>
           </div>
         </div>
         {error && (
           <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
-            className="flex items-center gap-2 p-3 rounded-xl bg-destructive/10 border border-destructive/20 text-destructive text-sm mb-4">
-            <AlertCircle className="w-4 h-4 shrink-0" />{error}
+            className="flex items-start gap-2 p-3 mb-4 rounded-xl bg-destructive/10 border border-destructive/20 text-destructive text-sm">
+            <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />{error}
           </motion.div>
         )}
-        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">서비스 유형</p>
-        <div className="grid grid-cols-2 gap-3 mb-6">
-          {SERVICE_TYPES.map(s => (
-            <motion.button key={s.id} whileTap={{ scale: 0.97 }} onClick={() => startSession(s)}
-              className="flex flex-col items-start gap-2 p-4 rounded-2xl bg-card border border-border hover:border-primary/30 hover:bg-primary/5 transition-all text-left">
-              <span className="text-3xl">{s.emoji}</span>
-              <div>
-                <p className="text-sm font-semibold">{s.label}</p>
-                <p className="text-[10px] text-primary mt-0.5">{s.rate}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">예치금 {s.depositUsdc} USDC</p>
-                <p className="text-[10px] text-muted-foreground font-mono mt-0.5 truncate">{s.serviceId}</p>
+        <div className="space-y-3">
+          {SERVICE_TYPES.map(service => (
+            <motion.button
+              key={service.id}
+              whileTap={{ scale: 0.97 }}
+              onClick={() => startSession(service)}
+              className="w-full flex items-center justify-between p-4 rounded-2xl bg-card border border-border hover:border-primary/40 hover:bg-primary/5 transition-all text-left"
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">{service.emoji}</span>
+                <div>
+                  <p className="font-semibold text-sm">{service.label}</p>
+                  <p className="text-xs text-muted-foreground">{service.rate}</p>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="text-sm font-bold text-primary">{service.depositUsdc} USDC</p>
+                <p className="text-[10px] text-muted-foreground">보증금</p>
               </div>
             </motion.button>
           ))}
         </div>
-        <div className="rounded-2xl bg-secondary/30 border border-border p-4">
-          <div className="flex items-center gap-2 mb-1.5">
-            <Zap className="w-3.5 h-3.5 text-primary" />
-            <span className="text-xs font-semibold text-primary">Perun State Channel</span>
-          </div>
-          <p className="text-xs text-muted-foreground">선택 즉시 MetaMask에서 USDC 예치 트랜잭션이 요청됩니다. 가스비(ETH)가 필요합니다.</p>
-        </div>
+        <p className="text-[11px] text-muted-foreground text-center mt-6 leading-relaxed">
+          SmartCityEscrowV3 · Base Sepolia<br/>
+          {ESCROW_V3_ADDRESS.slice(0,10)}...{ESCROW_V3_ADDRESS.slice(-8)}
+        </p>
       </div>
       <BottomNav />
     </div>
   );
 
-  // ── SCANNING ────────────────────────────────────────────────────────────────
+  // ── SCANNING ─────────────────────────────────────────────────────────────────
   if (step === "scanning") return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center px-6">
-      <motion.div animate={{ scale: [1, 1.06, 1] }} transition={{ repeat: Infinity, duration: 1.4 }}
-        className="w-24 h-24 rounded-full bg-primary/10 border-2 border-primary/30 flex items-center justify-center mb-6">
-        <span className="text-4xl">{selectedService?.emoji}</span>
-      </motion.div>
-      <p className="text-lg font-semibold mb-1">채널 오픈 중...</p>
-      <p className="text-sm text-muted-foreground mb-1">{selectedService?.label}</p>
-      <p className="text-xs font-mono text-muted-foreground mb-4">{selectedService?.serviceId}</p>
-      <p className="text-xs text-yellow-400 text-center mb-6">MetaMask 팝업에서 USDC 전송을 승인해주세요</p>
-      <div className="flex gap-1.5">
-        {[0, 1, 2].map(i => (
-          <motion.div key={i} className="w-2 h-2 rounded-full bg-primary"
-            animate={{ opacity: [0.3, 1, 0.3] }}
-            transition={{ repeat: Infinity, duration: 1, delay: i * 0.2 }} />
+    <div className="min-h-screen bg-background flex flex-col items-center justify-center px-6 pb-24">
+      <Loader2 className="w-10 h-10 text-primary animate-spin mb-4" />
+      <h2 className="text-base font-semibold mb-1">에스크로 예치 처리 중</h2>
+      <p className="text-xs text-muted-foreground text-center mb-4">
+        MetaMask에서 approve → userDeposit 순서로 서명해주세요
+      </p>
+      <div className="w-full max-w-sm space-y-1 mt-2">
+        {log.map((l, i) => (
+          <div key={i} className={`text-[11px] px-3 py-1.5 rounded-lg ${
+            l.type === "success" ? "bg-green-500/10 text-green-600"
+            : l.type === "error" ? "bg-destructive/10 text-destructive"
+            : "bg-secondary text-muted-foreground"
+          }`}>
+            <span className="text-muted-foreground/60 mr-1">{l.ts}</span>{l.msg}
+          </div>
         ))}
       </div>
     </div>
   );
 
-  // ── ACTIVE ──────────────────────────────────────────────────────────────────
+  // ── ACTIVE ───────────────────────────────────────────────────────────────────
   if (step === "active") return (
     <div className="min-h-screen bg-background pb-24">
       <div className="max-w-md mx-auto px-4 pt-6">
-        <div className="flex items-center justify-between mb-6">
-          <div>
-            <p className="text-xs text-muted-foreground">진행 중</p>
-            <h1 className="text-lg font-semibold">{selectedService?.emoji} {selectedService?.label}</h1>
-          </div>
-          <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-primary/10 border border-primary/20">
-            <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-            <span className="text-xs font-medium text-primary">LIVE</span>
-          </div>
-        </div>
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
-          className="rounded-2xl bg-card border border-border p-8 text-center mb-4">
-          <p className="text-xs text-muted-foreground mb-2">경과 시간</p>
-          <p className="text-6xl font-bold font-mono tracking-tight text-primary">{fmt(elapsed)}</p>
-          <p className="text-xs text-muted-foreground mt-3">
-            예치금 {selectedService?.depositUsdc} USDC · Perun 채널 활성
-          </p>
-          {fareInfo && (
-            <p className="text-sm font-semibold text-primary mt-2">현재 요금: {fareInfo.fareUsdc} USDC</p>
-          )}
-        </motion.div>
-        <div className="rounded-2xl bg-secondary/30 border border-border p-4 mb-4 space-y-2 text-sm font-mono">
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">세션 ID</span>
-            <span className="text-primary text-xs">{sessionData?.sessionId?.slice(0, 16)}...</span>
-          </div>
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">채널 ID</span>
-            <span className="text-xs">{sessionData?.channelId ? sessionData.channelId.slice(0, 16) + "..." : "생성 중..."}</span>
-          </div>
-          {depositTxHash && (
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">예치 Tx</span>
-              <a
-                href={`https://sepolia.basescan.org/tx/${depositTxHash}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-primary hover:underline"
-              >
-                {depositTxHash.slice(0, 14)}...↗
-              </a>
+        <div className="flex items-center gap-3 mb-6">
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              <h1 className="text-base font-semibold">
+                {selectedService?.emoji} {selectedService?.label} 이용 중
+              </h1>
             </div>
-          )}
-          <div className="flex justify-between">
-            <span className="text-muted-foreground">네트워크</span>
-            <span className="text-primary text-xs">Base Sepolia</span>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              에스크로 예치 완료 · Perun 채널 활성
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-2xl font-bold font-mono text-primary">{fmt(elapsed)}</p>
+            <p className="text-[10px] text-muted-foreground">경과 시간</p>
           </div>
         </div>
+
+        {/* 세션 정보 */}
+        <div className="rounded-2xl bg-card border border-border p-4 mb-4 space-y-2">
+          <div className="flex justify-between text-xs">
+            <span className="text-muted-foreground">세션 ID</span>
+            <span className="font-mono">{sessionData?.sessionId?.slice(0, 16)}...</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-muted-foreground">예치 TX</span>
+            <a href={`https://sepolia.basescan.org/tx/${depositTxHash}`} target="_blank" rel="noreferrer"
+              className="font-mono text-primary hover:underline">
+              {depositTxHash?.slice(0, 16)}...
+            </a>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-muted-foreground">보증금</span>
+            <span className="font-semibold text-primary">{selectedService?.depositUsdc} USDC</span>
+          </div>
+          <div className="flex justify-between text-xs">
+            <span className="text-muted-foreground">요금</span>
+            <span>{selectedService?.rate}</span>
+          </div>
+        </div>
+
+        {/* 로그 */}
+        <div className="rounded-2xl bg-card border border-border p-3 mb-4 max-h-36 overflow-y-auto space-y-1">
+          {log.map((l, i) => (
+            <div key={i} className={`text-[10px] ${
+              l.type === "success" ? "text-green-600"
+              : l.type === "error" ? "text-destructive"
+              : "text-muted-foreground"
+            }`}>
+              <span className="opacity-50 mr-1">{l.ts}</span>{l.msg}
+            </div>
+          ))}
+        </div>
+
         <Button
           onClick={endSession}
           disabled={ending}
-          className="w-full h-12 rounded-xl bg-destructive hover:bg-destructive/90 disabled:opacity-60"
+          className="w-full rounded-2xl py-6 text-base font-semibold bg-destructive hover:bg-destructive/90"
         >
-          {ending ? (
-            <><Loader2 className="w-4 h-4 animate-spin mr-2" />정산 중...</>
-          ) : "🏁 세션 종료"}
+          {ending ? <><Loader2 className="w-5 h-5 mr-2 animate-spin" />정산 처리 중...</>
+                  : "🏁 서비스 종료 & 정산"}
         </Button>
-        {log.length > 0 && (
-          <div className="rounded-2xl bg-card border border-border p-4 mt-4">
-            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider mb-3">로그</p>
-            <div className="space-y-1.5 max-h-36 overflow-y-auto">
-              {log.map((l, i) => (
-                <div key={i} className={`flex gap-2 text-xs ${
-                  l.type === "error" ? "text-destructive" :
-                  l.type === "success" ? "text-primary" : "text-muted-foreground"
-                }`}>
-                  <span className="text-muted-foreground/50 shrink-0">{l.ts}</span>
-                  <span>{l.msg}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
       <BottomNav />
     </div>
   );
 
-  // ── ENDED ───────────────────────────────────────────────────────────────────
+  // ── ENDED ────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-background flex flex-col items-center justify-center px-6 pb-24">
-      <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', stiffness: 200, damping: 15 }}
-        className="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center mb-6">
-        <CheckCircle2 className="w-10 h-10 text-primary" />
+      <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring" }}>
+        <CheckCircle2 className="w-16 h-16 text-green-500 mb-4" />
       </motion.div>
-      <h2 className="text-2xl font-bold mb-2">정산 완료!</h2>
-      <p className="text-sm text-muted-foreground mb-6 text-center">
-        {selectedService?.label} · {fmt(elapsed)} 이용 · Perun 채널 정산
-      </p>
-      <div className="w-full max-w-sm rounded-2xl bg-card border border-border p-5 mb-8 space-y-3 text-sm font-mono">
-        {[
-          ["세션 ID", sessionData?.sessionId?.slice(0, 16) + "..."],
-          ["채널 ID", sessionData?.channelId ? sessionData.channelId.slice(0, 16) + "..." : "-"],
-          ["이용 시간", fmt(elapsed)],
-          ["요금", fareInfo?.fareUsdc ? `${fareInfo.fareUsdc} USDC` : "-"],
-          ["체인", "Base Sepolia"],
-          ["정산", "Perun State Channel"],
-        ].map(([k, v]) => (
-          <div key={k} className="flex justify-between border-b border-border pb-2 last:border-0 last:pb-0">
-            <span className="text-muted-foreground">{k}</span>
-            <span className={k === "정산" || k === "요금" ? "text-primary" : "text-foreground"}>{v}</span>
+      <h2 className="text-lg font-semibold mb-1">정산 완료</h2>
+      {fareInfo && (
+        <div className="w-full max-w-sm rounded-2xl bg-card border border-border p-4 my-4 space-y-2">
+          <div className="flex justify-between text-sm">
+            <span className="text-muted-foreground">이용 요금</span>
+            <span className="font-bold text-primary">{fareInfo.fareUsdc} USDC</span>
           </div>
+          <div className="flex justify-between text-sm">
+            <span className="text-muted-foreground">이용 시간</span>
+            <span>{fareInfo.durationMin} 분</span>
+          </div>
+        </div>
+      )}
+      <div className="w-full max-w-sm space-y-1 mb-6">
+        {log.slice(-5).map((l, i) => (
+          <div key={i} className={`text-[11px] px-3 py-1.5 rounded-lg ${
+            l.type === "success" ? "bg-green-500/10 text-green-600"
+            : l.type === "error" ? "bg-destructive/10 text-destructive"
+            : "bg-secondary text-muted-foreground"
+          }`}>{l.msg}</div>
         ))}
       </div>
-      {depositTxHash && (
-        <a
-          href={`https://sepolia.basescan.org/tx/${depositTxHash}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-xs text-primary hover:underline mb-6"
-        >
-          BaseScan에서 예치 트랜잭션 보기 ↗
-        </a>
-      )}
-      <Button onClick={reset} className="rounded-xl px-8 bg-primary hover:bg-primary/90">새 결제 시작</Button>
+      <Button onClick={reset} className="rounded-xl px-8">새 결제 시작</Button>
       <BottomNav />
     </div>
   );

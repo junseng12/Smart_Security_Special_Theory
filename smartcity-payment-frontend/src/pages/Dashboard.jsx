@@ -8,7 +8,7 @@ import BottomNav from '@/components/wallet/BottomNav';
 import BalanceCard from '@/components/wallet/BalanceCard';
 import QuickActions from '@/components/wallet/QuickActions';
 import RecentTransactions from '@/components/wallet/RecentTransactions';
-import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage, getConnectedMetaMaskAddress } from '@/lib/walletUtils';
+import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage } from '@/lib/walletUtils';
 
 const SESSION_KEY = "active_session";
 
@@ -23,7 +23,7 @@ export default function Dashboard() {
   const navigate = useNavigate();
   const [showBalance, setShowBalance] = useState(true);
   const [user, setUser] = useState(null);
-  const [mmAddress, setMmAddress] = useState(null);
+  const [mmAddress, setMmAddress] = useState(() => localStorage.getItem("mm_address") || null);
   const [mmBalance, setMmBalance] = useState(null);
   const [mmConnecting, setMmConnecting] = useState(false);
   const [mmError, setMmError] = useState(null);
@@ -32,51 +32,6 @@ export default function Dashboard() {
 
   useEffect(() => {
     base44.auth.me().then(setUser).catch(() => {});
-  }, []);
-
-  useEffect(() => {
-    const syncMetaMask = async () => {
-      const actualAddr = await getConnectedMetaMaskAddress();
-      const storedAddr = localStorage.getItem("mm_address");
-
-      if (!actualAddr) {
-        if (storedAddr) {
-          localStorage.removeItem("mm_address");
-          localStorage.removeItem("mm_balance");
-        }
-        setMmAddress(null);
-        setMmBalance(null);
-      } else if (actualAddr.toLowerCase() === storedAddr?.toLowerCase()) {
-        setMmAddress(actualAddr);
-        getUsdcBalance(actualAddr).then(bal => {
-          setMmBalance(bal);
-          localStorage.setItem("mm_balance", bal);
-        }).catch(() => {});
-      } else {
-        localStorage.removeItem("mm_address");
-        localStorage.removeItem("mm_balance");
-        setMmAddress(null);
-        setMmBalance(null);
-      }
-    };
-
-    syncMetaMask();
-
-    if (window.ethereum) {
-      const onAccountsChanged = (accounts) => {
-        if (!accounts || accounts.length === 0) {
-          clearMetaMaskStorage();
-          setMmAddress(null);
-          setMmBalance(null);
-        } else if (accounts[0].toLowerCase() !== mmAddress?.toLowerCase()) {
-          clearMetaMaskStorage();
-          setMmAddress(null);
-          setMmBalance(null);
-        }
-      };
-      window.ethereum.on('accountsChanged', onAccountsChanged);
-      return () => window.ethereum.removeListener('accountsChanged', onAccountsChanged);
-    }
   }, []);
 
   // 진행 중인 세션 복원
@@ -101,11 +56,11 @@ export default function Dashboard() {
   // 10초마다 잔액 갱신 (MetaMask 연결 시에만)
   useEffect(() => {
     if (!mmAddress) return;
-    const interval = setInterval(async () => {
+    const interval = setInterval(async () => { // 30초마다 잔액 갱신
       const bal = await getUsdcBalance(mmAddress);
       setMmBalance(bal);
       localStorage.setItem("mm_balance", bal);
-    }, 10000);
+    }, 30000);
     return () => clearInterval(interval);
   }, [mmAddress]);
 
@@ -137,13 +92,7 @@ export default function Dashboard() {
     setMmConnecting(true);
     setMmError(null);
     try {
-      const addr = await connectMetaMask();
-      // ── 운영자 계정 차단 ──────────────────────────────────────────────────
-      if (addr.toLowerCase() === "0x1e506de9edeb3f7c3c1f39edc5c38625944345c7") {
-        setMmError("⚠️ 운영자 계정(0x1E50...)으로는 결제할 수 없습니다.\nMetaMask에서 사용자 계정으로 전환 후 다시 시도해주세요.");
-        setMmConnecting(false);
-        return;
-      }
+      const addr = await connectMetaMask(); // operator 계정은 walletUtils 내부에서 차단됨
       const bal = await getUsdcBalance(addr);
       setMmAddress(addr);
       setMmBalance(bal);
@@ -173,7 +122,7 @@ export default function Dashboard() {
 
   const handleLogout = () => {
     clearMetaMaskStorage();
-    base44.auth.logout(window.location.href);
+    base44.auth.logout('/');
   };
 
   // 경과 시간 포맷
