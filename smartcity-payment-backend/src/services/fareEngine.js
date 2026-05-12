@@ -1,211 +1,187 @@
 /**
- * Fare Engine
+ * Fare Engine v2
  * ─────────────────────────────────────────────────────────────────────────────
- * 사용량 → 요금 계산 + 정책 버전 관리
+ * Perun 마이크로 페이먼트 원칙:
+ *   - 이용 시작 즉시 1초 단위로 요금 누적
+ *   - 무료 시간 없음 (freeMinutes = 0)
+ *   - 매 N분 증분(incremental)으로 호출됨 → 각 호출마다 독립 계산
+ *   - 요금 = durationMinutes * ratePerMinute (소수점 분 포함)
+ *   - 최소 요금 = ratePerMinute (1분 요금, 즉 1초라도 과금)
  *
- * 정책은 DB에 버전별로 저장되어, 분쟁 시 "어떤 정책으로 과금했는지" 증명 가능.
+ * policyId 체계:
+ *   "active_{serviceType}" 고정 → ON CONFLICT DO UPDATE 항상 작동
+ *   version 변경해도 같은 key라서 기존 레코드 덮어씀
  */
 
 const logger = require('../utils/logger');
 const { getPool } = require('./db');
 
-// ── 기본 요금 정책 (v1) ───────────────────────────────────────────────────────
-const DEFAULT_POLICIES = {
+// ── 현재 활성 정책 (Perun 마이크로 페이먼트 기준) ─────────────────────────────
+const ACTIVE_POLICIES = {
   bicycle: {
-    version: 'v2.0',          // freeMinutes 제거 — 1분부터 과금
+    version: 'v3.0',
     type: 'time_based',
-    ratePerMinute: '0.01',    // USDC per minute
-    minimumFare: '0.01',      // 최소 1분 요금 (freeMinutes 없으므로 1분=0.01)
-    cap: '5.00',
-    freeMinutes: 0,           // 무료 시간 없음
-    penaltyLate: '1.00',
+    ratePerMinute: 0.01,     // USDC/분 (숫자형 — 문자열 파싱 버그 방지)
+    cap: 5.00,
+    freeMinutes: 0,          // 무료 없음
+    penaltyLate: 1.00,
   },
   ev_charging: {
-    version: 'v2.0',
+    version: 'v3.0',
     type: 'energy_based',
-    ratePerKwh: '0.25',
-    minimumFare: '0.25',      // 최소 1kWh 기준
-    cap: '20.00',
-    sessionFee: '0.00',       // 기본료 없음
+    ratePerKwh: 0.25,
+    cap: 20.00,
+    freeMinutes: 0,
+    sessionFee: 0.00,
   },
   parking: {
-    version: 'v2.0',
+    version: 'v3.0',
     type: 'time_based',
-    ratePerMinute: '0.02',
-    minimumFare: '0.02',      // 최소 1분 요금
-    cap: '10.00',
-    freeMinutes: 0,           // 무료 시간 없음
-    penaltyOverstay: '2.00',
+    ratePerMinute: 0.02,
+    cap: 10.00,
+    freeMinutes: 0,
+    penaltyOverstay: 2.00,
   },
 };
 
-// ── DB 마이그레이션 ────────────────────────────────────────────────────────────
+// ── DB 테이블 보장 ─────────────────────────────────────────────────────────────
 async function ensureFarePolicyTable() {
   await getPool().query(`
     CREATE TABLE IF NOT EXISTS fare_policies (
-      id          TEXT PRIMARY KEY,
+      id           TEXT PRIMARY KEY,
       service_type TEXT NOT NULL,
-      version     TEXT NOT NULL,
-      policy      JSONB NOT NULL,
-      is_active   BOOLEAN NOT NULL DEFAULT TRUE,
-      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      version      TEXT NOT NULL,
+      policy       JSONB NOT NULL,
+      is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE TABLE IF NOT EXISTS fare_calculations (
-      id            SERIAL PRIMARY KEY,
-      session_id    TEXT NOT NULL,
-      policy_id     TEXT NOT NULL,
+      id             SERIAL PRIMARY KEY,
+      session_id     TEXT NOT NULL,
+      policy_id      TEXT NOT NULL,
       policy_version TEXT NOT NULL,
-      usage_data    JSONB NOT NULL,
-      base_fare     NUMERIC NOT NULL,
-      adjustments   JSONB DEFAULT '[]',
-      final_fare    NUMERIC NOT NULL,
-      calculated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      usage_data     JSONB NOT NULL,
+      base_fare      NUMERIC NOT NULL,
+      adjustments    JSONB DEFAULT '[]',
+      final_fare     NUMERIC NOT NULL,
+      calculated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
-
     CREATE INDEX IF NOT EXISTS idx_fare_calc_session ON fare_calculations(session_id);
   `);
 }
 
-// ── 정책 관리 ─────────────────────────────────────────────────────────────────
-
-/**
- * 현재 활성 정책 조회 (없으면 DEFAULT_POLICIES 사용)
- */
+// ── 정책 조회 (항상 코드 기준, DB는 기록용) ───────────────────────────────────
 async function getActivePolicy(serviceType) {
   await ensureFarePolicyTable();
 
-  const result = await getPool().query(
-    `SELECT * FROM fare_policies
-     WHERE service_type = $1 AND is_active = TRUE
-     ORDER BY created_at DESC LIMIT 1`,
-    [serviceType]
-  );
+  const def = ACTIVE_POLICIES[serviceType];
+  if (!def) throw new Error(`No policy for serviceType: ${serviceType}`);
 
-  if (result.rows.length > 0) {
-    return result.rows[0];
-  }
+  // policyId: "active_{serviceType}" 고정 → version 바뀌어도 항상 같은 key
+  const id = `active_${serviceType}`;
 
-  // 없으면 기본 정책 DB에 저장 후 반환
-  const def = DEFAULT_POLICIES[serviceType];
-  if (!def) throw new Error(`No policy for service type: ${serviceType}`);
-
-  const id = `policy_${serviceType}_${def.version}`;
+  // DB에 UPSERT — 항상 최신 코드 값으로 덮어씀
   await getPool().query(
-    `INSERT INTO fare_policies (id, service_type, version, policy)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (id) DO UPDATE SET policy=EXCLUDED.policy, version=EXCLUDED.version`,
+    `INSERT INTO fare_policies (id, service_type, version, policy, is_active)
+     VALUES ($1, $2, $3, $4, TRUE)
+     ON CONFLICT (id) DO UPDATE
+       SET policy = EXCLUDED.policy,
+           version = EXCLUDED.version,
+           is_active = TRUE`,
     [id, serviceType, def.version, JSON.stringify(def)]
   );
+
+  // 구버전 레코드(v1.0, v2.0) 비활성화
+  await getPool().query(
+    `UPDATE fare_policies SET is_active = FALSE
+     WHERE service_type = $1 AND id != $2`,
+    [serviceType, id]
+  ).catch(() => {});
 
   return { id, service_type: serviceType, version: def.version, policy: def };
 }
 
-// ── 요금 계산 ─────────────────────────────────────────────────────────────────
-
+// ── 요금 계산 (Perun 마이크로 페이먼트 — 증분 호출 기준) ──────────────────────
 /**
- * 사용량 → 요금 계산
- *
  * @param {object} params
  * @param {string} params.sessionId
  * @param {'bicycle'|'ev_charging'|'parking'} params.serviceType
  * @param {object} params.usage
- *   - bicycle/parking: { durationMinutes: number, isLate?: boolean }
- *   - ev_charging:     { energyKwh: number }
- *
- * @returns {{ fareUsdc: string, breakdown: object, policyId: string, policyVersion: string }}
+ *   - time_based:   { durationMinutes: number }  ← 이번 증분 분 (소수점 포함)
+ *   - energy_based: { energyKwh: number }
+ * @returns {{ fareUsdc, breakdown, policyId, policyVersion, durationMin }}
  */
 async function calculateFare({ sessionId, serviceType, usage }) {
-  const policyRecord = await getActivePolicy(serviceType);
-  const policy = policyRecord.policy || policyRecord; // DB row vs default
+  const { policy, id, version } = await getActivePolicy(serviceType);
 
   let baseFare = 0;
   const adjustments = [];
 
-  // ── 서비스별 계산 ──────────────────────────────────────────────────────────
   if (policy.type === 'time_based') {
-    const billableMinutes = Math.max(0, (usage.durationMinutes || 0) - (policy.freeMinutes || 0));
-    baseFare = billableMinutes * parseFloat(policy.ratePerMinute);
+    const minutes = Math.max(0, usage.durationMinutes || 0);
+    // freeMinutes = 0이므로 그냥 전체 시간 과금
+    baseFare = minutes * policy.ratePerMinute;
 
+    // 패널티 (종료 시 한번만 적용)
     if (usage.isLate && policy.penaltyLate) {
-      const penalty = parseFloat(policy.penaltyLate);
-      adjustments.push({ type: 'late_penalty', amount: penalty });
-      baseFare += penalty;
+      adjustments.push({ type: 'late_penalty', amount: policy.penaltyLate });
+      baseFare += policy.penaltyLate;
     }
-
     if (usage.isOverstay && policy.penaltyOverstay) {
       const overstayHours = Math.ceil((usage.overstayMinutes || 0) / 60);
-      const penalty = overstayHours * parseFloat(policy.penaltyOverstay);
+      const penalty = overstayHours * policy.penaltyOverstay;
       adjustments.push({ type: 'overstay_penalty', amount: penalty });
       baseFare += penalty;
     }
+
   } else if (policy.type === 'energy_based') {
-    baseFare = (usage.energyKwh || 0) * parseFloat(policy.ratePerKwh);
-    if (policy.sessionFee) {
-      const fee = parseFloat(policy.sessionFee);
-      adjustments.push({ type: 'session_fee', amount: fee });
-      baseFare += fee;
+    const kwh = Math.max(0, usage.energyKwh || 0);
+    baseFare = kwh * policy.ratePerKwh;
+    if (policy.sessionFee > 0) {
+      adjustments.push({ type: 'session_fee', amount: policy.sessionFee });
+      baseFare += policy.sessionFee;
     }
   }
 
-  // ── 정책 적용 ──────────────────────────────────────────────────────────────
-  // 최소 요금
-  const minimum = parseFloat(policy.minimumFare || 0);
-  if (baseFare < minimum && baseFare > 0) {
-    adjustments.push({ type: 'minimum_fare_applied', amount: minimum - baseFare });
-    baseFare = minimum;
+  // 상한
+  if (baseFare > policy.cap) {
+    adjustments.push({ type: 'cap_applied', originalAmount: baseFare, cappedTo: policy.cap });
+    baseFare = policy.cap;
   }
 
-  // 상한 (cap)
-  const cap = parseFloat(policy.cap || Infinity);
-  if (baseFare > cap) {
-    adjustments.push({ type: 'cap_applied', originalAmount: baseFare, cappedTo: cap });
-    baseFare = cap;
-  }
+  // 소수점 6자리 (USDC 6 decimals)
+  const finalFare = Math.round(baseFare * 1_000_000) / 1_000_000;
 
-  const finalFare = Math.round(baseFare * 1_000_000) / 1_000_000; // 6 decimal
-
-  // ── 기록 ──────────────────────────────────────────────────────────────────
+  // 기록
   await getPool().query(
     `INSERT INTO fare_calculations
      (session_id, policy_id, policy_version, usage_data, base_fare, adjustments, final_fare)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [
-      sessionId,
-      policyRecord.id,
-      policyRecord.version || policy.version,
-      JSON.stringify(usage),
-      finalFare,
-      JSON.stringify(adjustments),
-      finalFare,
-    ]
-  );
+    [sessionId, id, version, JSON.stringify(usage), finalFare, JSON.stringify(adjustments), finalFare]
+  ).catch(() => {});
 
-  logger.info('Fare calculated', { sessionId, serviceType, finalFare, adjustments });
+  logger.info('Fare calculated (incremental)', {
+    sessionId, serviceType,
+    durationMinutes: usage.durationMinutes,
+    finalFare,
+    ratePerMinute: policy.ratePerMinute,
+  });
 
   return {
     fareUsdc: finalFare.toFixed(6),
-    breakdown: { baseFare, adjustments },
-    policyId: policyRecord.id,
-    policyVersion: policyRecord.version || policy.version,
+    breakdown: { baseFare, adjustments, ratePerMinute: policy.ratePerMinute },
+    policyId: id,
+    policyVersion: version,
+    durationMin: (usage.durationMinutes || 0).toFixed(4),
   };
 }
 
-/**
- * 세션의 최신 요금 계산 기록 조회
- */
 async function getLatestFareRecord(sessionId) {
   const result = await getPool().query(
-    `SELECT * FROM fare_calculations
-     WHERE session_id = $1
-     ORDER BY calculated_at DESC LIMIT 1`,
+    `SELECT * FROM fare_calculations WHERE session_id = $1 ORDER BY calculated_at DESC LIMIT 1`,
     [sessionId]
   );
   return result.rows[0] || null;
 }
 
-module.exports = {
-  calculateFare,
-  getActivePolicy,
-  getLatestFareRecord,
-};
+module.exports = { calculateFare, getActivePolicy, getLatestFareRecord };

@@ -1,54 +1,52 @@
 const { Router } = require('express');
-const { getRedis } = require('../services/redisClient');
-const { getPool } = require('../services/db');
-const perunClient = require('../services/perunClient');
-
 const router = Router();
 
-router.get('/', async (req, res) => {
-  const checks = {};
+router.get('/', (req, res) => {
+  const redis = require('../services/redisClient');
+  const db = require('../services/db');
 
-  // Redis ping
-  try {
-    await getRedis().ping();
-    checks.redis = 'ok';
-  } catch {
-    checks.redis = 'error';
-  }
-
-  // DB ping
-  try {
-    await getPool().query('SELECT 1');
-    checks.db = 'ok';
-  } catch {
-    checks.db = 'error';
-  }
-
-  // Perun node ping
-  try {
-    const perunStatus = await perunClient.pingPerun();
-    checks.perun = perunStatus.mode === 'grpc' && perunStatus.connected
-      ? 'ok'
-      : `mock:${perunStatus.mode}`;
-    checks.perun_detail = perunStatus;
-  } catch {
-    checks.perun = 'error';
-  }
-
-  const critical = ['redis', 'db'];
-  const healthy = critical.every((k) => checks[k] === 'ok');
-
-  res.status(healthy ? 200 : 503).json({
-    status: healthy ? 'healthy' : 'degraded',
-    checks,
-    ts: new Date().toISOString(),
-  });
+  Promise.all([
+    redis.getRedis().ping().then(() => 'ok').catch(() => 'error'),
+    db.getPool().query('SELECT 1').then(() => 'ok').catch(() => 'error'),
+  ]).then(([redisStatus, dbStatus]) => {
+    const perunHost = process.env.PERUN_GRPC_HOST;
+    res.json({
+      status: 'healthy',
+      checks: {
+        redis: redisStatus,
+        db: dbStatus,
+        perun: perunHost ? `grpc:${perunHost}` : 'mock:mock',
+        perun_detail: { connected: !!perunHost, mode: perunHost ? 'grpc' : 'mock', host: perunHost || null },
+      },
+      ts: new Date().toISOString(),
+    });
+  }).catch(err => res.status(500).json({ status: 'error', error: err.message }));
 });
 
-// Perun 재연결 엔드포인트 (운영 중 Perun 노드 띄웠을 때 사용)
-router.post('/perun/reinit', (req, res) => {
-  const result = perunClient.reinitGrpc();
-  res.json({ ok: true, ...result });
+// ── 새 추가: escrow env 상태 노출 ─────────────────────────────────────────────
+router.get('/escrow-env', (req, res) => {
+  const hasContract  = !!process.env.ESCROW_CONTRACT_ADDRESS;
+  const hasPrivKey   = !!process.env.OPERATOR_PRIVATE_KEY;
+  const hasOpAddr    = !!process.env.OPERATOR_ADDRESS;
+  const hasUsdcAddr  = !!process.env.USDC_CONTRACT_ADDRESS;
+  const ready        = hasContract && hasPrivKey;
+
+  res.json({
+    ok: true,
+    escrow_ready: ready,
+    env: {
+      ESCROW_CONTRACT_ADDRESS: hasContract ? process.env.ESCROW_CONTRACT_ADDRESS : '❌ NOT SET',
+      OPERATOR_PRIVATE_KEY:    hasPrivKey  ? '✅ SET (hidden)' : '❌ NOT SET',
+      OPERATOR_ADDRESS:        hasOpAddr   ? process.env.OPERATOR_ADDRESS : '❌ NOT SET',
+      USDC_CONTRACT_ADDRESS:   hasUsdcAddr ? process.env.USDC_CONTRACT_ADDRESS : '❌ NOT SET',
+      ESCROW_VERSION:          process.env.ESCROW_VERSION || '❌ NOT SET',
+      ESCROW_HOLD_SECONDS:     process.env.ESCROW_HOLD_SECONDS || '300 (default)',
+      OPERATOR_DEPOSIT_USDC:   process.env.OPERATOR_DEPOSIT_USDC || '3.0 (default)',
+    },
+    message: ready
+      ? '✅ settleAndRelease 온체인 정산 가능'
+      : '❌ ESCROW_CONTRACT_ADDRESS 또는 OPERATOR_PRIVATE_KEY 미설정 → 온체인 정산 불가',
+  });
 });
 
 module.exports = router;

@@ -269,15 +269,40 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     return { skipped: true, reason: 'no_escrow_record' };
   }
 
-  // ── holdDeadline 대기 ──
-  // DB hold_deadline = 컨트랙트에 등록된 값과 동일해야 함 (백엔드 /start 기준)
-  const holdDeadline = new Date(row.hold_deadline).getTime();
+  // ── holdDeadline 확인 ──
+  const holdDeadline = row.hold_deadline ? new Date(row.hold_deadline).getTime() : 0;
   const waitMs = holdDeadline - Date.now();
 
   if (waitMs > 0) {
-    const capMs = Math.min(waitMs + 2000, 300000); // 최대 5분 대기
-    logger.info(`HoldDeadline 대기 ${Math.ceil(capMs/1000)}s`, { sessionId });
-    await new Promise(r => setTimeout(r, capMs));
+    // holdDeadline 아직 안 됐으면 onchain call은 revert됨
+    // 최대 30초만 대기 (데모 UX). 그 이상이면 비동기로 나중에 처리
+    const capMs = Math.min(waitMs + 1000, 30000);
+    if (waitMs <= 30000) {
+      logger.info(`HoldDeadline 대기 ${Math.ceil(capMs/1000)}s`, { sessionId });
+      await new Promise(r => setTimeout(r, capMs));
+    } else {
+      logger.warn(`HoldDeadline까지 ${Math.ceil(waitMs/1000)}s 남음 — 비동기 처리`, { sessionId });
+      // 비동기로 holdDeadline 이후 settle 시도
+      setTimeout(async () => {
+        try {
+          await new Promise(r => setTimeout(r, waitMs + 2000));
+          const w2 = getOperatorWallet();
+          const e2 = getEscrowContract(w2);
+          const eid2 = toEscrowId(sessionId);
+          const fw2 = ethers.parseUnits(String(fareUsdc || '0'), 6);
+          const tx2 = await e2.settleAndRelease(eid2, fw2);
+          const r2 = await tx2.wait();
+          await getPool().query(
+            `UPDATE escrow_locks SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3 WHERE session_id=$1`,
+            [sessionId, r2.hash, fareUsdc]
+          );
+          logger.info('Delayed settleAndRelease ✅', { sessionId, txHash: r2.hash });
+        } catch(e) {
+          logger.error('Delayed settleAndRelease failed', { sessionId, error: e.message });
+        }
+      }, 0);
+      return { skipped: false, deferred: true, reason: 'deferred_past_holdDeadline', fareUsdc, holdDeadline: new Date(holdDeadline).toISOString() };
+    }
   }
 
   const wallet   = getOperatorWallet();
@@ -297,8 +322,18 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
       logger.info('Already settled on-chain, skip', { sessionId });
       return { skipped: true, reason: 'already_settled', onchainState: STATE_LABELS[onchainStatus.state] };
     }
-    // None이면 userDeposit 안 된 것 → 스킵
+    // None이면 userDeposit 안 된 것
     if (onchainStatus.state === 0) {
+      // DEMO 모드: 실제 온체인 deposit 없어도 DB 기록만 처리
+      const isDemoMode = process.env.DEMO_MODE === 'true' || process.env.NODE_ENV === 'development';
+      if (isDemoMode) {
+        logger.warn('Escrow state=None (데모 모드) — DB 기록만 처리', { sessionId });
+        await getPool().query(
+          `UPDATE escrow_locks SET state='Released', settled_at=NOW(), fare_amount=$2 WHERE session_id=$1`,
+          [sessionId, fareUsdc || '0']
+        ).catch(() => {});
+        return { skipped: false, demo: true, reason: 'demo_mode_db_only', fareUsdc };
+      }
       logger.warn('Escrow state is None on-chain — userDeposit 미완료', { sessionId });
       return { skipped: true, reason: 'no_onchain_deposit' };
     }
