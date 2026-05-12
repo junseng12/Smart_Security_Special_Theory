@@ -19,6 +19,42 @@ const { ethers } = require('ethers');
 const logger = require('../utils/logger');
 const { getPool } = require('./db');
 
+// ── TX 온체인 확정 대기 ────────────────────────────────────────────────────────
+async function waitForTxOnChain(txHash, timeoutMs = 90000) {
+  if (!txHash || txHash.startsWith('0xmock') || txHash.startsWith('0xtest')) {
+    logger.info('Mock TX hash — skip onchain wait', { txHash });
+    return { status: '0x1' }; // mock 통과
+  }
+  const RPC_LIST = [
+    process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com',
+    'https://84532.rpc.thirdweb.com',
+    'https://sepolia.base.org',
+  ];
+  const deadline = Date.now() + timeoutMs;
+  logger.info('Waiting for TX onchain...', { txHash });
+  while (Date.now() < deadline) {
+    for (const rpc of RPC_LIST) {
+      try {
+        const res = await fetch(rpc, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_getTransactionReceipt', params: [txHash] }),
+        });
+        const json = await res.json();
+        if (json.result?.status) {
+          if (json.result.status === '0x0') throw new Error('TX reverted on-chain: ' + txHash);
+          logger.info('TX confirmed ✅', { txHash, blockNumber: json.result.blockNumber });
+          return json.result;
+        }
+      } catch (e) {
+        if (e.message.includes('reverted')) throw e;
+      }
+    }
+    await new Promise(r => setTimeout(r, 3000));
+  }
+  throw new Error('TX confirmation timeout: ' + txHash);
+}
+
 // ── V3 ABI ────────────────────────────────────────────────────────────────────
 const ESCROW_ABI_V3 = [
   // 프론트(MetaMask)가 호출
@@ -124,22 +160,60 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
      depositUsdc, new Date(holdDeadline * 1000), depositTxHash]
   );
 
-  logger.info('User deposit recorded', { sessionId, depositUsdc, depositTxHash });
-  return { escrowId };
+  logger.info('User deposit recorded in DB', { sessionId, depositUsdc, depositTxHash });
+  return { escrowId, depositTxHash };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 2. operatorDeposit — 백엔드가 operator 보증금 자동 예치 (Perun: operator도 deposit)
 // ─────────────────────────────────────────────────────────────────────────────
-async function operatorDeposit(sessionId, operatorDepositUsdc) {
+async function operatorDeposit(sessionId, operatorDepositUsdc, userDepositTxHash) {
   await ensureEscrowTable();
 
+  const escrowId = toEscrowId(sessionId);
+
+  // ── 1. userDeposit TX 온체인 확정 대기 ────────────────────────────────────
+  if (userDepositTxHash) {
+    try {
+      await waitForTxOnChain(userDepositTxHash, 90000);
+    } catch (e) {
+      logger.error('userDeposit TX 확정 실패 — operatorDeposit 중단', { sessionId, error: e.message });
+      throw e;
+    }
+  } else {
+    // txHash 없으면 3초 대기 후 state 확인
+    await new Promise(r => setTimeout(r, 3000));
+  }
+
+  // ── 2. 컨트랙트 state 확인 ────────────────────────────────────────────────
+  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com');
+  const escrowRO = getEscrowContract(roProvider);
+  let onchainState = 0;
+  try {
+    const s = await escrowRO.getEscrowStatus(escrowId);
+    onchainState = Number(s[0]);
+    const STATE = ['None','UserDeposited','FullyFunded','RefundIssue','Released','Refunded'];
+    logger.info('Pre-operatorDeposit onchain state', { sessionId, state: STATE[onchainState] });
+    if (onchainState === 0) {
+      throw new Error('컨트랙트 state=None: userDeposit TX가 아직 확정되지 않음');
+    }
+    if (onchainState >= 2) {
+      logger.info('이미 FullyFunded 이상 — operatorDeposit 스킵', { sessionId });
+      return { skipped: true, reason: 'already_funded_or_settled', escrowId };
+    }
+  } catch (e) {
+    if (!e.message.includes('None')) {
+      logger.warn('getEscrowStatus 실패 — 진행', { sessionId, error: e.message });
+    } else {
+      throw e;
+    }
+  }
+
+  // ── 3. operator USDC approve → operatorDeposit ────────────────────────────
   const wallet  = getOperatorWallet();
   const escrow  = getEscrowContract(wallet);
-  const escrowId = toEscrowId(sessionId);
   const amount  = ethers.parseUnits(String(operatorDepositUsdc), 6);
 
-  // operator USDC approve → escrow
   const usdc = new ethers.Contract(
     process.env.USDC_CONTRACT_ADDRESS || '0x036CbD53842c5426634e7929541eC2318f3dCF7e',
     USDC_ABI,
@@ -149,6 +223,7 @@ async function operatorDeposit(sessionId, operatorDepositUsdc) {
   logger.info('Operator approving USDC for escrow...', { sessionId, operatorDepositUsdc });
   const approveTx = await usdc.approve(process.env.ESCROW_CONTRACT_ADDRESS, amount);
   await approveTx.wait();
+  logger.info('Approve ✅', { sessionId });
 
   logger.info('Operator depositing to escrow...', { sessionId, operatorDepositUsdc });
   const depositTx = await escrow.operatorDeposit(escrowId, amount);
@@ -161,7 +236,7 @@ async function operatorDeposit(sessionId, operatorDepositUsdc) {
     [sessionId, operatorDepositUsdc, receipt.hash]
   );
 
-  logger.info('Operator deposit complete', { sessionId, txHash: receipt.hash, operatorDepositUsdc });
+  logger.info('Operator deposit complete ✅', { sessionId, txHash: receipt.hash, operatorDepositUsdc });
   return { txHash: receipt.hash, escrowId, operatorDepositUsdc };
 }
 

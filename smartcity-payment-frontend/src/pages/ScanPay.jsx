@@ -199,9 +199,11 @@ export default function ScanPay() {
 
       // 3) 에스크로 V3 userDeposit 온체인 호출
       const escrowId = data.escrowId || data.sessionId;
+      // holdDeadline은 백엔드가 unix seconds 정수로 반환
+      // new Date(seconds)는 1970년을 반환하므로 Number()로 그대로 사용
       const holdDeadline = data.holdDeadline
-        ? Math.floor(new Date(data.holdDeadline).getTime() / 1000)
-        : Math.floor(Date.now() / 1000) + 3600;
+        ? Number(data.holdDeadline)
+        : Math.floor(Date.now() / 1000) + 60;
       addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC userDeposit 요청 중...`, "info");
       const txHash = await userDeposit(activeAddress, escrowId, OPERATOR_ADDRESS, service.depositUsdc, holdDeadline);
       setDepositTxHash(txHash);

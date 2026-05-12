@@ -166,8 +166,9 @@ router.post('/:id/deposit', async (req, res, next) => {
     // 2) operator 보증금 자동 예치 (비동기 — 실패해도 세션 진행)
     const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
     if (canEscrow) {
-      const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '1.0'; // 기본 보증금
-      escrowSvc.operatorDeposit(req.params.id, opDepositUsdc).then(r => {
+      // userDeposit TX 확정 후 operatorDeposit 실행 (depositTxHash 전달)
+      const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '3.0';
+      escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash).then(r => {
         // 성공 로그는 서비스 내부에서 처리
       }).catch(err => {
         const logger = require('../utils/logger');
