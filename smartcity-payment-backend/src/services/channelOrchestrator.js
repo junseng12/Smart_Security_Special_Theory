@@ -127,16 +127,23 @@ async function chargeUsage({ sessionId, channelId, userAddress, usage, serviceTy
     }
   }
 
-  // 4. 세션 DB에 요금 기록 (endSession 시 fareUsdc 참조용)
+  // 4. ★ 누적 요금 기록 (덮어쓰기 아닌 += 누적)
+  //    Perun: 매 update마다 balances.operator 누적 → 종료 시 finalState로 settle
+  //    여기서도 sessions.charged_usdc를 누적합으로 유지
   try {
     const db = require('./db');
+    // charged_usdc: 누적 합산 (마지막 값 덮어쓰기 금지)
     await db.getPool().query(
-      'UPDATE sessions SET charged_usdc=$1 WHERE id=$2',
+      `UPDATE sessions
+       SET charged_usdc = COALESCE(charged_usdc, 0) + $1::NUMERIC
+       WHERE id = $2`,
       [fare.fareUsdc, sessionId]
     ).catch(() => {});
-    // escrow_locks에도 fare_amount 업데이트
+    // escrow_locks.fare_amount도 누적
     await db.getPool().query(
-      'UPDATE escrow_locks SET fare_amount=$1 WHERE session_id=$2',
+      `UPDATE escrow_locks
+       SET fare_amount = COALESCE(fare_amount, 0) + $1::NUMERIC
+       WHERE session_id = $2`,
       [fare.fareUsdc, sessionId]
     ).catch(() => {});
   } catch {}
@@ -217,40 +224,42 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
       // finalState.balances.operator는 wei 단위 → 소수점 변환
       let fareUsdc = '0';
 
-      // 우선순위 0: 프론트에서 직접 전달한 fareUsdc
-      if (passedFareUsdc && parseFloat(passedFareUsdc) > 0) {
-        fareUsdc = String(passedFareUsdc);
-        logger.info('fareUsdc from request body', { sessionId, fareUsdc });
+      // ★ Perun 원칙: finalState.balances.operator = 누적 charge 합계 (wei)
+      //   이것이 진짜 Perun 방식의 최종 요금 — 최우선 사용
+      // 우선순위 1: finalState.balances.operator (Perun 채널 최종 상태)
+      if (finalState?.balances?.operator && BigInt(finalState.balances.operator) > 0n) {
+        const { ethers } = require('ethers');
+        fareUsdc = ethers.formatUnits(BigInt(finalState.balances.operator), 6);
+        logger.info('fareUsdc from finalState.balances.operator (Perun 누적)', { sessionId, fareUsdc });
       }
-      // 우선순위 0-b: sessions.charged_usdc
+      // 우선순위 2: sessions.charged_usdc (누적 합산 — fallback)
       if (!fareUsdc || parseFloat(fareUsdc) === 0) {
         const chargedRow = await require('./db').getPool().query(
           'SELECT charged_usdc FROM sessions WHERE id=$1', [sessionId]
         ).then(r => r.rows[0]).catch(() => null);
         if (chargedRow?.charged_usdc && parseFloat(chargedRow.charged_usdc) > 0) {
           fareUsdc = String(chargedRow.charged_usdc);
-          logger.info('fareUsdc from sessions.charged_usdc', { sessionId, fareUsdc });
+          logger.info('fareUsdc from sessions.charged_usdc (누적)', { sessionId, fareUsdc });
         }
       }
-      // 우선순위 1: escrow_locks.fare_amount
+      // 우선순위 3: escrow_locks.fare_amount (누적)
       if (!fareUsdc || parseFloat(fareUsdc) === 0) {
         const escrowLock = await require('./db').getPool().query(
           'SELECT fare_amount FROM escrow_locks WHERE session_id=$1', [sessionId]
         ).then(r => r.rows[0]).catch(() => null);
         if (escrowLock?.fare_amount && parseFloat(escrowLock.fare_amount) > 0) {
           fareUsdc = String(escrowLock.fare_amount);
-          logger.info('fareUsdc from escrow_locks', { sessionId, fareUsdc });
+          logger.info('fareUsdc from escrow_locks.fare_amount', { sessionId, fareUsdc });
         }
       }
-      // 우선순위 2: finalState.balances.operator (wei → USDC)
+      // 우선순위 4: 프론트 직접 전달 (종료 시 elapsed 기반 — 마지막 수단)
       if (!fareUsdc || parseFloat(fareUsdc) === 0) {
-        if (finalState?.balances?.operator && BigInt(finalState.balances.operator) > 0n) {
-          const { ethers } = require('ethers');
-          fareUsdc = ethers.formatUnits(BigInt(finalState.balances.operator), 6);
-          logger.info('fareUsdc from finalState', { sessionId, fareUsdc });
+        if (passedFareUsdc && parseFloat(passedFareUsdc) > 0) {
+          fareUsdc = String(passedFareUsdc);
+          logger.info('fareUsdc from request body (elapsed 기반 fallback)', { sessionId, fareUsdc });
         }
       }
-      // 우선순위 3: settlements
+      // 우선순위 5: settlements
       if (!fareUsdc || parseFloat(fareUsdc) === 0) {
         if (settlement?.operator_earn_usdc && parseFloat(settlement.operator_earn_usdc) > 0) {
           fareUsdc = String(settlement.operator_earn_usdc);
