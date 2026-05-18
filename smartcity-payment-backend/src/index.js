@@ -1,5 +1,6 @@
 require('dotenv').config();
 const express = require('express');
+const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
@@ -18,16 +19,28 @@ const requestValidator = require('./middleware/requestValidator');
 const app = express();
 
 // ── Security ─────────────────────────────────────────────────────────────────
-app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(helmet());
 
-// CORS: 모든 origin 허용 (데모용)
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim())
+  : [];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // origin 없는 요청 (서버간, curl 등) 허용
+    if (!origin) return callback(null, true);
+    // 허용 목록이 비어있으면 전체 허용
+    if (allowedOrigins.length === 0) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
+}));
+
+// OPTIONS preflight 전체 허용
+app.options('*', cors());
 
 app.use(express.json());
 app.use(morgan('combined', { stream: { write: (msg) => logger.info(msg.trim()) } }));
@@ -60,6 +73,18 @@ async function bootstrap() {
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => {
       logger.info(`SmartCity Payment Backend running on port ${PORT}`);
+      logger.info('Routes:');
+      logger.info('  POST /api/v1/sessions/start');
+      logger.info('  POST /api/v1/sessions/:id/charge');
+      logger.info('  POST /api/v1/sessions/:id/sign');
+      logger.info('  POST /api/v1/sessions/:id/end');
+      logger.info('  GET  /api/v1/sessions/:id/status');
+      logger.info('  GET  /api/v1/sessions/:id/stream  (SSE)');
+      logger.info('  POST /api/v1/refunds');
+      logger.info('  POST /api/v1/refunds/:id/evaluate');
+      logger.info('  POST /api/v1/refunds/:id/approve');
+      logger.info('  POST /api/v1/refunds/:id/payout');
+      logger.info('  GET  /health');
     });
   } catch (err) {
     logger.error('Failed to start server', { error: err.message });

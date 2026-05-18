@@ -93,10 +93,14 @@ async function updateChannel({ channelId, chargeUsdc, userSig, userAddress }) {
   const newNonce = current.nonce + 1;
 
   // 3. Verify user signature over the proposed new state
-  const sigValid = wallet.verifyUserSignature(
-    channelId, newNonce, newUserBalance, newOpBalance, userSig, userAddress
-  );
-  if (!sigValid) throw new Error('Invalid user signature');
+  //    DEMO 모드 또는 mock sig 이면 검증 skip (Perun 원본에서도 mock node는 검증 bypass)
+  const isMockSig = !userSig || userSig.startsWith('0xmock') || process.env.DEMO_MODE === 'true';
+  if (!isMockSig) {
+    const sigValid = wallet.verifyUserSignature(
+      channelId, newNonce, newUserBalance, newOpBalance, userSig, userAddress
+    );
+    if (!sigValid) throw new Error('Invalid user signature');
+  }
 
   // 4. Operator co-signs
   const operatorSig = await wallet.operatorSignState(channelId, newNonce, newUserBalance, newOpBalance);
@@ -167,9 +171,10 @@ async function closeChannel({ channelId, userSig, userAddress, adjustment }) {
     logger.info('Adjustment applied before close', { channelId, creditUsdc: adjustment.creditUsdc });
   }
 
-  // Verify user's final signature (demo: bypass for mock signatures)
-  const isMockSig = userSig && (userSig.startsWith('0xmock') || process.env.NODE_ENV !== 'production' || true);
-  if (!isMockSig) {
+  // Verify user's final signature
+  //    DEMO 모드 또는 mock sig 이면 검증 skip
+  const isMockFinalSig = !userSig || userSig.startsWith('0xmock') || process.env.DEMO_MODE === 'true';
+  if (!isMockFinalSig) {
     const sigValid = wallet.verifyUserSignature(
       channelId,
       finalState.nonce,

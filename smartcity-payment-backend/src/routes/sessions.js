@@ -164,20 +164,29 @@ router.post('/:id/deposit', async (req, res, next) => {
       depositTxHash,
     });
 
-    // 2) operator 보증금 자동 예치 (비동기 — 실패해도 세션 진행)
+    // 2) operator 보증금 자동 예치
+    // ★ await로 처리: Railway는 비동기 .then이 요청 완료 후 실행 보장 안 됨
+    // userDepositTxHash가 실제 TX인 경우만 온체인 operatorDeposit 실행
     const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
-    if (canEscrow) {
-      // userDeposit TX 확정 후 operatorDeposit 실행 (depositTxHash 전달)
+    const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock') && !depositTxHash.startsWith('0xtest');
+
+    let operatorDepositResult = null;
+    if (canEscrow && isRealTx) {
       const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '3.0';
-      escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash).then(r => {
-        // 성공 로그는 서비스 내부에서 처리
-      }).catch(err => {
+      try {
+        operatorDepositResult = await escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash);
+        const logger = require('../utils/logger');
+        logger.info('Operator deposit complete', { sessionId: req.params.id, result: JSON.stringify(operatorDepositResult) });
+      } catch(err) {
         const logger = require('../utils/logger');
         logger.warn('Operator deposit failed (non-fatal)', { sessionId: req.params.id, error: err.message });
-      });
+      }
+    } else if (canEscrow && !isRealTx) {
+      const logger = require('../utils/logger');
+      logger.info('Mock TX detected — skip operatorDeposit', { sessionId: req.params.id, depositTxHash });
     }
 
-    res.json({ ok: true, data: result });
+    res.json({ ok: true, data: { ...result, operatorDeposit: operatorDepositResult } });
   } catch (err) { next(err); }
 });
 
