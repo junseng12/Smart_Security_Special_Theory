@@ -275,13 +275,12 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
 
   if (waitMs > 0) {
     // holdDeadline 아직 안 됐으면 onchain call은 revert됨
-    // 최대 90초 동기 대기 (Railway timeout: 30s 요청 → 비동기 처리 후 즉시 응답)
-    // Railway 동기 응답 한계: 실질적으로 ~70초 (안전 마진 포함)
-    // holdSeconds가 60초로 캡됐으므로 waitMs 최대 60초 → 동기 처리 가능
-    const MAX_SYNC_WAIT = 65000; // 65초 (60초 holdSeconds + 5초 여유)
+    // holdDeadline이 이제 최소 300초(5분)이므로 항상 deferred(비동기) 처리
+    // MAX_SYNC_WAIT: 즉시 응답 후 백그라운드로 처리하는 임계값
+    const MAX_SYNC_WAIT = 10000; // 10초 이내면 동기 대기, 그 이상은 항상 deferred
     if (waitMs <= MAX_SYNC_WAIT) {
-      logger.info(`HoldDeadline 대기 ${Math.ceil(waitMs/1000)}s`, { sessionId });
-      await new Promise(r => setTimeout(r, waitMs + 1500)); // 1.5초 여유
+      logger.info(`HoldDeadline 대기 ${Math.ceil(waitMs/1000)}s (동기)`, { sessionId });
+      await new Promise(r => setTimeout(r, waitMs + 1500));
     } else {
       // 90초 초과: DB에 pending_settle 기록 후 즉시 응답
       // 백그라운드 크론 또는 재시도 엔드포인트로 처리

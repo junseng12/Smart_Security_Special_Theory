@@ -70,12 +70,51 @@ async function runWatchtower() {
   await Promise.allSettled(ids.map(checkChannel));
 }
 
+
+// ── PendingSettle 처리 (holdDeadline 지난 것들 온체인 정산) ──────────────────
+async function processPendingSettles() {
+  try {
+    const db        = require('./db');
+    const escrowSvc = require('./escrowPayoutService');
+
+    const { rows } = await db.getPool().query(
+      `SELECT el.session_id, el.fare_amount
+       FROM escrow_locks el
+       WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
+         AND el.hold_deadline IS NOT NULL
+         AND el.hold_deadline < NOW()
+       LIMIT 10`
+    );
+
+    if (rows.length > 0)
+      logger.info(`Watchtower: PendingSettle ${rows.length}건 처리 시작`);
+
+    for (const row of rows) {
+      try {
+        const result = await escrowSvc.settleAndRelease({
+          sessionId: row.session_id,
+          fareUsdc:  String(row.fare_amount || '0'),
+        });
+        logger.info('Watchtower: settle OK', { sessionId: row.session_id, result: JSON.stringify(result) });
+      } catch (e) {
+        logger.error('Watchtower: settle fail', { sessionId: row.session_id, error: e.message });
+      }
+    }
+  } catch (e) {
+    logger.error('Watchtower processPendingSettles error', { error: e.message });
+  }
+}
+
 async function startLoop() {
-  await connectRedis();
+  await connectRedis().catch(() => logger.warn('Watchtower: Redis 없음, DB only'));
   await connectDB();
   logger.info(`Watchtower poll interval: ${POLL_INTERVAL_MS}ms`);
 
-  // Run immediately, then on interval
+  // PendingSettle 처리 (30초마다)
+  processPendingSettles();
+  setInterval(processPendingSettles, 30_000);
+
+  // 채널 모니터링
   await runWatchtower();
   setInterval(runWatchtower, POLL_INTERVAL_MS);
 }

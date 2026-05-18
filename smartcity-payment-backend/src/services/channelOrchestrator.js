@@ -52,13 +52,13 @@ async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsd
   // ESCROW_HOLD_SECONDS: 세션 시작 기준 (approve → userDeposit → operatorDeposit TX 확정 시간 포함)
   // ESCROW_HOLD_SECONDS: Railway 동기 응답 한계 = 90초
   // 90초 초과 설정 시 백그라운드 setTimeout이 Railway에서 종료됨 → settle 미실행
-  // 최대값 60초로 캡 처리 (30~60초 권장)
-  const rawHoldSec   = parseInt(process.env.ESCROW_HOLD_SECONDS || '30');
-  const holdSeconds  = Math.min(rawHoldSec, 60); // 최대 60초 강제 캡
-  if (rawHoldSec > 60) {
-    logger.warn(`ESCROW_HOLD_SECONDS=${rawHoldSec} > 60 → 60초로 캡 처리 (Railway 한계)`, { rawHoldSec });
-  }
+  // holdDeadline: 컨트랙트의 settleAndRelease 허용 시점
+  // - 기본 120초(2분): approve + userDeposit MetaMask 서명 후 세션 종료 시 바로 정산 가능
+  // - 환경변수 ESCROW_HOLD_SECONDS로 조정 가능
+  const rawHoldSec  = parseInt(process.env.ESCROW_HOLD_SECONDS || '120');
+  const holdSeconds = Math.min(Math.max(rawHoldSec, 30), 3600); // 30초~1시간
   const holdDeadline = Math.floor(Date.now() / 1000) + holdSeconds;
+  logger.info('holdDeadline set', { holdSeconds, holdDeadline, raw: rawHoldSec });
 
   return {
     sessionId:    newSession.id,
