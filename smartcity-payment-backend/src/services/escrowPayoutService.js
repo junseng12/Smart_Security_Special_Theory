@@ -307,7 +307,19 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
           logger.error('Background settleAndRelease failed', { sessionId, error: e.message });
         }
       }, 0);
-      return { skipped: false, deferred: true, reason: 'pending_settle_scheduled', fareUsdc, holdDeadline: new Date(holdDeadline).toISOString() };
+      // DB에서 userDeposit 가져와서 예상 환불액 계산 (즉시 반환용)
+      const userDep = parseFloat(row?.user_deposit || 0);
+      const expectedRefund = (userDep - parseFloat(fareUsdc || 0)).toFixed(6);
+      return {
+        skipped: false,
+        deferred: true,
+        reason: 'pending_settle_scheduled',
+        fareUsdc,
+        refundUsdc: expectedRefund,       // ★ 예상 환불액 (실제 TX는 백그라운드)
+        userDeposit: String(userDep),
+        holdDeadline: new Date(holdDeadline).toISOString(),
+        note: '정산 TX는 holdDeadline 도달 후 자동 처리됩니다',
+      };
     }
   }
 
