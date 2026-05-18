@@ -3,23 +3,32 @@ const logger = require('../utils/logger');
 
 let client;
 
-/**
- * Connect to Redis.
- * REDIS_URL 환경변수가 있으면 URL 방식 (Upstash 등 클라우드)
- * 없으면 HOST/PORT 방식 (로컬)
- */
 async function connectRedis() {
   const redisUrl = process.env.REDIS_URL;
 
+  // 연결 전 환경변수 확인 로그 (디버깅용)
+  logger.info('Redis init', {
+    hasUrl: !!redisUrl,
+    urlPrefix: redisUrl ? redisUrl.substring(0, 20) + '...' : 'MISSING',
+  });
+
   if (redisUrl) {
-    // Upstash 등 TLS Redis — URL 방식
+    // ioredis는 rediss:// URL을 직접 받으면 자동으로 TLS 처리함
+    // URL 파싱 없이 그대로 전달 + tls 옵션만 명시
     client = new Redis(redisUrl, {
-      tls: redisUrl.startsWith('rediss://') ? {} : undefined,
-      retryStrategy: (times) => Math.min(times * 200, 5000),
+      tls: {
+        rejectUnauthorized: false,
+      },
+      retryStrategy: (times) => {
+        if (times > 5) return null; // 5번 이상 실패하면 포기
+        return Math.min(times * 500, 3000);
+      },
       lazyConnect: true,
+      connectTimeout: 10000,
+      maxRetriesPerRequest: 3,
     });
   } else {
-    // 로컬 Redis — HOST/PORT 방식
+    logger.warn('REDIS_URL not set — using local Redis fallback');
     client = new Redis({
       host:     process.env.REDIS_HOST     || 'localhost',
       port:     parseInt(process.env.REDIS_PORT) || 6379,
@@ -30,9 +39,9 @@ async function connectRedis() {
     });
   }
 
-  client.on('error', (err) => logger.error('Redis error', { error: err.message }));
-  client.on('reconnecting', () => logger.warn('Redis reconnecting...'));
-  client.on('connect', () => logger.info('Redis connected'));
+  client.on('error',       (err) => logger.error('Redis error', { error: err.message }));
+  client.on('reconnecting',()    => logger.warn('Redis reconnecting...'));
+  client.on('connect',     ()    => logger.info('Redis connected ✅'));
 
   await client.connect();
   return client;
@@ -43,10 +52,8 @@ function getRedis() {
   return client;
 }
 
-// ── Channel state helpers ─────────────────────────────────────────────────────
-
 const CHANNEL_KEY = (channelId) => `channel:${channelId}`;
-const CHANNEL_TTL  = 60 * 60 * 24 * 30; // 30일
+const CHANNEL_TTL  = 60 * 60 * 24 * 30;
 
 async function saveChannelState(channelId, state) {
   await getRedis().set(CHANNEL_KEY(channelId), JSON.stringify(state), 'EX', CHANNEL_TTL);
