@@ -41,10 +41,11 @@ function validate(schema) {
 
 // ── POST /sessions/start ──────────────────────────────────────────────────────
 const startSchema = Joi.object({
-  userAddress:  ethAddress().required(),
-  serviceType:  Joi.string().valid('bicycle', 'ev_charging', 'parking').required(),
-  depositUsdc:  usdcAmount(),
-  meta:         Joi.object().optional(),
+  userAddress:   ethAddress().required(),
+  serviceType:   Joi.string().valid('bicycle', 'ev_charging', 'parking').required(),
+  depositUsdc:   usdcAmount(),
+  depositTxHash: Joi.string().optional(),  // 레거시 호환 — 실제 처리는 /deposit 엔드포인트
+  meta:          Joi.object().optional(),
 });
 
 router.post('/start', validate(startSchema), async (req, res, next) => {
