@@ -67,29 +67,34 @@ app.use(errorHandler);
 async function bootstrap() {
   try {
     await connectRedis();
-    await connectDB();
-    logger.info('Redis and DB connected');
-
-    const PORT = process.env.PORT || 3000;
-    app.listen(PORT, () => {
-      logger.info(`SmartCity Payment Backend running on port ${PORT}`);
-      logger.info('Routes:');
-      logger.info('  POST /api/v1/sessions/start');
-      logger.info('  POST /api/v1/sessions/:id/charge');
-      logger.info('  POST /api/v1/sessions/:id/sign');
-      logger.info('  POST /api/v1/sessions/:id/end');
-      logger.info('  GET  /api/v1/sessions/:id/status');
-      logger.info('  GET  /api/v1/sessions/:id/stream  (SSE)');
-      logger.info('  POST /api/v1/refunds');
-      logger.info('  POST /api/v1/refunds/:id/evaluate');
-      logger.info('  POST /api/v1/refunds/:id/approve');
-      logger.info('  POST /api/v1/refunds/:id/payout');
-      logger.info('  GET  /health');
-    });
   } catch (err) {
-    logger.error('Failed to start server', { error: err.message });
+    logger.error('Redis connection failed — continuing in offline mode', { error: err.message });
+  }
+
+  try {
+    await connectDB();
+    logger.info('DB connected');
+  } catch (err) {
+    logger.error('Failed to connect to DB', { error: err.message });
     process.exit(1);
   }
+
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    logger.info(`SmartCity Payment Backend running on port ${PORT}`);
+    logger.info('Routes:');
+    logger.info('  POST /api/v1/sessions/start');
+    logger.info('  POST /api/v1/sessions/:id/charge');
+    logger.info('  POST /api/v1/sessions/:id/sign');
+    logger.info('  POST /api/v1/sessions/:id/end');
+    logger.info('  GET  /api/v1/sessions/:id/status');
+    logger.info('  GET  /api/v1/sessions/:id/stream  (SSE)');
+    logger.info('  POST /api/v1/refunds');
+    logger.info('  POST /api/v1/refunds/:id/evaluate');
+    logger.info('  POST /api/v1/refunds/:id/approve');
+    logger.info('  POST /api/v1/refunds/:id/payout');
+    logger.info('  GET  /health');
+  });
 }
 
 bootstrap();
