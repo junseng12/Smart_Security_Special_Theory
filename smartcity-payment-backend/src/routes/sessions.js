@@ -190,6 +190,69 @@ router.get('/:id/escrow-id', async (req, res, next) => {
 });
 
 // ── GET /sessions/:id/status ──────────────────────────────────────────────────
+
+// ── GET /sessions/:id/escrow-status — 온체인 escrow 상태 polling ──────────────
+// 프론트에서 /end 호출 후 settle 완료 여부를 주기적으로 확인
+router.get('/:id/escrow-status', async (req, res, next) => {
+  try {
+    const sessionId = req.params.id;
+    const db = require('../services/db');
+
+    // DB 상태
+    const row = await db.getPool().query(
+      `SELECT el.state, el.fare_amount, el.user_deposit, el.operator_deposit,
+              el.settle_tx, el.settled_at, el.hold_deadline
+       FROM escrow_locks el WHERE el.session_id = $1`,
+      [sessionId]
+    ).then(r => r.rows[0]);
+
+    if (!row) {
+      return res.json({ ok: true, data: { found: false, state: 'no_record' } });
+    }
+
+    // 온체인 상태 (환경변수 있을 때만)
+    let onchain = null;
+    if (process.env.ESCROW_CONTRACT_ADDRESS && process.env.BASE_RPC_URL) {
+      try {
+        const { ethers } = require('ethers');
+        const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://sepolia.base.org');
+        const ESCROW_ABI = ['function getEscrowStatus(bytes32) view returns (uint8,uint256,uint256,uint256,address,address,uint256,bool,bool)'];
+        const escrow = new ethers.Contract(process.env.ESCROW_CONTRACT_ADDRESS, ESCROW_ABI, provider);
+        const escrowId = ethers.keccak256(ethers.toUtf8Bytes(sessionId));
+        const s = await escrow.getEscrowStatus(escrowId);
+        const STATE = ['None','UserDeposited','FullyFunded','RefundIssue','Released','Refunded'];
+        onchain = {
+          state:        STATE[Number(s[0])],
+          userDeposit:  ethers.formatUnits(s[1], 6),
+          opDeposit:    ethers.formatUnits(s[2], 6),
+          holdDeadline: Number(s[6]),
+          dlPassed:     Boolean(s[8]),
+        };
+      } catch(e) {}
+    }
+
+    const fareUsdc   = parseFloat(row.fare_amount || 0);
+    const userDep    = parseFloat(row.user_deposit || 0);
+    const refundUsdc = (userDep - fareUsdc).toFixed(6);
+    const settled    = row.state === 'Released' || onchain?.state === 'Released';
+
+    res.json({
+      ok: true,
+      data: {
+        found:      true,
+        dbState:    row.state,
+        onchain,
+        fareUsdc:   fareUsdc.toFixed(6),
+        refundUsdc,
+        userDeposit: String(userDep),
+        settleTx:   row.settle_tx,
+        settledAt:  row.settled_at,
+        settled,
+      }
+    });
+  } catch(err) { next(err); }
+});
+
 router.get('/:id/status', async (req, res, next) => {
   try {
     const session = await sessionMgr.getSession(req.params.id);

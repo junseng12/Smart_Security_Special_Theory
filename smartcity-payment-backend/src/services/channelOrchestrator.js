@@ -49,7 +49,7 @@ async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsd
   // holdDeadline > block.timestamp 조건 충족 필요 (컨트랙트 InvalidHoldDeadline 방지)
   // 세션 종료 후 백엔드가 settleAndRelease 호출하므로 세션 시작 후 충분한 시간 설정
   // ESCROW_HOLD_SECONDS: 세션 시작 기준 (approve → userDeposit → operatorDeposit TX 확정 시간 포함)
-  const holdSeconds  = parseInt(process.env.ESCROW_HOLD_SECONDS || '60'); // 기본 60초 (TX 확정 후 즉시 settle 가능)
+  const holdSeconds  = parseInt(process.env.ESCROW_HOLD_SECONDS || '30'); // 기본 30초 (TX 확정 후 즉시 settle 가능)
   const holdDeadline = Math.floor(Date.now() / 1000) + holdSeconds;
 
   return {

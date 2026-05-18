@@ -365,7 +365,7 @@ export default function ScanPay() {
       });
     }
 
-    // ── DB 기록 & 온체인 잔액 갱신 ──────────────────────────────────────────
+    // ── DB 기록 ──────────────────────────────────────────────────────────────
     try {
       await base44.entities.Transaction.create({
         type: 'payment', amount: finalFareUsdc, status: 'completed',
@@ -375,13 +375,6 @@ export default function ScanPay() {
         wallet_id: wallet?.id,
         note: `이용시간: ${fmt(elapsed)} / 요금: ${finalFareUsdc.toFixed(6)} USDC / 환불: ${result?.escrow?.refundUsdc ?? '처리중'} USDC`,
       }).catch(() => {});
-
-      // ★ 온체인 실잔액 반영 (컨트랙트가 이미 환불을 완료했으므로 잔액 증가)
-      const newBal = await getUsdcBalance(addr);
-      localStorage.setItem("mm_balance", newBal);
-      if (wallet) await base44.entities.Wallet.update(wallet.id, { balance: newBal }).catch(() => {});
-      queryClient.invalidateQueries({ queryKey: ['wallets'] });
-      queryClient.invalidateQueries({ queryKey: ['transactions'] });
     } catch (e) {
       addLog(`⚠️ DB 기록 오류: ${e.message}`, "error");
     }
@@ -389,6 +382,56 @@ export default function ScanPay() {
     clearSession();
     setEnding(false);
     setStep("ended");
+
+    // ── ★ settle 완료 polling (deferred 케이스 대응) ──────────────────────────
+    // /end가 deferred(holdDeadline 대기중)이면 주기적으로 온체인 확인
+    // → Released 상태 되면 MetaMask 잔액 갱신
+    if (result?.escrow?.deferred || !result?.escrow?.txHash) {
+      addLog("⏳ 온체인 정산 대기 중... 자동으로 확인합니다", "info");
+      let pollCount = 0;
+      const maxPoll = 24; // 최대 2분 (5초 × 24)
+      const pollId = setInterval(async () => {
+        pollCount++;
+        if (pollCount > maxPoll) {
+          clearInterval(pollId);
+          addLog("⚠️ 정산 확인 시간 초과 — BaseScan에서 직접 확인하세요", "error");
+          return;
+        }
+        try {
+          const status = await apiCall(`/api/v1/sessions/${sd.sessionId}/escrow-status`);
+          if (status.settled || status.onchain?.state === 'Released') {
+            clearInterval(pollId);
+            addLog(`✅ 온체인 정산 완료! TX: ${status.settleTx?.slice(0,18) || '확인됨'}...`, "success");
+            addLog(`💚 ${status.refundUsdc} USDC → 내 지갑 환불 완료`, "success");
+            // 설정 결과 업데이트
+            setSettlementResult(prev => ({
+              ...prev,
+              txHash: status.settleTx,
+              refund: status.refundUsdc,
+            }));
+            // 온체인 실잔액 반영
+            const newBal = await getUsdcBalance(addr);
+            localStorage.setItem("mm_balance", newBal);
+            if (wallet) await base44.entities.Wallet.update(wallet.id, { balance: newBal }).catch(() => {});
+            queryClient.invalidateQueries({ queryKey: ['wallets'] });
+            queryClient.invalidateQueries({ queryKey: ['transactions'] });
+          } else {
+            addLog(`🔄 정산 확인 중... (${pollCount}/${maxPoll}) 상태: ${status.onchain?.state || status.dbState}`, "info");
+          }
+        } catch(e) {
+          // poll 오류는 무시
+        }
+      }, 5000);
+    } else {
+      // 즉시 정산된 경우 — 잔액만 갱신
+      try {
+        const newBal = await getUsdcBalance(addr);
+        localStorage.setItem("mm_balance", newBal);
+        if (wallet) await base44.entities.Wallet.update(wallet.id, { balance: newBal }).catch(() => {});
+        queryClient.invalidateQueries({ queryKey: ['wallets'] });
+        queryClient.invalidateQueries({ queryKey: ['transactions'] });
+      } catch(e) {}
+    }
   };
 
   // ── 초기화 ──
