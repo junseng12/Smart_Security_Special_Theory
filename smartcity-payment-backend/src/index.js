@@ -66,35 +66,37 @@ app.use(errorHandler);
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
 async function bootstrap() {
   try {
-    await connectRedis();
-  } catch (err) {
-    logger.error('Redis connection failed — continuing in offline mode', { error: err.message });
-  }
+    // Redis: 연결 실패해도 서버 시작 (DB fallback 모드로 동작)
+    try {
+      await connectRedis();
+      logger.info('Redis connected ✅');
+    } catch (redisErr) {
+      logger.warn('Redis 연결 실패 — DB fallback 모드로 계속 진행', { error: redisErr.message });
+    }
 
-  try {
     await connectDB();
-    logger.info('DB connected');
+    logger.info('DB connected ✅');
+
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+      logger.info(`SmartCity Payment Backend running on port ${PORT}`);
+      logger.info('Routes:');
+      logger.info('  POST /api/v1/sessions/start');
+      logger.info('  POST /api/v1/sessions/:id/charge');
+      logger.info('  POST /api/v1/sessions/:id/sign');
+      logger.info('  POST /api/v1/sessions/:id/end');
+      logger.info('  GET  /api/v1/sessions/:id/status');
+      logger.info('  GET  /api/v1/sessions/:id/stream  (SSE)');
+      logger.info('  POST /api/v1/refunds');
+      logger.info('  POST /api/v1/refunds/:id/evaluate');
+      logger.info('  POST /api/v1/refunds/:id/approve');
+      logger.info('  POST /api/v1/refunds/:id/payout');
+      logger.info('  GET  /health');
+    });
   } catch (err) {
-    logger.error('Failed to connect to DB', { error: err.message });
+    logger.error('Failed to start server', { error: err.message });
     process.exit(1);
   }
-
-  const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
-    logger.info(`SmartCity Payment Backend running on port ${PORT}`);
-    logger.info('Routes:');
-    logger.info('  POST /api/v1/sessions/start');
-    logger.info('  POST /api/v1/sessions/:id/charge');
-    logger.info('  POST /api/v1/sessions/:id/sign');
-    logger.info('  POST /api/v1/sessions/:id/end');
-    logger.info('  GET  /api/v1/sessions/:id/status');
-    logger.info('  GET  /api/v1/sessions/:id/stream  (SSE)');
-    logger.info('  POST /api/v1/refunds');
-    logger.info('  POST /api/v1/refunds/:id/evaluate');
-    logger.info('  POST /api/v1/refunds/:id/approve');
-    logger.info('  POST /api/v1/refunds/:id/payout');
-    logger.info('  GET  /health');
-  });
 }
 
 bootstrap();

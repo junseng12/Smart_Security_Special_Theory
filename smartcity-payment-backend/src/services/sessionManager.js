@@ -86,9 +86,9 @@ async function startSession({ userAddress, serviceType, depositUsdc, meta = {} }
     timeoutAt: now + MAX_SESSION_DURATION_MS,
   };
 
-  // Redis 저장
+  // Redis 저장 (없으면 skip — DB만으로 운영)
   const redis = getRedis();
-  await redis.set(SESSION_KEY(sessionId), JSON.stringify(sessionData), 'EX', SESSION_TTL);
+  if (redis) await redis.set(SESSION_KEY(sessionId), JSON.stringify(sessionData), 'EX', SESSION_TTL);
 
   // DB 저장
   await getPool().query(
@@ -105,8 +105,10 @@ async function startSession({ userAddress, serviceType, depositUsdc, meta = {} }
 
 async function getSession(sessionId) {
   const redis = getRedis();
-  const raw = await redis.get(SESSION_KEY(sessionId));
-  if (raw) return JSON.parse(raw);
+  if (redis) {
+    const raw = await redis.get(SESSION_KEY(sessionId));
+    if (raw) return JSON.parse(raw);
+  }
 
   // Redis miss → DB fallback
   const result = await getPool().query('SELECT * FROM sessions WHERE id = $1', [sessionId]);
@@ -121,9 +123,9 @@ async function _updateSessionState(sessionId, newStatus, extra = {}) {
 
   const updated = { ...session, status: newStatus, ...extra, updatedAt: Date.now() };
 
-  // Redis 업데이트
+  // Redis 업데이트 (없으면 skip — DB만으로 운영)
   const redis = getRedis();
-  await redis.set(SESSION_KEY(sessionId), JSON.stringify(updated), 'EX', SESSION_TTL);
+  if (redis) await redis.set(SESSION_KEY(sessionId), JSON.stringify(updated), 'EX', SESSION_TTL);
 
   // DB 업데이트
   const fields = ['status = $2', 'updated_at = NOW()'];

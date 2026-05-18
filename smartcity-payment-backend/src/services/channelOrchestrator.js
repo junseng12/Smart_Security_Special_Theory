@@ -12,7 +12,8 @@ const channelMgr = require('./channelManager');
 const fareMgr = require('./fareEngine');
 const sigMgr = require('./signatureManager');
 const settleMgr = require('./settlementManager');
-const { getChannelState } = require('./redisClient');
+const redis = require('./redisClient');
+const { getChannelStateWithFallback } = require('./channelManager');
 const { parseUsdc, formatUsdc } = require('./walletService');
 const escrowSvc = require('./escrowPayoutService');
 
@@ -86,8 +87,8 @@ async function chargeUsage({ sessionId, channelId, userAddress, usage, serviceTy
   // 1. 요금 계산
   const fare = await fareMgr.calculateFare({ sessionId, serviceType, usage });
 
-  // 2. 채널 잔액 확인
-  const channelState = await getChannelState(channelId);
+  // 2. 채널 잔액 확인 (Redis → DB fallback)
+  const channelState = await getChannelStateWithFallback(channelId);
   if (!channelState) throw new Error('Channel state not found');
 
   const userBalanceWei = BigInt(channelState.balances.user);
@@ -113,9 +114,8 @@ async function chargeUsage({ sessionId, channelId, userAddress, usage, serviceTy
   } catch (updateErr) {
     // 서명 검증 실패 시 → Redis 직접 업데이트 (mock 모드 대응)
     logger.warn('updateChannel sig failed — applying direct state update', { channelId, error: updateErr.message });
-    const redis = require('./redisClient');
     const db    = require('./db');
-    const cur   = await redis.getChannelState(channelId);
+    const cur   = await getChannelStateWithFallback(channelId);
     if (cur) {
       const curUser = BigInt(cur.balances.user);
       const curOp   = BigInt(cur.balances.operator);
@@ -128,7 +128,7 @@ async function chargeUsage({ sessionId, channelId, userAddress, usage, serviceTy
         },
         updatedAt: Date.now(),
       };
-      await redis.saveChannelState(channelId, newState);
+      await redis.saveChannelState(channelId, newState);  // null-safe (Redis 없으면 skip)
       await db.saveStateHistory(channelId, newState).catch(() => {});
       updatedState = newState;
     }
@@ -296,7 +296,7 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
  * 채널 잔액이 예치금의 일정 % 이하면 경고 반환
  */
 async function checkBalanceThreshold(channelId, thresholdPercent = 10) {
-  const state = await getChannelState(channelId);
+  const state = await getChannelStateWithFallback(channelId);
   if (!state) return null;
 
   const totalWei = BigInt(state.balances.user) + BigInt(state.balances.operator);

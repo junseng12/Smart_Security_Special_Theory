@@ -15,6 +15,37 @@ const wallet = require('./walletService');
 const redis = require('./redisClient');
 const db = require('./db');
 
+// Redis 없을 때 DB(channel_states 테이블)에서 채널 상태 읽어오는 fallback
+async function getChannelStateWithFallback(channelId) {
+  // 1. Redis 시도
+  const cached = await redis.getChannelState(channelId);
+  if (cached) return cached;
+
+  // 2. DB fallback — channel_states 테이블 최신 row
+  const row = await db.getPool().query(
+    `SELECT channel_id, nonce, balance_user, balance_operator, user_sig, operator_sig
+       FROM channel_states
+      WHERE channel_id = $1
+      ORDER BY nonce DESC LIMIT 1`,
+    [channelId]
+  ).then(r => r.rows[0]).catch(() => null);
+
+  if (!row) return null;
+
+  // Redis 형식과 동일한 객체로 재구성
+  return {
+    channelId:  row.channel_id,
+    status:     'open',  // DB에 있으면 일단 open으로 간주
+    nonce:      Number(row.nonce),
+    balances: {
+      user:     String(row.balance_user),
+      operator: String(row.balance_operator),
+    },
+    userSig:     row.user_sig || null,
+    operatorSig: row.operator_sig || null,
+  };
+}
+
 // ── Open ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -75,8 +106,8 @@ async function openChannel({ userAddress, depositUsdc }) {
  */
 async function updateChannel({ channelId, chargeUsdc, userSig, userAddress }) {
   // 1. Load current state from Redis
-  const current = await redis.getChannelState(channelId);
-  if (!current) throw new Error(`Channel ${channelId} not found`);
+  const current = await getChannelStateWithFallback(channelId);
+  if (!current) throw new Error(`Channel ${channelId} not found (Redis+DB 모두 없음)`); 
 
   const channel = await db.getChannelRecord(channelId);
   if (!channel || channel.status !== 'open') throw new Error('Channel is not open');
@@ -144,8 +175,8 @@ async function updateChannel({ channelId, chargeUsdc, userSig, userAddress }) {
  * @returns {{ txHash, finalState }}
  */
 async function closeChannel({ channelId, userSig, userAddress, adjustment }) {
-  const current = await redis.getChannelState(channelId);
-  if (!current) throw new Error(`Channel ${channelId} not found`);
+  const current = await getChannelStateWithFallback(channelId);
+  if (!current) throw new Error(`Channel ${channelId} not found (Redis+DB 모두 없음)`); 
 
   const channel = await db.getChannelRecord(channelId);
   if (!channel || channel.status !== 'open') throw new Error('Channel is not open');
@@ -234,8 +265,8 @@ async function processRefund({ channelId, refundUsdc, refundType, userAddress })
 
   if (refundType === 'adjustment') {
     // Adjust via state update (channel must be open)
-    const current = await redis.getChannelState(channelId);
-    if (!current) throw new Error(`Channel ${channelId} not in Redis — use forced refund`);
+    const current = await getChannelStateWithFallback(channelId);
+    if (!current) throw new Error(`Channel ${channelId} not in Redis or DB`);
 
     const creditWei = wallet.parseUsdc(refundUsdc);
     const curUser = BigInt(current.balances.user);
@@ -286,6 +317,7 @@ async function getChannelState(channelId) {
 }
 
 module.exports = {
+  getChannelStateWithFallback,
   openChannel,
   updateChannel,
   closeChannel,
