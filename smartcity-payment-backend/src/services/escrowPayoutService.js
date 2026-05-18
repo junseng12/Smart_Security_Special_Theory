@@ -275,14 +275,20 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
 
   if (waitMs > 0) {
     // holdDeadline 아직 안 됐으면 onchain call은 revert됨
-    // 최대 30초만 대기 (데모 UX). 그 이상이면 비동기로 나중에 처리
-    const capMs = Math.min(waitMs + 1000, 30000);
-    if (waitMs <= 30000) {
-      logger.info(`HoldDeadline 대기 ${Math.ceil(capMs/1000)}s`, { sessionId });
-      await new Promise(r => setTimeout(r, capMs));
+    // 최대 90초 동기 대기 (Railway timeout: 30s 요청 → 비동기 처리 후 즉시 응답)
+    const MAX_SYNC_WAIT = 90000;
+    if (waitMs <= MAX_SYNC_WAIT) {
+      logger.info(`HoldDeadline 대기 ${Math.ceil(waitMs/1000)}s`, { sessionId });
+      await new Promise(r => setTimeout(r, waitMs + 1500)); // 1.5초 여유
     } else {
-      logger.warn(`HoldDeadline까지 ${Math.ceil(waitMs/1000)}s 남음 — 비동기 처리`, { sessionId });
-      // 비동기로 holdDeadline 이후 settle 시도
+      // 90초 초과: DB에 pending_settle 기록 후 즉시 응답
+      // 백그라운드 크론 또는 재시도 엔드포인트로 처리
+      logger.warn(`HoldDeadline까지 ${Math.ceil(waitMs/1000)}s 남음 — pending_settle 저장`, { sessionId });
+      await getPool().query(
+        `UPDATE escrow_locks SET state='PendingSettle', fare_amount=$2 WHERE session_id=$1`,
+        [sessionId, fareUsdc || '0']
+      ).catch(() => {});
+      // 비동기 백그라운드 재시도
       setTimeout(async () => {
         try {
           await new Promise(r => setTimeout(r, waitMs + 2000));
@@ -296,12 +302,12 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
             `UPDATE escrow_locks SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3 WHERE session_id=$1`,
             [sessionId, r2.hash, fareUsdc]
           );
-          logger.info('Delayed settleAndRelease ✅', { sessionId, txHash: r2.hash });
+          logger.info('Background settleAndRelease ✅', { sessionId, txHash: r2.hash });
         } catch(e) {
-          logger.error('Delayed settleAndRelease failed', { sessionId, error: e.message });
+          logger.error('Background settleAndRelease failed', { sessionId, error: e.message });
         }
       }, 0);
-      return { skipped: false, deferred: true, reason: 'deferred_past_holdDeadline', fareUsdc, holdDeadline: new Date(holdDeadline).toISOString() };
+      return { skipped: false, deferred: true, reason: 'pending_settle_scheduled', fareUsdc, holdDeadline: new Date(holdDeadline).toISOString() };
     }
   }
 
