@@ -151,3 +151,32 @@ func simpleHash(s string) []byte {
 	for i, c := range []byte(s) { h[i%32] ^= c }
 	return h
 }
+
+// ── GetStatus ─────────────────────────────────────────────────────
+
+type StatusResult struct {
+	State       string
+	BalanceUser float64
+	BalanceOp   float64
+	Nonce       uint64
+}
+
+func (o *Orchestrator) GetStatus(_ context.Context, channelID string) (*StatusResult, error) {
+	h, err := o.channels.GetStatus(channelID)
+	if err != nil {
+		return nil, fmt.Errorf("channel not found: %w", err)
+	}
+	return &StatusResult{
+		State:       "open",
+		BalanceUser: 0,
+		BalanceOp:   0,
+		Nonce:       h.latestNonce,
+	}, nil
+}
+
+// ── RegisterDispute ───────────────────────────────────────────────
+
+func (o *Orchestrator) RegisterDispute(ctx context.Context, channelID string) error {
+	o.log.WithField("channel_id", channelID).Warn("[Dispute] registering on-chain dispute")
+	return o.channels.InitiateDispute(ctx, channelID)
+}

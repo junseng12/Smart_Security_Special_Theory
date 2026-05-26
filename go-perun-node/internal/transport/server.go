@@ -38,14 +38,20 @@ func (s *Server) StartSession(ctx context.Context, req *pb.StartSessionRequest) 
 		return &pb.StartSessionResponse{Ok: false, Error: err.Error()}, nil
 	}
 	return &pb.StartSessionResponse{
-		Ok: true, SessionId: res.SessionID, ChannelId: res.ChannelID,
-		EscrowId: res.EscrowID, HoldDeadline: res.HoldDeadline, StateHash: res.StateHash,
+		Ok:           true,
+		SessionId:    res.SessionID,
+		ChannelId:    res.ChannelID,
+		EscrowId:     res.EscrowID,
+		HoldDeadline: res.HoldDeadline,
+		StateHash:    res.StateHash,
 	}, nil
 }
 
 func (s *Server) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
 	res, err := s.orch.EndSessionAndSettle(ctx, channel.EndRequest{
-		SessionID: req.SessionId, ChannelID: req.ChannelId, UserAddress: req.UserAddress,
+		SessionID:   req.SessionId,
+		ChannelID:   req.ChannelId,
+		UserAddress: req.UserAddress,
 	})
 	if err != nil {
 		return &pb.EndSessionResponse{Ok: false, Error: err.Error()}, nil
@@ -55,25 +61,53 @@ func (s *Server) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb
 
 func (s *Server) ProposeUsageUpdate(ctx context.Context, req *pb.ProposeUsageUpdateRequest) (*pb.ProposeUsageUpdateResponse, error) {
 	res, err := s.orch.ChargeUsage(ctx, channel.ChargeReq{
-		SessionID: req.SessionId, ChannelID: req.ChannelId,
-		ServiceType: req.UsageDelta.ServiceType,
+		SessionID:       req.SessionId,
+		ChannelID:       req.ChannelId,
+		ServiceType:     req.UsageDelta.ServiceType,
 		DurationMinutes: req.UsageDelta.DurationMinutes,
-		EnergyKwh: req.UsageDelta.EnergyKwh,
+		EnergyKwh:       req.UsageDelta.EnergyKwh,
 	})
 	if err != nil {
 		return &pb.ProposeUsageUpdateResponse{Ok: false, Error: err.Error()}, nil
 	}
 	return &pb.ProposeUsageUpdateResponse{
-		Ok: true, FareUsdc: res.FareUsdc, PolicyHash: res.PolicyHash,
-		NewNonce: int64(res.NewNonce), StateHash: res.StateHash, BalanceUser: res.BalanceUser,
+		Ok:          true,
+		FareUsdc:    res.FareUsdc,
+		PolicyHash:  res.PolicyHash,
+		NewNonce:    int64(res.NewNonce),
+		StateHash:   res.StateHash,
+		BalanceUser: res.BalanceUser,
+	}, nil
+}
+
+func (s *Server) GetChannelStatus(ctx context.Context, req *pb.GetChannelStatusRequest) (*pb.ChannelStatusResponse, error) {
+	status, err := s.orch.GetStatus(ctx, req.ChannelId)
+	if err != nil {
+		return &pb.ChannelStatusResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.ChannelStatusResponse{
+		Ok:          true,
+		Nonce:       int64(status.Nonce),
+		BalanceUser: fmt.Sprintf("%f", status.BalanceUser),
+		BalanceOp:   fmt.Sprintf("%f", status.BalanceOp),
 	}, nil
 }
 
 func (s *Server) InitiateDispute(ctx context.Context, req *pb.InitiateDisputeRequest) (*pb.InitiateDisputeResponse, error) {
-	if err := s.orch.(*channel.Orchestrator); err != nil { // type check only
+	s.log.WithField("channel_id", req.ChannelId).Warn("[Dispute] InitiateDispute requested")
+	err := s.orch.RegisterDispute(ctx, req.ChannelId)
+	if err != nil {
+		return &pb.InitiateDisputeResponse{Ok: false, Error: err.Error()}, nil
 	}
-	// 직접 channel manager 접근 필요 — orchestrator에 노출 예정
 	return &pb.InitiateDisputeResponse{Ok: true}, nil
+}
+
+func (s *Server) PostCompensation(ctx context.Context, req *pb.PostCompensationRequest) (*pb.PostCompensationResponse, error) {
+	err := s.refunds.PostCompensation(req.UserAddress, req.AmountUsdc, req.Reason)
+	if err != nil {
+		return &pb.PostCompensationResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.PostCompensationResponse{Ok: true}, nil
 }
 
 func (s *Server) AccumulateCredit(ctx context.Context, req *pb.AccumulateCreditRequest) (*pb.AccumulateCreditResponse, error) {

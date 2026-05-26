@@ -48,3 +48,15 @@ func PostSettlement(ctx context.Context, t Treasury, to, amount, reason string, 
 	log.WithFields(logrus.Fields{"tx": tx, "to": to, "amount": amount}).Info("[Refund] post-settlement compensation sent")
 	return tx, nil
 }
+
+// PostCompensation — 운영자가 사용자에게 보상을 등록
+func (m *Manager) PostCompensation(channelID, amountUsdc, reason string) error {
+	m.log.WithFields(logrus.Fields{
+		"channel_id": channelID,
+		"amount":     amountUsdc,
+		"reason":     reason,
+	}).Info("[Refund] PostCompensation registered")
+	// 크레딧으로 누적 처리
+	_, err := m.Accumulate(channelID, amountUsdc, reason)
+	return err
+}

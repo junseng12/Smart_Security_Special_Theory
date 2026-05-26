@@ -16,7 +16,7 @@ import (
 	"time"
 
 	// ── perun-eth-backend ─────────────────────────────────────────────
-	ethwallet "github.com/hyperledger-labs/perun-eth-backend/wallet"
+	ethwallet "github.com/perun-network/perun-eth-backend/wallet"
 
 	// ── go-perun SDK ──────────────────────────────────────────────────
 	"perun.network/go-perun/channel"
