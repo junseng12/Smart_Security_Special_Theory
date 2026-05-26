@@ -1,0 +1,225 @@
+syntax = "proto3";
+package smartcity;
+option go_package = "smartcity/go-perun-node/proto";
+
+// ────────────────────────────────────────────────────────────────────
+// SmartCity Payment Node — gRPC 서비스 정의
+// Node.js 백엔드가 이 서비스를 호출 → Go Perun 노드가 처리
+// ────────────────────────────────────────────────────────────────────
+service SmartCityNode {
+
+  // ── 세션 관리 ──────────────────────────────────────────────────────
+  rpc StartSession   (StartSessionRequest)   returns (StartSessionResponse);
+  rpc EndSession     (EndSessionRequest)     returns (EndSessionResponse);
+  rpc GetSessionStatus (GetSessionStatusRequest) returns (GetSessionStatusResponse);
+
+  // ── 채널 오케스트레이션 ──────────────────────────────────────────────
+  rpc OpenChannel    (OpenChannelRequest)    returns (OpenChannelResponse);
+  rpc GetChannelStatus (GetChannelStatusRequest) returns (ChannelStatusResponse);
+  rpc InitiateDispute (InitiateDisputeRequest) returns (InitiateDisputeResponse);
+
+  // ── 오프체인 업데이트 (요금 청구) ──────────────────────────────────
+  rpc ProposeUsageUpdate (ProposeUsageUpdateRequest) returns (ProposeUsageUpdateResponse);
+  rpc SubmitSignedUpdate (SubmitSignedUpdateRequest) returns (SubmitSignedUpdateResponse);
+  rpc FinalUpdateAndAdjust (FinalUpdateRequest)    returns (FinalUpdateResponse);
+
+  // ── 환불 ───────────────────────────────────────────────────────────
+  rpc AccumulateRefundCredit (RefundCreditRequest) returns (RefundCreditResponse);
+  rpc PostSettlementCompensation (CompensationRequest) returns (CompensationResponse);
+
+  // ── 이벤트/감사 ────────────────────────────────────────────────────
+  rpc StreamEvents   (StreamEventsRequest)   returns (stream Event);
+  rpc AuditLog       (AuditLogRequest)       returns (AuditLogResponse);
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 세션 관리
+// ────────────────────────────────────────────────────────────────────
+message StartSessionRequest {
+  string user_id      = 1;
+  string service_id   = 2; // "bicycle" | "ev_charging" | "parking"
+  string deposit_usdc = 3;
+  string user_address = 4; // MetaMask 주소
+}
+message StartSessionResponse {
+  bool   ok          = 1;
+  string session_id  = 2;
+  string channel_id  = 3;
+  string escrow_id   = 4;   // keccak256(sessionId) — 컨트랙트용
+  int64  hold_deadline = 5; // unix timestamp(초)
+  string state_hash  = 6;   // 초기 상태 해시
+  string error       = 7;
+}
+
+message EndSessionRequest {
+  string session_id       = 1;
+  string channel_id       = 2;
+  string user_address     = 3;
+  string user_final_sig   = 4; // 최종 상태 서명
+}
+message EndSessionResponse {
+  bool   ok              = 1;
+  string settle_tx_hash  = 2;
+  string fare_usdc       = 3;
+  string refund_usdc     = 4;
+  bool   deferred        = 5; // holdDeadline 아직 안 지남 → 비동기 정산
+  string error           = 6;
+}
+
+message GetSessionStatusRequest { string session_id = 1; }
+message GetSessionStatusResponse {
+  bool   ok      = 1;
+  string status  = 2; // ACTIVE | ENDED | SETTLING | SETTLED
+  string channel_id = 3;
+  string charged_usdc = 4;
+  string deposit_usdc = 5;
+  string error   = 6;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 채널 오케스트레이션
+// ────────────────────────────────────────────────────────────────────
+message OpenChannelRequest {
+  string user_id       = 1;
+  string user_address  = 2;
+  string deposit_usdc  = 3;
+  string deposit_tx_hash = 4; // 프론트 userDeposit TX
+  int64  hold_deadline = 5;
+}
+message OpenChannelResponse {
+  bool   ok              = 1;
+  string channel_id      = 2;
+  string initial_state_hash = 3;
+  int64  nonce           = 4;
+  string error           = 5;
+}
+
+message GetChannelStatusRequest { string channel_id = 1; }
+message ChannelStatusResponse {
+  bool   ok            = 1;
+  string channel_id    = 2;
+  int64  nonce         = 3;
+  string balance_user  = 4; // wei 단위
+  string balance_operator = 5;
+  string state_hash    = 6;
+  string phase         = 7; // Open | Closing | Closed | Disputed
+  string policy_hash   = 8;
+  string error         = 9;
+}
+
+message InitiateDisputeRequest {
+  string channel_id        = 1;
+  string latest_state_hash = 2;
+  string operator_sig      = 3;
+  string user_sig          = 4;
+}
+message InitiateDisputeResponse {
+  bool   ok             = 1;
+  string dispute_tx_hash = 2;
+  string error          = 3;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 오프체인 업데이트
+// ────────────────────────────────────────────────────────────────────
+message UsageDelta {
+  double duration_minutes = 1;
+  double energy_kwh       = 2;
+  string service_type     = 3;
+}
+
+message ProposeUsageUpdateRequest {
+  string     session_id  = 1;
+  string     channel_id  = 2;
+  string     user_address = 3;
+  UsageDelta usage_delta = 4;
+}
+message ProposeUsageUpdateResponse {
+  bool   ok          = 1;
+  string state_hash  = 2;  // 서명할 상태 다이제스트
+  int64  new_nonce   = 3;
+  string fare_usdc   = 4;  // 이번 청구 요금
+  string new_balance_user = 5;
+  string new_balance_operator = 6;
+  string policy_hash = 7;  // 검증용 정책 해시
+  string error       = 8;
+}
+
+message SubmitSignedUpdateRequest {
+  string channel_id  = 1;
+  string state_hash  = 2;
+  string user_sig    = 3;  // MetaMask personal_sign
+  int64  nonce       = 4;
+}
+message SubmitSignedUpdateResponse {
+  bool   ok          = 1;
+  int64  latest_nonce = 2;
+  string ack         = 3;
+  string error       = 4;
+}
+
+message FinalUpdateRequest {
+  string channel_id  = 1;
+  string session_id  = 2;
+}
+message FinalUpdateResponse {
+  bool   ok                    = 1;
+  string final_state_hash      = 2;
+  string operator_sig          = 3;
+  string final_balance_user    = 4;
+  string final_balance_operator = 5;
+  string total_fare_usdc       = 6; // credit 반영 후 최종 요금
+  string error                 = 7;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 환불
+// ────────────────────────────────────────────────────────────────────
+message RefundCreditRequest {
+  string channel_id   = 1;
+  string credit_usdc  = 2; // 양수: 환불액
+  string reason       = 3;
+}
+message RefundCreditResponse {
+  bool   ok           = 1;
+  string credit_total = 2;
+  string error        = 3;
+}
+
+message CompensationRequest {
+  string user_id       = 1;
+  string user_address  = 2;
+  string amount_usdc   = 3;
+  string reason        = 4;
+}
+message CompensationResponse {
+  bool   ok       = 1;
+  string tx_hash  = 2;
+  string error    = 3;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 이벤트 스트리밍
+// ────────────────────────────────────────────────────────────────────
+message StreamEventsRequest {
+  string session_id = 1;
+  string channel_id = 2;
+}
+message Event {
+  string type      = 1; // STATE_UPDATED | SETTLED | DISPUTE_RAISED | REFUND_ISSUED
+  string payload   = 2; // JSON
+  int64  timestamp = 3;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// 감사 로그
+// ────────────────────────────────────────────────────────────────────
+message AuditLogRequest {
+  string action   = 1;
+  string metadata = 2; // JSON
+}
+message AuditLogResponse {
+  bool   ok     = 1;
+  string log_id = 2;
+  string error  = 3;
+}
