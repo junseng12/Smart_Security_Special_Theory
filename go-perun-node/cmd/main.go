@@ -1,159 +1,124 @@
-// SmartCity Go-Perun Node
-// ─────────────────────────────────────────────────────────────────────────────
-// go-perun SDK를 이용한 오프체인 결제 노드입니다.
-// Node.js 백엔드가 gRPC로 이 노드를 호출합니다.
+// SmartCity Go-Perun Node — 진입점
 //
 // 시작 순서:
-//   1) go-perun Client 초기화 (ETH backend, Funder, Adjudicator, Watcher)
-//   2) Session/Channel/Pricing/Refund/Audit 매니저 초기화
-//   3) Orchestrator 조립
-//   4) gRPC 서버 시작 (기본 포트 50051)
+//   1) 환경변수 로드
+//   2) setup.NewPerunNode() — perun-eth-backend 기반 실제 초기화
+//   3) Manager / Orchestrator 조립
+//   4) gRPC 서버 시작
 //
 // 환경변수:
-//   BASE_RPC_URL        — Base Sepolia RPC (예: https://sepolia.base.org)
-//   OPERATOR_PRIVKEY    — 운영자 개인키 (hex, 0x 없이)
-//   ADJUDICATOR_ADDR    — Perun Adjudicator 컨트랙트 주소
-//   ASSET_HOLDER_ADDR   — USDC AssetHolder 컨트랙트 주소
-//   GRPC_PORT           — gRPC 수신 포트 (기본 50051)
-//   DB_URL              — PostgreSQL 연결 문자열
-//   REDIS_URL           — Redis 연결 문자열
+//   BASE_RPC_URL        — https://sepolia.base.org
+//   CHAIN_ID            — 84532 (Base Sepolia)
+//   OPERATOR_PRIVKEY    — hex 개인키 (0x 없이)
+//   ADJUDICATOR_ADDR    — perun-eth-contracts Adjudicator 주소
+//   ASSET_HOLDER_ADDR   — perun-eth-contracts AssetHolderERC20 주소
+//   USDC_TOKEN_ADDR     — 0x036CbD53842c5426634e7929541eC2318f3dCF7e (Base Sepolia)
+//   RECEIVER_ADDR       — 운영자 수령 주소
+//   GRPC_PORT           — 기본 50051
+//   DEPLOY_CONTRACTS    — "true" 이면 컨트랙트 배포 후 종료
 package main
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"strconv"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/sirupsen/logrus"
 
 	"smartcity/go-perun-node/internal/audit"
 	"smartcity/go-perun-node/internal/channel"
 	"smartcity/go-perun-node/internal/refund"
 	"smartcity/go-perun-node/internal/session"
+	"smartcity/go-perun-node/internal/setup"
 	"smartcity/go-perun-node/internal/transport"
 )
 
 func main() {
 	log := logrus.New()
 	log.SetFormatter(&logrus.JSONFormatter{})
-	log.SetLevel(logrus.InfoLevel)
 
-	log.Info("SmartCity Go-Perun Node starting...")
-
-	// ── 환경변수 ───────────────────────────────────────────────────────────
-	grpcPort := envInt("GRPC_PORT", 50051)
-
-	// ── DB / Redis 초기화 ─────────────────────────────────────────────────
-	// TODO: DB/Redis 클라이언트 초기화 (session.NewPostgresStore 등)
-	// 현재는 인메모리 mock 사용
-	log.Info("Initializing stores (in-memory mock for now)...")
-	sessionStore := session.NewInMemoryStore()
-	auditStore   := audit.NewInMemoryStore()
-
-	// ── 매니저 초기화 ─────────────────────────────────────────────────────
-	sessionMgr := session.NewManager(sessionStore, log)
-	channelMgr := channel.NewManager(log)
-	auditLogger := audit.NewLogger(auditStore, log)
-
-	// Treasury (정산 후 환불용) — 현재 mock
-	treasury   := refund.NewMockTreasury(log)
-	refundMgr  := refund.NewManager(treasury, log)
-
-	// ── go-perun Client 초기화 ────────────────────────────────────────────
-	// ETH Backend: perun-eth-backend 사용
-	// 필요 컨트랙트:
-	//   - Adjudicator (분쟁/정산 중재자)
-	//   - ETH/ERC20 AssetHolder (USDC 예치 컨트랙트)
-	//
-	// ★ 실제 go-perun 초기화 코드:
-	//   cb := ethchannel.NewContractBackend(ethClient, chainID, operatorKey)
-	//   funder := ethchannel.NewFunder(cb)
-	//   funder.RegisterAsset(usdcAsset, ethchannel.NewERC20Depositor(), operatorAccount)
-	//   adj := ethchannel.NewAdjudicator(cb, adjAddress, operatorAddr, operatorAccount, 1000000)
-	//   watcher, _ := local.NewWatcher(adj)
-	//   perunClient, _ := client.New(operatorWireAddr, bus, funder, adj, wallet, watcher)
-	//   channelMgr.SetPerunClient(perunClient, operatorWireAddr, usdcAsset)
-	//
-	// 현재: 환경변수가 설정되지 않은 경우 mock 모드로 동작
-	if err := initPerunClient(channelMgr, log); err != nil {
-		log.WithError(err).Warn("go-perun client init failed — running in MOCK mode")
-		log.Warn("Set BASE_RPC_URL, OPERATOR_PRIVKEY, ADJUDICATOR_ADDR, ASSET_HOLDER_ADDR for real Perun")
+	// ── 환경변수 로드 ────────────────────────────────────────────────
+	cfg := &setup.Config{
+		RPCURL:          mustEnv("BASE_RPC_URL"),
+		ChainID:         mustEnvUint64("CHAIN_ID", 84532),
+		OperatorPrivKey: mustEnv("OPERATOR_PRIVKEY"),
+		AdjudicatorAddr: common.HexToAddress(mustEnv("ADJUDICATOR_ADDR")),
+		AssetHolderAddr: common.HexToAddress(mustEnv("ASSET_HOLDER_ADDR")),
+		USDCTokenAddr:   common.HexToAddress(envOr("USDC_TOKEN_ADDR", "0x036CbD53842c5426634e7929541eC2318f3dCF7e")),
+		ReceiverAddr:    common.HexToAddress(mustEnv("RECEIVER_ADDR")),
+		TxFinalityDepth: 1,
 	}
 
-	// ── Orchestrator 조립 ─────────────────────────────────────────────────
-	orchestrator := channel.NewOrchestrator(sessionMgr, channelMgr, refundMgr, auditLogger, log)
+	// ── 컨트랙트 배포 모드 ────────────────────────────────────────────
+	if os.Getenv("DEPLOY_CONTRACTS") == "true" {
+		deployCfg := *cfg
+		deployCfg.AdjudicatorAddr = common.Address{} // 배포 전이므로 비워도 됨
+		deployCfg.AssetHolderAddr = common.Address{}
+		addrs, err := setup.DeployContracts(context.Background(), &deployCfg, log)
+		if err != nil {
+			log.WithError(err).Fatal("contract deployment failed")
+		}
+		fmt.Printf("\n✅ 배포 완료\n")
+		fmt.Printf("ADJUDICATOR_ADDR=%s\n", addrs.AdjudicatorAddr.Hex())
+		fmt.Printf("ASSET_HOLDER_ADDR=%s\n", addrs.AssetHolderAddr.Hex())
+		fmt.Println("\nRailway 환경변수에 위 값을 등록 후 재시작하세요.")
+		os.Exit(0)
+	}
 
-	// ── gRPC 서버 시작 ────────────────────────────────────────────────────
-	grpcServer := transport.NewGRPCServer(orchestrator, refundMgr, auditLogger, log)
+	// ── go-perun 노드 초기화 (perun-eth-backend) ─────────────────────
+	log.Info("Initializing go-perun node (perun-eth-backend)...")
+	node, err := setup.NewPerunNode(cfg, log)
+	if err != nil {
+		log.WithError(err).Fatal("Failed to initialize perun node")
+	}
+
+	// ── 매니저 조립 ──────────────────────────────────────────────────
+	sessionMgr := session.NewManager(log)
+	channelMgr := channel.NewManager(node, log)
+	refundMgr  := refund.NewManager(log)
+	auditLog   := audit.NewLogger(log)
+
+	// go-perun Handle 루프 시작 (incoming proposals / updates 처리)
+	channelMgr.StartHandling()
+
+	orch := channel.NewOrchestrator(channelMgr, sessionMgr, refundMgr, auditLog, log)
+
+	// ── gRPC 서버 시작 ────────────────────────────────────────────────
+	grpcPort := envInt("GRPC_PORT", 50051)
+	srv := transport.New(orch, refundMgr, auditLog, log)
 
 	log.WithField("port", grpcPort).Info("Starting gRPC server...")
-	if err := transport.Serve(grpcPort, grpcServer); err != nil {
+	if err := transport.Serve(grpcPort, srv); err != nil {
 		log.WithError(err).Fatal("gRPC server failed")
-		os.Exit(1)
 	}
 }
 
-// initPerunClient는 go-perun 클라이언트를 초기화합니다.
-// 환경변수가 없으면 mock 모드로 동작합니다.
-func initPerunClient(mgr *channel.Manager, log *logrus.Logger) error {
-	rpcURL  := os.Getenv("BASE_RPC_URL")
-	privKey := os.Getenv("OPERATOR_PRIVKEY")
-	adjAddr := os.Getenv("ADJUDICATOR_ADDR")
-	assetAddr := os.Getenv("ASSET_HOLDER_ADDR")
-
-	if rpcURL == "" || privKey == "" || adjAddr == "" || assetAddr == "" {
-		return nil // mock 모드
+func mustEnv(key string) string {
+	v := os.Getenv(key)
+	if v == "" {
+		logrus.Fatalf("missing required env: %s", key)
 	}
+	return v
+}
 
-	log.WithFields(logrus.Fields{
-		"rpc":          rpcURL,
-		"adjudicator":  adjAddr,
-		"asset_holder": assetAddr,
-	}).Info("Initializing go-perun ETH client...")
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" { return v }
+	return def
+}
 
-	// ── 실제 go-perun ETH 백엔드 초기화 (perun-eth-backend) ─────────────
-	// import (
-	//     ethchannel "github.com/perun-network/perun-eth-backend/channel"
-	//     ethwallet "github.com/perun-network/perun-eth-backend/wallet"
-	//     swallet "github.com/perun-network/perun-eth-backend/wallet/simple"
-	//     "github.com/perun-network/perun-eth-backend/wire/net/libp2p"
-	//     localwatcher "perun.network/go-perun/watcher/local"
-	//     goclient "perun.network/go-perun/client"
-	// )
-	//
-	// key, _ := crypto.HexToECDSA(privKey)
-	// w := swallet.NewWallet()
-	// acc, _ := w.ImportAccount(key)
-	// ethAcc := accounts.Account{Address: crypto.PubkeyToAddress(key.PublicKey)}
-	//
-	// cb, _ := ethchannel.CreateContractBackend(rpcURL, chainID, w)
-	// funder := ethchannel.NewFunder(cb)
-	// usdcAsset := ethchannel.NewAsset(big.NewInt(chainID), common.HexToAddress(assetAddr))
-	// dep := ethchannel.NewERC20Depositor(usdcAddress, 300000)
-	// funder.RegisterAsset(*usdcAsset, dep, ethAcc)
-	//
-	// adj := ethchannel.NewAdjudicator(cb, common.HexToAddress(adjAddr), ethAcc.Address, ethAcc, 1000000)
-	// watcher, _ := localwatcher.NewWatcher(adj)
-	//
-	// wireAcc := p2p.NewRandomAccount(...)
-	// bus, _ := p2p.NewBus(wireAcc, ...)
-	// wireAddrs := map[wallet.BackendID]wire.Address{ethwallet.BackendID: wireAcc.Address()}
-	// wallets := map[wallet.BackendID]wallet.Wallet{ethwallet.BackendID: w}
-	// perunClient, _ := goclient.New(wireAddrs, bus, funder, adj, wallets, watcher)
-	//
-	// mgr.SetPerunClient(perunClient, wireAddrs, usdcAsset)
-
-	log.Info("go-perun ETH client initialized (stub — uncomment above for production)")
-	return nil
+func mustEnvUint64(key string, def uint64) uint64 {
+	v := os.Getenv(key)
+	if v == "" { return def }
+	n, err := strconv.ParseUint(v, 10, 64)
+	if err != nil { return def }
+	return n
 }
 
 func envInt(key string, def int) int {
 	v := os.Getenv(key)
-	if v == "" {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return def
-	}
+	if v == "" { return def }
+	n, _ := strconv.Atoi(v)
 	return n
 }
