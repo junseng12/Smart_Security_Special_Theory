@@ -522,9 +522,11 @@ func stateDigest(s *channel.State) string {
 }
 
 func usdcToWei(usdc string) *big.Int {
-	var f float64
-	fmt.Sscanf(usdc, "%f", &f)
-	bf := new(big.Float).SetPrec(128).SetFloat64(f)
+	// big.Float로 직접 파싱 — float64 경유 시 정밀도 손실 방지
+	bf, _, err := big.ParseFloat(usdc, 10, 128, big.ToNearestEven)
+	if err != nil {
+		return big.NewInt(0)
+	}
 	bf.Mul(bf, new(big.Float).SetPrec(128).SetInt64(1_000_000))
 	result, _ := bf.Int(nil)
 	return result
