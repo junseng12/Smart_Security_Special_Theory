@@ -1,0 +1,98 @@
+syntax = "proto3";
+package smartcity;
+option go_package = "smartcity/go-perun-node/proto";
+
+service SmartCityNode {
+  rpc StartSession      (StartSessionRequest)      returns (StartSessionResponse);
+  rpc EndSession        (EndSessionRequest)        returns (EndSessionResponse);
+  rpc ProposeUsageUpdate(ProposeUsageUpdateRequest) returns (ProposeUsageUpdateResponse);
+  rpc GetChannelStatus  (GetChannelStatusRequest)  returns (ChannelStatusResponse);
+  rpc InitiateDispute   (InitiateDisputeRequest)   returns (InitiateDisputeResponse);
+  rpc AccumulateCredit  (AccumulateCreditRequest)  returns (AccumulateCreditResponse);
+  rpc PostCompensation  (PostCompensationRequest)  returns (PostCompensationResponse);
+  rpc AuditLog          (AuditLogRequest)          returns (AuditLogResponse);
+  rpc StreamEvents      (StreamEventsRequest)      returns (stream Event);
+}
+
+message StartSessionRequest {
+  string user_address  = 1;
+  string service_id    = 2;
+  string deposit_usdc  = 3;
+  string user_wire_addr = 4; // P2P 주소 (libp2p multiaddr)
+  int64  hold_seconds  = 5;
+}
+message StartSessionResponse {
+  bool   ok           = 1;
+  string session_id   = 2;
+  string channel_id   = 3;
+  string escrow_id    = 4;
+  int64  hold_deadline= 5;
+  string state_hash   = 6;
+  string error        = 7;
+}
+
+message EndSessionRequest {
+  string session_id      = 1;
+  string channel_id      = 2;
+  string user_address    = 3;
+  string user_final_sig  = 4;
+}
+message EndSessionResponse {
+  bool   ok          = 1;
+  string fare_usdc   = 2;
+  string refund_usdc = 3;
+  string error       = 4;
+}
+
+message UsageDelta {
+  string service_type      = 1;
+  double duration_minutes  = 2;
+  double energy_kwh        = 3;
+}
+message ProposeUsageUpdateRequest {
+  string     session_id  = 1;
+  string     channel_id  = 2;
+  UsageDelta usage_delta = 3;
+}
+message ProposeUsageUpdateResponse {
+  bool   ok          = 1;
+  string fare_usdc   = 2;
+  string policy_hash = 3;
+  int64  new_nonce   = 4;
+  string state_hash  = 5;
+  string balance_user = 6;
+  string error       = 7;
+}
+
+message GetChannelStatusRequest { string channel_id = 1; }
+message ChannelStatusResponse {
+  bool   ok           = 1;
+  int64  nonce        = 2;
+  string balance_user = 3;
+  string balance_op   = 4;
+  string state_hash   = 5;
+  string error        = 6;
+}
+
+message InitiateDisputeRequest { string channel_id = 1; }
+message InitiateDisputeResponse { bool ok = 1; string error = 2; }
+
+message AccumulateCreditRequest {
+  string channel_id  = 1;
+  string credit_usdc = 2;
+  string reason      = 3;
+}
+message AccumulateCreditResponse { bool ok = 1; string total = 2; string error = 3; }
+
+message PostCompensationRequest {
+  string user_address = 1;
+  string amount_usdc  = 2;
+  string reason       = 3;
+}
+message PostCompensationResponse { bool ok = 1; string tx_hash = 2; string error = 3; }
+
+message AuditLogRequest  { string action = 1; string metadata = 2; }
+message AuditLogResponse { bool ok = 1; string log_id = 2; }
+
+message StreamEventsRequest { string session_id = 1; string channel_id = 2; }
+message Event { string type = 1; string payload = 2; int64 timestamp = 3; }
