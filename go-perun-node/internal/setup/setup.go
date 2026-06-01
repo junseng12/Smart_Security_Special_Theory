@@ -1,12 +1,11 @@
 // Package setup — perun-eth-backend v0.6.0 + go-perun v0.15.0 기준 초기화
+// ★ LocalBus 전환: libp2p P2P 제거, 동일 프로세스 내 인메모리 버스 사용
 package setup
 
 import (
 	"context"
 	"fmt"
 	"math/big"
-	"math/rand"
-	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -25,9 +24,6 @@ import (
 	"perun.network/go-perun/wallet"
 	"perun.network/go-perun/watcher/local"
 	"perun.network/go-perun/wire"
-	"perun.network/go-perun/wire/net"
-	p2p "perun.network/go-perun/wire/net/libp2p"
-	perunio "perun.network/go-perun/wire/perunio/serializer"
 )
 
 // Config — 환경변수에서 로드
@@ -45,16 +41,20 @@ type Config struct {
 // PerunNode — 초기화 완료된 go-perun 노드
 type PerunNode struct {
 	Client          *client.Client
+	Bus             *wire.LocalBus        // ★ shared local bus (custodial user도 사용)
 	OperatorAddr    common.Address
 	OperatorAccount accounts.Account
 	WireAddress     map[wallet.BackendID]wire.Address
 	EthAddress      map[wallet.BackendID]wallet.Address
 	USDCAsset       channel.Asset
 	ContractBackend ethchannel.ContractBackend
+	Funder          *ethchannel.Funder
+	Adjudicator     *ethchannel.Adjudicator
+	Cfg             *Config
 	Log             *logrus.Logger
 }
 
-// NewPerunNode — 8단계 초기화
+// NewPerunNode — LocalBus 기반 초기화 (P2P 없음)
 func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	log.WithFields(logrus.Fields{
 		"rpc":          cfg.RPCURL,
@@ -82,11 +82,9 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	log.Info("[Setup] ✓ contract backend created")
 
 	// Step 3: 컨트랙트 검증
-	// ValidateAdjudicator(ctx, backend, adjAddr)
 	if err := ethchannel.ValidateAdjudicator(context.Background(), cb, cfg.AdjudicatorAddr); err != nil {
 		return nil, fmt.Errorf("Adjudicator 검증 실패 (%s): %w", cfg.AdjudicatorAddr.Hex(), err)
 	}
-	// ValidateAssetHolderERC20(ctx, backend, assetHolder, adjudicator, token)
 	if err := ethchannel.ValidateAssetHolderERC20(
 		context.Background(), cb,
 		cfg.AssetHolderAddr, cfg.AdjudicatorAddr, cfg.USDCTokenAddr,
@@ -102,7 +100,6 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	log.WithField("asset", cfg.AssetHolderAddr.Hex()).Info("[Setup] ✓ ERC20 funder registered")
 
 	// Step 5: Adjudicator
-	// NewAdjudicator(backend, contract, receiver, txSender, gasLimit)
 	adj := ethchannel.NewAdjudicator(cb, cfg.AdjudicatorAddr, cfg.ReceiverAddr, operatorAcc, 1_000_000)
 	log.Info("[Setup] ✓ adjudicator created")
 
@@ -113,18 +110,19 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	}
 	log.Info("[Setup] ✓ dispute watcher initialized")
 
-	// Step 7: P2P Wire Bus (libp2p)
-	rng     := rand.New(rand.NewSource(time.Now().UnixNano()))
-	wireAcc := p2p.NewRandomAccount(rng)
-	listener := p2p.NewP2PListener(wireAcc)
-	dialer   := p2p.NewP2PDialer(wireAcc)
-	wireID   := map[wallet.BackendID]wire.Account{ethwallet.BackendID: wireAcc}
-	bus      := net.NewBus(wireID, dialer, perunio.Serializer())
-	go bus.Listen(listener)
-	wireAddrs := map[wallet.BackendID]wire.Address{ethwallet.BackendID: wireAcc.Address()}
-	log.Info("[Setup] ✓ P2P wire bus started")
+	// Step 7: ★ LocalBus (P2P 없음 — 동일 프로세스 내 인메모리 통신)
+	bus := wire.NewLocalBus()
+	log.Info("[Setup] ✓ LocalBus initialized (no P2P)")
 
-	// Step 8: go-perun Client 조립
+	// Step 8: operator wire 주소 (가상 — LocalBus용)
+	operatorWireKey, err := crypto.GenerateKey()
+	if err != nil {
+		return nil, fmt.Errorf("generating operator wire key: %w", err)
+	}
+	operatorWireAddr := ethwallet.AsWalletAddr(crypto.PubkeyToAddress(operatorWireKey.PublicKey))
+	wireAddrs := map[wallet.BackendID]wire.Address{ethwallet.BackendID: operatorWireAddr}
+
+	// Step 9: go-perun Client 조립
 	wallets := map[wallet.BackendID]wallet.Wallet{ethwallet.BackendID: w}
 	eAddrs  := map[wallet.BackendID]wallet.Address{ethwallet.BackendID: eaddr}
 
@@ -136,12 +134,16 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 
 	return &PerunNode{
 		Client:          perunClient,
+		Bus:             bus,
 		OperatorAddr:    operatorAddr,
 		OperatorAccount: operatorAcc,
 		WireAddress:     wireAddrs,
 		EthAddress:      eAddrs,
 		USDCAsset:       usdcAsset,
 		ContractBackend: cb,
+		Funder:          funder,
+		Adjudicator:     adj,
+		Cfg:             cfg,
 		Log:             log,
 	}, nil
 }
@@ -176,7 +178,6 @@ func newContractBackend(rpcURL string, chainID uint64, w *swallet.Wallet) (ethch
 	if err != nil {
 		return ethchannel.ContractBackend{}, fmt.Errorf("ethclient.Dial: %w", err)
 	}
-	// swallet.NewTransactor(wallet, signer)
 	signer := types.NewLondonSigner(new(big.Int).SetUint64(chainID))
 	tr     := swallet.NewTransactor(w, signer)
 	cid    := ethchannel.MakeChainID(new(big.Int).SetUint64(chainID))
