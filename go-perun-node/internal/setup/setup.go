@@ -17,6 +17,7 @@ import (
 
 	ethchannel "github.com/perun-network/perun-eth-backend/channel"
 	ethwallet  "github.com/perun-network/perun-eth-backend/wallet"
+	ethwire    "github.com/perun-network/perun-eth-backend/wire"
 	swallet    "github.com/perun-network/perun-eth-backend/wallet/simple"
 
 	"perun.network/go-perun/channel"
@@ -114,12 +115,13 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	bus := wire.NewLocalBus()
 	log.Info("[Setup] ✓ LocalBus initialized (no P2P)")
 
-	// Step 8: operator wire 주소 (가상 — LocalBus용)
+	// Step 8: operator wire 주소 — ethwire.Address 래퍼 사용
 	operatorWireKey, err := crypto.GenerateKey()
 	if err != nil {
 		return nil, fmt.Errorf("generating operator wire key: %w", err)
 	}
-	operatorWireAddr := ethwallet.AsWalletAddr(crypto.PubkeyToAddress(operatorWireKey.PublicKey))
+	operatorEthAddr := ethwallet.AsWalletAddr(crypto.PubkeyToAddress(operatorWireKey.PublicKey))
+	operatorWireAddr := &ethwire.Address{Address: operatorEthAddr}
 	wireAddrs := map[wallet.BackendID]wire.Address{ethwallet.BackendID: operatorWireAddr}
 
 	// Step 9: go-perun Client 조립
