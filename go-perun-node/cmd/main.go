@@ -41,7 +41,7 @@ func main() {
 
 	// ── 환경변수 로드 ────────────────────────────────────────────────
 	cfg := &setup.Config{
-		RPCUrl:          mustEnv("BASE_RPC_URL"),
+		RPCURL:          mustEnv("BASE_RPC_URL"),
 		ChainID:         mustEnvUint64("CHAIN_ID", 84532),
 		OperatorPrivKey: mustEnv("OPERATOR_PRIVKEY"),
 		AdjudicatorAddr: common.HexToAddress(mustEnv("ADJUDICATOR_ADDR")),
