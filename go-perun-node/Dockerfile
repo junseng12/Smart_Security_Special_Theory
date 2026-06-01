@@ -3,7 +3,6 @@ FROM golang:1.23-alpine AS builder
 
 RUN apk add --no-cache git gcc musl-dev linux-headers curl unzip
 
-# protoc 설치
 RUN curl -sLO https://github.com/protocolbuffers/protobuf/releases/download/v27.0/protoc-27.0-linux-x86_64.zip \
     && unzip protoc-27.0-linux-x86_64.zip -d /usr/local \
     && rm protoc-27.0-linux-x86_64.zip
@@ -18,8 +17,8 @@ RUN go mod download
 
 COPY . .
 
-# ★ 캐시 무효화 — 이 줄의 문자열이 바뀌면 이후 모든 레이어 재실행
-RUN echo "bust-1780309757"
+# ★ 캐시 무효화 — setup.go DialContext fix
+RUN echo "bust-1780310180"
 
 RUN protoc --go_out=. --go_opt=paths=source_relative \
            --go-grpc_out=. --go-grpc_opt=paths=source_relative \
