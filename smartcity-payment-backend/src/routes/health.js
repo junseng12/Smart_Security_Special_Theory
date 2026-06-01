@@ -5,9 +5,8 @@ router.get('/', (req, res) => {
   const redis = require('../services/redisClient');
   const db = require('../services/db');
 
-  const redisClient = redis.getRedis();
   Promise.all([
-    redisClient ? redisClient.ping().then(() => 'ok').catch(() => 'error') : Promise.resolve('error'),
+    redis.getRedis().ping().then(() => 'ok').catch(() => 'error'),
     db.getPool().query('SELECT 1').then(() => 'ok').catch(() => 'error'),
   ]).then(([redisStatus, dbStatus]) => {
     const perunHost = process.env.PERUN_GRPC_HOST;
