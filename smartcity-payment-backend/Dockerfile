@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev
 
-RUN echo "cache bust: 1780315958"
+RUN echo "cache bust: 1780316127"
 COPY . .
 
 RUN mkdir -p logs
