@@ -39,21 +39,31 @@ async function ensureSettlementTable() {
  * @param {object} params.finalState  - { nonce, balances: { user, operator }, ... }
  * @param {string} params.userAddress
  */
-async function recordSettlement({ sessionId, channelId, txHash, finalState, userAddress }) {
+async function recordSettlement({ sessionId, channelId, txHash, finalState, userAddress, fareUsdc, refundUsdc }) {
   await ensureSettlementTable();
 
-  const { ethers } = require('ethers');
-  const userRefundWei = BigInt(finalState.balances.user);
-  const operatorEarnWei = BigInt(finalState.balances.operator);
-
-  const userRefundUsdc = ethers.formatUnits(userRefundWei, 6);
-  const operatorEarnUsdc = ethers.formatUnits(operatorEarnWei, 6);
+  // go-perun 모드: fareUsdc / refundUsdc 직접 전달
+  // 레거시 모드: finalState.balances에서 계산
+  let userRefundUsdc, operatorEarnUsdc, finalNonce;
+  if (fareUsdc !== undefined || refundUsdc !== undefined) {
+    operatorEarnUsdc = String(fareUsdc   || '0');
+    userRefundUsdc   = String(refundUsdc || '0');
+    finalNonce       = 0;
+    finalState       = finalState || {};
+  } else {
+    const { ethers } = require('ethers');
+    const userRefundWei    = BigInt(finalState.balances.user);
+    const operatorEarnWei  = BigInt(finalState.balances.operator);
+    userRefundUsdc   = ethers.formatUnits(userRefundWei,   6);
+    operatorEarnUsdc = ethers.formatUnits(operatorEarnWei, 6);
+    finalNonce       = finalState.nonce;
+  }
 
   await getPool().query(
     `INSERT INTO settlements
      (session_id, channel_id, tx_hash, status, final_nonce, user_refund_usdc, operator_earn_usdc, final_state)
      VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7)`,
-    [sessionId, channelId, txHash, finalState.nonce, userRefundUsdc, operatorEarnUsdc, JSON.stringify(finalState)]
+    [sessionId, channelId, txHash, finalNonce, userRefundUsdc, operatorEarnUsdc, JSON.stringify(finalState)]
   );
 
   logger.info('Settlement recorded', { sessionId, txHash, userRefundUsdc, operatorEarnUsdc });

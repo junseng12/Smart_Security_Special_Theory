@@ -1,0 +1,35 @@
+# perun-eth-contracts 배포 주소 (Base Sepolia)
+
+배포일: 2026-05-26
+배포자: 0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7
+
+## 컨트랙트 주소
+
+| 컨트랙트 | 주소 | BaseScan |
+|---|---|---|
+| **Adjudicator** | `0x758411b763D21CFEBF4498381Cb331c299b63510` | [링크](https://sepolia.basescan.org/address/0x758411b763D21CFEBF4498381Cb331c299b63510) |
+| **AssetHolderERC20** | `0x71048c2dEfB0240EFE3b9d1FC349D198E3b10ae4` | [링크](https://sepolia.basescan.org/address/0x71048c2dEfB0240EFE3b9d1FC349D198E3b10ae4) |
+
+## 관련 주소
+
+| 항목 | 주소 |
+|---|---|
+| USDC (Base Sepolia) | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` |
+| 운영자 / 수령자 | `0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7` |
+
+## TX 해시
+
+- Adjudicator 배포: `0xdb7f0a4208dc71cb9fef3dd773e67f83dafcaad165cd87f776b7f2a0c60387f8`
+- AssetHolderERC20 배포: `0x1731b3864570d0f6a78456cb831da875eb2da3b65106e3b5490332d5cf95aed9`
+
+## Railway 환경변수 등록값
+
+```
+ADJUDICATOR_ADDR=0x758411b763D21CFEBF4498381Cb331c299b63510
+ASSET_HOLDER_ADDR=0x71048c2dEfB0240EFE3b9d1FC349D198E3b10ae4
+USDC_TOKEN_ADDR=0x036CbD53842c5426634e7929541eC2318f3dCF7e
+RECEIVER_ADDR=0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7
+BASE_RPC_URL=https://sepolia.base.org
+CHAIN_ID=84532
+GRPC_PORT=50051
+```
