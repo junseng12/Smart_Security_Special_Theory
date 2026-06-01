@@ -1,4 +1,4 @@
-# rebuild trigger: LocalBus 1780308220
+# rebuild trigger: server.go context.Background() fix — 1780309439
 # ── 빌드 스테이지 ────────────────────────────────────────────────────
 FROM golang:1.23-alpine AS builder
 
@@ -19,8 +19,8 @@ RUN go mod download
 
 COPY . .
 
-# ★ 캐시 무효화 — 매 빌드마다 갱신
-ARG CACHEBUST=1780308220
+# ★ 캐시 무효화 — server.go context fix
+ARG CACHEBUST=1780309439
 RUN echo "cache bust: $CACHEBUST"
 
 RUN protoc --go_out=. --go_opt=paths=source_relative \
