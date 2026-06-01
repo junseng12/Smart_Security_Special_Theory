@@ -142,7 +142,7 @@ async function startSession({ userAddress, serviceId, depositUsdc, userWireAddr 
     hold_seconds:   holdSeconds,
   };
   if (_mode === 'mock') return runMock('StartSession', req);
-  return call('StartSession', req, 30_000); // 온체인 tx 포함 → 30초
+  return call('StartSession', req, 120_000); // 온체인 tx 포함 → 120초 (go-perun fundCtx=3min)
 }
 
 /**
