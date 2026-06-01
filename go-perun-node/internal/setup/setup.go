@@ -1,13 +1,11 @@
 // Package setup — perun-eth-backend v0.6.0 + go-perun v0.15.0 기준 초기화
 // ★ LocalBus 전환: libp2p P2P 제거, 동일 프로세스 내 인메모리 버스 사용
-// ★ Dual-client: HTTP(TX 전송) + WSS(이벤트 구독) 분리
 package setup
 
 import (
 	"context"
 	"fmt"
 	"math/big"
-	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -31,8 +29,7 @@ import (
 
 // Config — 환경변수에서 로드
 type Config struct {
-	RPCURL          string // WSS URL (wss://...) — 이벤트 구독용
-	HTTPRPCURL      string // HTTP URL (https://...) — TX 전송용 (선택, 미설정 시 RPCURL 사용)
+	RPCURL          string
 	ChainID         uint64
 	OperatorPrivKey string
 	AdjudicatorAddr common.Address
@@ -45,7 +42,7 @@ type Config struct {
 // PerunNode — 초기화 완료된 go-perun 노드
 type PerunNode struct {
 	Client          *client.Client
-	Bus             *wire.LocalBus
+	Bus             *wire.LocalBus        // ★ shared local bus (custodial user도 사용)
 	OperatorAddr    common.Address
 	OperatorAccount accounts.Account
 	WireAddress     map[wallet.BackendID]wire.Address
@@ -58,15 +55,7 @@ type PerunNode struct {
 	Log             *logrus.Logger
 }
 
-// wssToHTTPS — wss:// → https:// 변환 (HTTP fallback용)
-func wssToHTTPS(url string) string {
-	url = strings.Replace(url, "wss://", "https://", 1)
-	url = strings.Replace(url, "ws://", "http://", 1)
-	return url
-}
-
 // NewPerunNode — LocalBus 기반 초기화 (P2P 없음)
-// ★ WSS client for event subscription, HTTP client for TX sending
 func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	log.WithFields(logrus.Fields{
 		"rpc":          cfg.RPCURL,
@@ -87,30 +76,18 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	log.WithField("operator", operatorAddr.Hex()).Info("[Setup] ✓ wallet loaded")
 
 	// Step 2: ContractBackend
-	// ★ WSS URL → ethclient (WatchLogs 지원)
-	// ★ 연결 context는 Background() 사용 — gRPC deadline과 완전 분리
 	cb, err := newContractBackend(cfg.RPCURL, cfg.ChainID, w)
 	if err != nil {
-		// WSS 실패 시 HTTP fallback 시도
-		httpURL := cfg.HTTPRPCURL
-		if httpURL == "" {
-			httpURL = wssToHTTPS(cfg.RPCURL)
-		}
-		log.WithError(err).Warnf("[Setup] WSS 연결 실패, HTTP fallback 시도: %s", httpURL)
-		cb, err = newContractBackend(httpURL, cfg.ChainID, w)
-		if err != nil {
-			return nil, fmt.Errorf("creating contract backend: %w", err)
-		}
+		return nil, fmt.Errorf("creating contract backend: %w", err)
 	}
 	log.Info("[Setup] ✓ contract backend created")
 
-	// Step 3: 컨트랙트 검증 (Background context — 초기화 단계라 deadline 없음)
-	bgCtx := context.Background()
-	if err := ethchannel.ValidateAdjudicator(bgCtx, cb, cfg.AdjudicatorAddr); err != nil {
+	// Step 3: 컨트랙트 검증
+	if err := ethchannel.ValidateAdjudicator(context.Background(), cb, cfg.AdjudicatorAddr); err != nil {
 		return nil, fmt.Errorf("Adjudicator 검증 실패 (%s): %w", cfg.AdjudicatorAddr.Hex(), err)
 	}
 	if err := ethchannel.ValidateAssetHolderERC20(
-		bgCtx, cb,
+		context.Background(), cb,
 		cfg.AssetHolderAddr, cfg.AdjudicatorAddr, cfg.USDCTokenAddr,
 	); err != nil {
 		return nil, fmt.Errorf("AssetHolderERC20 검증 실패 (%s): %w", cfg.AssetHolderAddr.Hex(), err)
@@ -134,18 +111,18 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	}
 	log.Info("[Setup] ✓ dispute watcher initialized")
 
-	// Step 7: LocalBus
+	// Step 7: ★ LocalBus (P2P 없음 — 동일 프로세스 내 인메모리 통신)
 	bus := wire.NewLocalBus()
 	log.Info("[Setup] ✓ LocalBus initialized (no P2P)")
 
-	// Step 8: operator wire 주소
+	// Step 8: operator wire 주소 — ethwire.Address 래퍼 사용
 	operatorWireKey, err := crypto.GenerateKey()
 	if err != nil {
 		return nil, fmt.Errorf("generating operator wire key: %w", err)
 	}
-	operatorEthAddr  := ethwallet.AsWalletAddr(crypto.PubkeyToAddress(operatorWireKey.PublicKey))
+	operatorEthAddr := ethwallet.AsWalletAddr(crypto.PubkeyToAddress(operatorWireKey.PublicKey))
 	operatorWireAddr := &ethwire.Address{Address: operatorEthAddr}
-	wireAddrs        := map[wallet.BackendID]wire.Address{ethwallet.BackendID: operatorWireAddr}
+	wireAddrs := map[wallet.BackendID]wire.Address{ethwallet.BackendID: operatorWireAddr}
 
 	// Step 9: go-perun Client 조립
 	wallets := map[wallet.BackendID]wallet.Wallet{ethwallet.BackendID: w}
@@ -197,16 +174,17 @@ func DeployContracts(ctx context.Context, cfg *Config, log *logrus.Logger) (*Dep
 	return &DeployedAddrs{AdjudicatorAddr: adjAddr, AssetHolderAddr: assetAddr}, nil
 }
 
-// newContractBackend — ethclient.Dial + swallet.Transactor → ContractBackend
-// ★ Background context 사용 — gRPC deadline과 분리
+// newContractBackend — ethclient + swallet.Transactor → ContractBackend
+// ★ backgroundChainReader로 래핑: SubscribeNewHead가 gRPC deadline에 의해
+//    취소되지 않도록 context를 Background()로 고정
 func newContractBackend(rpcURL string, chainID uint64, w *swallet.Wallet) (ethchannel.ContractBackend, error) {
-	// ★ DialContext with Background — WSS 연결이 gRPC deadline에 영향받지 않도록
-	ec, err := ethclient.DialContext(context.Background(), rpcURL)
+	ec, err := ethclient.Dial(rpcURL)
 	if err != nil {
-		return ethchannel.ContractBackend{}, fmt.Errorf("ethclient.Dial(%s): %w", rpcURL, err)
+		return ethchannel.ContractBackend{}, fmt.Errorf("ethclient.Dial: %w", err)
 	}
-	signer := types.NewLondonSigner(new(big.Int).SetUint64(chainID))
-	tr     := swallet.NewTransactor(w, signer)
-	cid    := ethchannel.MakeChainID(new(big.Int).SetUint64(chainID))
-	return ethchannel.NewContractBackend(ec, cid, tr, 1), nil
+	bgClient := &backgroundChainReader{Client: ec}
+	signer   := types.NewLondonSigner(new(big.Int).SetUint64(chainID))
+	tr       := swallet.NewTransactor(w, signer)
+	cid      := ethchannel.MakeChainID(new(big.Int).SetUint64(chainID))
+	return ethchannel.NewContractBackend(bgClient, cid, tr, 1), nil
 }
