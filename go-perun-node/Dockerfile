@@ -17,8 +17,8 @@ RUN go mod download
 
 COPY . .
 
-# ★ 캐시 무효화 — setup.go DialContext fix
-RUN echo "bust-1780310180"
+# ★ 캐시 무효화 — bgclient.go SubscribeNewHead fix
+RUN echo "bust-1780310348"
 
 RUN protoc --go_out=. --go_opt=paths=source_relative \
            --go-grpc_out=. --go-grpc_opt=paths=source_relative \
