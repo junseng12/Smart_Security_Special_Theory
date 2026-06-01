@@ -17,8 +17,8 @@ RUN go mod download
 
 COPY . .
 
-# ★ 캐시 무효화 — bgclient.go SubscribeNewHead fix
-RUN echo "bust-1780310348"
+# ★ 캐시 무효화
+RUN echo "bust-1780313101"
 
 RUN protoc --go_out=. --go_opt=paths=source_relative \
            --go-grpc_out=. --go-grpc_opt=paths=source_relative \
@@ -35,6 +35,6 @@ WORKDIR /app
 
 COPY --from=builder /app/smartcity-node .
 
-EXPOSE 50051
+EXPOSE 50051 8080
 
 CMD ["./smartcity-node"]
