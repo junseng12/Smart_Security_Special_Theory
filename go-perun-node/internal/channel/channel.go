@@ -444,7 +444,7 @@ func (h *updateHandler) HandleUpdate(cur *channel.State, next client.ChannelUpda
 		r.Reject(context.TODO(), err.Error()) //nolint:errcheck
 		return
 	}
-	if _, err := r.Accept(context.TODO()); err != nil {
+	if err := r.Accept(context.TODO()); err != nil {
 		h.log.WithError(err).Error("[Channel] failed to accept update")
 	}
 }
@@ -475,7 +475,7 @@ type autoAcceptUpdateHandler struct {
 
 func (h *autoAcceptUpdateHandler) HandleUpdate(_ *channel.State, _ client.ChannelUpdate, r *client.UpdateResponder) {
 	h.log.Debug("[Channel] custodial user: auto-accepting update")
-	if _, err := r.Accept(context.TODO()); err != nil {
+	if err := r.Accept(context.TODO()); err != nil {
 		h.log.WithError(err).Error("[Channel] custodial user: failed to accept update")
 	}
 }
