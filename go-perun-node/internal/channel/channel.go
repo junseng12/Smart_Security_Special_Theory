@@ -22,6 +22,7 @@ import (
 	"perun.network/go-perun/channel"
 	"perun.network/go-perun/client"
 	"perun.network/go-perun/wallet"
+	"perun.network/go-perun/wire"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -141,9 +142,9 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 
 	// ── Step 4: 채널 제안 ─────────────────────────────────────────────
 	challengeDuration := uint64(120)
-	peers := []map[wallet.BackendID]wallet.Address{
-		m.node.EthAddress,  // operator (proposer, idx=0)
-		userNode.EthAddress, // user custodial (idx=1)
+	peers := []map[wallet.BackendID]wire.Address{
+		m.node.WireAddress,      // operator (proposer, idx=0)
+		userNode.WireAddress,    // user custodial (idx=1)
 	}
 
 	proposal, err := client.NewLedgerChannelProposal(
@@ -443,7 +444,7 @@ func (h *updateHandler) HandleUpdate(cur *channel.State, next client.ChannelUpda
 		r.Reject(context.TODO(), err.Error()) //nolint:errcheck
 		return
 	}
-	if err := r.Accept(context.TODO()); err != nil {
+	if _, err := r.Accept(context.TODO()); err != nil {
 		h.log.WithError(err).Error("[Channel] failed to accept update")
 	}
 }
@@ -462,7 +463,7 @@ func (h *autoAcceptProposalHandler) HandleProposal(p client.ChannelProposal, r *
 		return
 	}
 	acc := lcp.Accept(nil, client.WithRandomNonce())
-	if err := r.Accept(context.TODO(), acc); err != nil {
+	if _, err := r.Accept(context.TODO(), acc); err != nil {
 		h.log.WithError(err).Error("[Channel] custodial user: failed to accept proposal")
 	}
 }
@@ -474,7 +475,7 @@ type autoAcceptUpdateHandler struct {
 
 func (h *autoAcceptUpdateHandler) HandleUpdate(_ *channel.State, _ client.ChannelUpdate, r *client.UpdateResponder) {
 	h.log.Debug("[Channel] custodial user: auto-accepting update")
-	if err := r.Accept(context.TODO()); err != nil {
+	if _, err := r.Accept(context.TODO()); err != nil {
 		h.log.WithError(err).Error("[Channel] custodial user: failed to accept update")
 	}
 }
@@ -526,3 +527,4 @@ func usdcToWei(usdc string) *big.Int {
 	result, _ := bf.Int(nil)
 	return result
 }
+
