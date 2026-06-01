@@ -123,7 +123,7 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 
 	// ── Step 2: 사용자 노드 핸들러 시작 (자동 수락) ───────────────────
 	go userNode.Client.Handle(
-		&autoAcceptProposalHandler{log: m.log},
+		&autoAcceptProposalHandler{log: m.log, participant: userNode.EthAddress},
 		&autoAcceptUpdateHandler{log: m.log},
 	)
 
@@ -451,7 +451,8 @@ func (h *updateHandler) HandleUpdate(cur *channel.State, next client.ChannelUpda
 
 // ★ autoAcceptProposalHandler — custodial 사용자 노드용 (모든 제안 자동 수락)
 type autoAcceptProposalHandler struct {
-	log *logrus.Logger
+	log         *logrus.Logger
+	participant map[wallet.BackendID]wallet.Address // user custodial eth address
 }
 
 func (h *autoAcceptProposalHandler) HandleProposal(p client.ChannelProposal, r *client.ProposalResponder) {
@@ -462,7 +463,7 @@ func (h *autoAcceptProposalHandler) HandleProposal(p client.ChannelProposal, r *
 		r.Reject(context.TODO(), "unknown proposal type") //nolint:errcheck
 		return
 	}
-	acc := lcp.Accept(nil, client.WithRandomNonce())
+	acc := lcp.Accept(h.participant, client.WithRandomNonce())
 	if _, err := r.Accept(context.TODO(), acc); err != nil {
 		h.log.WithError(err).Error("[Channel] custodial user: failed to accept proposal")
 	}
