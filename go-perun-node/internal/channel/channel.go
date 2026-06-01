@@ -115,7 +115,7 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 	depositWei := usdcToWei(p.DepositUsdc)
 
 	// ── Step 1: 사용자 custodial 노드 생성 ────────────────────────────
-	userNode, err := setup.NewUserNode(m.cfg)
+	userNode, err := setup.NewUserNode(m.cfg, m.node.Bus)
 	if err != nil {
 		return nil, fmt.Errorf("creating custodial user node: %w", err)
 	}
@@ -527,4 +527,5 @@ func usdcToWei(usdc string) *big.Int {
 	result, _ := bf.Int(nil)
 	return result
 }
+
 
