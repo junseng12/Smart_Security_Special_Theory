@@ -1,3 +1,4 @@
+# rebuild trigger: LocalBus 1780305317
 # ── 빌드 스테이지 ────────────────────────────────────────────────────
 FROM golang:1.23-alpine AS builder
 
