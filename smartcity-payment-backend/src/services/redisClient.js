@@ -13,12 +13,13 @@ async function connectRedis() {
   });
 
   if (redisUrl) {
-    // ioredis는 rediss:// URL을 직접 받으면 자동으로 TLS 처리함
-    // URL 파싱 없이 그대로 전달 + tls 옵션만 명시
+    // Private DNS (railway.internal) does not support TLS — only TCP proxy
+    // URLs (rediss://) require TLS. Detect by hostname to avoid ETIMEDOUT.
+    const isPrivateDns = redisUrl.includes('railway.internal');
+    const tlsConfig = isPrivateDns ? undefined : { rejectUnauthorized: false };
+
     client = new Redis(redisUrl, {
-      tls: {
-        rejectUnauthorized: false,
-      },
+      ...(tlsConfig && { tls: tlsConfig }),
       retryStrategy: (times) => {
         if (times > 5) return null; // 5번 이상 실패하면 포기
         return Math.min(times * 500, 3000);
