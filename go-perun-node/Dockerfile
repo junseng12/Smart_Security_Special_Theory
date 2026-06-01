@@ -1,4 +1,3 @@
-# rebuild trigger: server.go context.Background() fix — 1780309439
 # ── 빌드 스테이지 ────────────────────────────────────────────────────
 FROM golang:1.23-alpine AS builder
 
@@ -19,9 +18,8 @@ RUN go mod download
 
 COPY . .
 
-# ★ 캐시 무효화 — server.go context fix
-ARG CACHEBUST=1780309439
-RUN echo "cache bust: $CACHEBUST"
+# ★ 캐시 무효화 — 이 줄의 문자열이 바뀌면 이후 모든 레이어 재실행
+RUN echo "bust-1780309757"
 
 RUN protoc --go_out=. --go_opt=paths=source_relative \
            --go-grpc_out=. --go-grpc_opt=paths=source_relative \
