@@ -27,9 +27,7 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 
 app.use(cors({
   origin: (origin, callback) => {
-    // origin 없는 요청 (서버간, curl 등) 허용
     if (!origin) return callback(null, true);
-    // 허용 목록이 비어있으면 전체 허용
     if (allowedOrigins.length === 0) return callback(null, true);
     if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(new Error(`CORS: origin ${origin} not allowed`));
@@ -39,7 +37,6 @@ app.use(cors({
   credentials: false,
 }));
 
-// OPTIONS preflight 전체 허용
 app.options('*', cors());
 
 app.use(express.json());
@@ -78,29 +75,33 @@ async function bootstrap() {
     logger.info('DB connected ✅');
 
     // ── PendingSettle 자동 처리 스케줄러 ──────────────────────────────────────
-    const escrowSvc = require('./services/escrowPayoutService');
-    async function runPendingSettles() {
-      try {
-        const db = require('./services/db');
-        const { rows } = await db.getPool().query(
-          `SELECT el.session_id, el.fare_amount
-           FROM escrow_locks el
-           WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
-             AND el.hold_deadline IS NOT NULL
-             AND el.hold_deadline < NOW()
-           LIMIT 10`
-        ).catch(() => ({ rows: [] }));
-        for (const row of rows) {
-          logger.info('Scheduler: PendingSettle 처리', { sessionId: row.session_id });
-          await escrowSvc.settleAndRelease({
-            sessionId: row.session_id,
-            fareUsdc:  String(row.fare_amount || '0'),
-          }).catch(e => logger.error('Scheduler: settle fail', { sessionId: row.session_id, error: e.message }));
-        }
-      } catch (e) { logger.error('Scheduler error', { error: e.message }); }
+    try {
+      const escrowSvc = require('./services/escrowPayoutService');
+      async function runPendingSettles() {
+        try {
+          const db = require('./services/db');
+          const { rows } = await db.getPool().query(
+            `SELECT el.session_id, el.fare_amount
+             FROM escrow_locks el
+             WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
+               AND el.hold_deadline IS NOT NULL
+               AND el.hold_deadline < NOW()
+             LIMIT 10`
+          ).catch(() => ({ rows: [] }));
+          for (const row of rows) {
+            logger.info('Scheduler: PendingSettle 처리', { sessionId: row.session_id });
+            await escrowSvc.settleAndRelease({
+              sessionId: row.session_id,
+              fareUsdc:  String(row.fare_amount || '0'),
+            }).catch(e => logger.error('Scheduler: settle fail', { sessionId: row.session_id, error: e.message }));
+          }
+        } catch (e) { logger.error('Scheduler error', { error: e.message }); }
+      }
+      setInterval(runPendingSettles, 30_000);
+      setTimeout(runPendingSettles, 5_000);
+    } catch (schedulerErr) {
+      logger.warn('스케줄러 초기화 실패 — 계속 진행', { error: schedulerErr.message, stack: schedulerErr.stack });
     }
-    setInterval(runPendingSettles, 30_000); // 30초마다
-    setTimeout(runPendingSettles, 5_000);   // 시작 5초 후 첫 실행
 
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => {
@@ -119,7 +120,13 @@ async function bootstrap() {
       logger.info('  GET  /health');
     });
   } catch (err) {
-    logger.error('Failed to start server', { error: err.message });
+    // 에러 전체 정보 출력 (message가 없는 경우 대비)
+    logger.error('Failed to start server', {
+      error:   err?.message || String(err),
+      stack:   err?.stack   || '(no stack)',
+      errType: typeof err,
+      errJson: JSON.stringify(err),
+    });
     process.exit(1);
   }
 }
