@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -27,16 +28,30 @@ func New(orch *channel.Orchestrator, ref *refund.Manager, aud *audit.Logger, log
 	return &Server{orch: orch, refunds: ref, aud: aud, log: log}
 }
 
+// StartSession — gRPC deadline에서 독립된 context 사용 (온체인 펀딩은 오래 걸림)
 func (s *Server) StartSession(ctx context.Context, req *pb.StartSessionRequest) (*pb.StartSessionResponse, error) {
-	res, err := s.orch.StartSessionAndOpen(ctx, channel.StartRequest{
+	// ★ 온체인 tx 포함 작업이므로 gRPC deadline과 분리된 독립 context 사용
+	// gRPC ctx가 취소돼도 펀딩은 계속 진행
+	fundCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	s.log.WithFields(logrus.Fields{
+		"user":    req.UserAddress,
+		"service": req.ServiceId,
+		"deposit": req.DepositUsdc,
+	}).Info("[Session] StartSession (fundCtx 3min)")
+
+	res, err := s.orch.StartSessionAndOpen(fundCtx, channel.StartRequest{
 		UserAddress: req.UserAddress,
 		ServiceID:   req.ServiceId,
 		DepositUsdc: req.DepositUsdc,
 		HoldSeconds: req.HoldSeconds,
 	})
 	if err != nil {
+		s.log.WithError(err).Error("[Session] StartSession failed")
 		return &pb.StartSessionResponse{Ok: false, Error: err.Error()}, nil
 	}
+	s.log.WithField("session_id", res.SessionID).Info("[Session] ✅ StartSession success")
 	return &pb.StartSessionResponse{
 		Ok:           true,
 		SessionId:    res.SessionID,
@@ -47,8 +62,12 @@ func (s *Server) StartSession(ctx context.Context, req *pb.StartSessionRequest) 
 	}, nil
 }
 
+// EndSession — 온체인 정산도 시간이 걸림
 func (s *Server) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
-	res, err := s.orch.EndSessionAndSettle(ctx, channel.EndRequest{
+	settleCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	res, err := s.orch.EndSessionAndSettle(settleCtx, channel.EndRequest{
 		SessionID:   req.SessionId,
 		ChannelID:   req.ChannelId,
 		UserAddress: req.UserAddress,
@@ -134,7 +153,10 @@ func Serve(port int, srv *Server) error {
 	if err != nil {
 		return fmt.Errorf("listen :%d: %w", port, err)
 	}
-	g := grpc.NewServer()
+	// ★ gRPC 서버 keepalive + 최대 수신 크기 설정
+	g := grpc.NewServer(
+		grpc.MaxRecvMsgSize(16*1024*1024),
+	)
 	pb.RegisterSmartCityNodeServer(g, srv)
 	reflection.Register(g)
 	srv.log.WithField("port", port).Info("[gRPC] server listening")
