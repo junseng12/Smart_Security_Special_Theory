@@ -15,10 +15,10 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY . .
+# ★ 캐시 무효화 — 먼저 bust 찍고 COPY해야 이후 단계가 캐시 미스
+RUN echo "bust-1780313962"
 
-# ★ 캐시 무효화
-RUN echo "bust-1780313101"
+COPY . .
 
 RUN protoc --go_out=. --go_opt=paths=source_relative \
            --go-grpc_out=. --go-grpc_opt=paths=source_relative \
