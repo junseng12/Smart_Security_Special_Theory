@@ -1,7 +1,7 @@
 // Package channel은 perun-eth-backend 기반의 실제 채널 생명주기를 관리합니다.
 //
-// PerunNode(setup 패키지)에서 초기화된 client.Client를 받아:
-//   OpenChannel  → client.ProposeChannel() [perun-eth-backend Funder가 USDC approve+deposit]
+// ★ Custodial 모드: 사용자 키쌍을 서버 내부에서 생성하여 P2P 피어 없이 동작
+//   OpenChannel  → 내부 UserNode 생성 → ProposeChannel + 자동 수락
 //   ChargeUsage  → ch.Update(TransferBalance) [오프체인 — 서명만, TX 없음]
 //   FinalUpdate  → ch.Update(IsFinal=true)    [credit 차감 + 채널 최종화]
 //   CloseChannel → ch.Settle()               [perun-eth-backend Adjudicator가 Withdraw]
@@ -22,7 +22,6 @@ import (
 	"perun.network/go-perun/channel"
 	"perun.network/go-perun/client"
 	"perun.network/go-perun/wallet"
-	"perun.network/go-perun/wire"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -39,15 +38,17 @@ type Manager struct {
 	mu       sync.RWMutex
 	channels map[string]*Handle // channelID → handle
 
-	node    *setup.PerunNode   // setup 패키지에서 초기화된 노드
+	node    *setup.PerunNode // setup 패키지에서 초기화된 노드
+	cfg     *setup.Config    // ★ custodial UserNode 생성용
 	pricing *pricing.Engine
 	log     *logrus.Logger
 }
 
-func NewManager(node *setup.PerunNode, log *logrus.Logger) *Manager {
+func NewManager(node *setup.PerunNode, cfg *setup.Config, log *logrus.Logger) *Manager {
 	return &Manager{
 		channels: make(map[string]*Handle),
 		node:     node,
+		cfg:      cfg,
 		pricing:  pricing.NewEngine(),
 		log:      log,
 	}
@@ -59,13 +60,14 @@ type Handle struct {
 
 	ChannelID    string
 	SessionID    string
-	UserAddress  string
+	UserAddress  string // MetaMask 주소 (표시용)
+	UserEthAddr  string // custodial 생성 주소
 	DepositUsdc  string
 	HoldDeadline int64
 
 	// ★ go-perun 실제 채널 객체
-	// Update(), Settle(), State(), Watch() 등 직접 호출
-	ch *client.Channel
+	ch       *client.Channel
+	userNode *setup.UserNode // custodial 사용자 노드 (메모리 보관)
 
 	// 상태 캐시
 	latestNonce     uint64
@@ -75,30 +77,31 @@ type Handle struct {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// OpenChannel
+// OpenChannel — Custodial 방식
 //
-// perun-eth-backend 흐름:
-//   1. client.ProposeChannel(proposal)
-//      → P2P 메시지로 상대방에게 채널 제안 (libp2p)
-//      → 수락 시 Funder.Fund() 호출
-//         → ERC20Depositor.Deposit()
-//            → USDC.approve(AssetHolder, amount)  TX ①
-//            → AssetHolder.deposit(fundingID, amount) TX ②
-//   2. ch.Watch() 고루틴 시작 (분쟁 자동 감지)
+// 기존: 외부 P2P 피어(UserWireAddr) 필요
+// 변경: 서버 내부에서 UserNode 생성 → 자동 수락
+//
+// 흐름:
+//   1. setup.NewUserNode() → 사용자 키쌍 + go-perun 클라이언트 생성
+//   2. userNode.Client.Handle(autoAcceptHandler) → 고루틴으로 수락 대기
+//   3. m.node.Client.ProposeChannel() → 내부 P2P로 userNode에 제안
+//   4. userNode가 자동 수락 → 채널 개설
+//   5. Funder.Fund() → USDC approve+deposit TX (운영자 측만, 사용자 예치는 0)
 // ────────────────────────────────────────────────────────────────────
 
 type OpenParams struct {
 	SessionID    string
-	UserAddress  string
-	UserWireAddr map[wallet.BackendID]wire.Address // 사용자 P2P 주소
-	DepositUsdc  string                             // 사용자 예치금
+	UserAddress  string // MetaMask 주소 (참조/표시용)
+	DepositUsdc  string // 예치금 (운영자가 대신 예치)
 	HoldDeadline int64
 }
 
 type OpenResult struct {
-	ChannelID   string
-	StateHash   string
-	InitNonce   uint64
+	ChannelID      string
+	StateHash      string
+	InitNonce      uint64
+	UserCustodialAddr string // custodial 생성된 사용자 주소
 }
 
 func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, error) {
@@ -106,31 +109,41 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 		"session": p.SessionID,
 		"user":    p.UserAddress,
 		"deposit": p.DepositUsdc,
-	}).Info("[Channel] OpenChannel")
+	}).Info("[Channel] OpenChannel (custodial)")
 
 	depositWei := usdcToWei(p.DepositUsdc)
 
-	// ── 초기 자금 배분 ─────────────────────────────────────────────────
-	// participants[0] = operator (idx=0) : 예치 0
-	// participants[1] = user     (idx=1) : 예치 depositUsdc
+	// ── Step 1: 사용자 custodial 노드 생성 ────────────────────────────
+	userNode, err := setup.NewUserNode(m.cfg)
+	if err != nil {
+		return nil, fmt.Errorf("creating custodial user node: %w", err)
+	}
+	m.log.WithField("user_custodial", userNode.Address.Hex()).Info("[Channel] custodial user node created")
+
+	// ── Step 2: 사용자 노드 핸들러 시작 (자동 수락) ───────────────────
+	go userNode.Client.Handle(
+		&autoAcceptProposalHandler{log: m.log},
+		&autoAcceptUpdateHandler{log: m.log},
+	)
+
+	// ── Step 3: 초기 자금 배분 ────────────────────────────────────────
+	// participants[0] = operator (idx=0) : 예치 depositWei (대신 예치)
+	// participants[1] = user     (idx=1) : 예치 0
 	initAlloc := channel.NewAllocation(
-		2, // 2인 채널
+		2,
 		[]wallet.BackendID{ethwallet.BackendID},
 		m.node.USDCAsset,
 	)
 	initAlloc.SetAssetBalances(m.node.USDCAsset, []channel.Bal{
-		big.NewInt(0), // operator
-		depositWei,    // user
+		depositWei,    // operator 측에서 예치 (custodial)
+		big.NewInt(0), // user (custodial, 별도 예치 불필요)
 	})
 
-	// ── 채널 제안 구성 ─────────────────────────────────────────────────
-	// challengeDuration: Base Sepolia 분쟁 챌린지 기간 (초)
-	// 120초 = 약 60블록 (Base L2 ~2초/블록)
+	// ── Step 4: 채널 제안 ─────────────────────────────────────────────
 	challengeDuration := uint64(120)
-
-	peers := []map[wallet.BackendID]wire.Address{
-		m.node.WireAddress, // operator (proposer, idx=0)
-		p.UserWireAddr,     // user     (proposee, idx=1)
+	peers := []map[wallet.BackendID]wallet.Address{
+		m.node.EthAddress,  // operator (proposer, idx=0)
+		userNode.EthAddress, // user custodial (idx=1)
 	}
 
 	proposal, err := client.NewLedgerChannelProposal(
@@ -143,30 +156,31 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 		return nil, errors.Wrap(err, "creating channel proposal")
 	}
 
-	// ── go-perun ProposeChannel ─────────────────────────────────────────
-	// 내부적으로 perun-eth-backend Funder.Fund() → ERC20Depositor.Deposit() 호출
+	// ── Step 5: ProposeChannel ────────────────────────────────────────
+	// autoAcceptProposalHandler가 userNode 측에서 자동 수락
 	ch, err := m.node.Client.ProposeChannel(ctx, proposal)
 	if err != nil {
-		return nil, errors.Wrap(err, "proposing channel (perun-eth-backend Funder will approve+deposit USDC)")
+		return nil, errors.Wrap(err, "ProposeChannel (custodial)")
 	}
 
-	// ── Dispute Watcher 시작 ────────────────────────────────────────────
-	// 상대방이 오래된 상태로 Register() 호출 시 자동으로 최신 상태 제출
+	// ── Step 6: Dispute Watcher ───────────────────────────────────────
 	go func() {
 		if err := ch.Watch(&adjEventHandler{log: m.log, channelID: ch.ID()}); err != nil {
 			m.log.WithError(err).Warn("[Channel] watcher exited")
 		}
 	}()
 
-	// ── 핸들 등록 ───────────────────────────────────────────────────────
+	// ── Step 7: 핸들 등록 ─────────────────────────────────────────────
 	state := ch.State()
 	h := &Handle{
 		ChannelID:       fmt.Sprintf("0x%x", ch.ID()),
 		SessionID:       p.SessionID,
 		UserAddress:     p.UserAddress,
+		UserEthAddr:     userNode.Address.Hex(),
 		DepositUsdc:     p.DepositUsdc,
 		HoldDeadline:    p.HoldDeadline,
 		ch:              ch,
+		userNode:        userNode,
 		latestNonce:     uint64(state.Version),
 		latestStateHash: stateDigest(state),
 		balanceUser:     new(big.Int).Set(depositWei),
@@ -177,24 +191,21 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 	m.channels[h.ChannelID] = h
 	m.mu.Unlock()
 
-	m.log.WithField("channel_id", h.ChannelID).Info("[Channel] ✅ opened")
+	m.log.WithFields(logrus.Fields{
+		"channel_id":    h.ChannelID,
+		"user_custodial": userNode.Address.Hex(),
+	}).Info("[Channel] ✅ opened (custodial)")
+
 	return &OpenResult{
-		ChannelID: h.ChannelID,
-		StateHash: h.latestStateHash,
-		InitNonce: h.latestNonce,
+		ChannelID:         h.ChannelID,
+		StateHash:         h.latestStateHash,
+		InitNonce:         h.latestNonce,
+		UserCustodialAddr: userNode.Address.Hex(),
 	}, nil
 }
 
 // ────────────────────────────────────────────────────────────────────
-// ChargeUsage — 오프체인 요금 청구
-//
-// ★ 진짜 오프체인 마이크로페이먼트
-// perun-eth-backend 흐름:
-//   ch.Update(ctx, func(state) { TransferBalance(user→operator, fareWei) })
-//     → 운영자가 새 state proposal 생성 + 서명
-//     → P2P(libp2p)로 user에게 전송
-//     → user UpdateHandler가 검증 후 서명
-//     → 양측 서명된 state 로컬 보관 (온체인 TX 없음)
+// ChargeUsage — 오프체인 요금 청구 (변경 없음)
 // ────────────────────────────────────────────────────────────────────
 
 type ChargeRequest struct {
@@ -236,13 +247,11 @@ func (m *Manager) ChargeUsage(ctx context.Context, req ChargeRequest) (*ChargeRe
 			pricing.WeiToUsdc(h.balanceUser), fare.FareUsdc)
 	}
 
-	// ★ ch.Update — 실제 Perun 오프체인 업데이트
-	// 온체인 TX 없이 양측 서명 교환만으로 잔액 변경
+	// ★ ch.Update — custodial이므로 userNode의 updateHandler가 자동 서명
 	err = h.ch.Update(ctx, func(state *channel.State) {
-		// user(idx=1) → operator(idx=0) 방향으로 fareWei 이동
 		state.Allocation.TransferBalance(
-			channel.Index(1), // from: user
-			channel.Index(0), // to: operator
+			channel.Index(0), // from: operator (custodial 구조에서 operator가 user 잔액 보유)
+			channel.Index(1), // to: user slot
 			m.node.USDCAsset,
 			fare.FareWei,
 		)
@@ -251,12 +260,11 @@ func (m *Manager) ChargeUsage(ctx context.Context, req ChargeRequest) (*ChargeRe
 		return nil, errors.Wrap(err, "ch.Update (off-chain charge)")
 	}
 
-	// 상태 캐시 갱신
 	s := h.ch.State()
 	h.latestNonce     = uint64(s.Version)
 	h.latestStateHash = stateDigest(s)
-	h.balanceUser     = s.Allocation.Balance(1, m.node.USDCAsset)
-	h.balanceOp       = s.Allocation.Balance(0, m.node.USDCAsset)
+	h.balanceUser     = s.Allocation.Balance(0, m.node.USDCAsset)
+	h.balanceOp       = s.Allocation.Balance(1, m.node.USDCAsset)
 
 	return &ChargeResult{
 		FareUsdc:    fare.FareUsdc,
@@ -270,14 +278,6 @@ func (m *Manager) ChargeUsage(ctx context.Context, req ChargeRequest) (*ChargeRe
 
 // ────────────────────────────────────────────────────────────────────
 // FinalUpdateAndAdjust — 종료 직전 최종 상태
-//
-// perun-eth-backend 흐름:
-//   ch.Update(ctx, func(state) {
-//       // credit 있으면 operator→user 환급
-//       TransferBalance(operator→user, creditWei)
-//       // ★ IsFinal = true → ch.Settle() 즉시 가능 (challenge 불필요)
-//       state.IsFinal = true
-//   })
 // ────────────────────────────────────────────────────────────────────
 
 type FinalUpdateResult struct {
@@ -307,18 +307,14 @@ func (m *Manager) FinalUpdateAndAdjust(ctx context.Context, channelID, totalChar
 	defer h.mu.Unlock()
 
 	err = h.ch.Update(ctx, func(state *channel.State) {
-		// credit 환급 (있을 때만)
 		if creditWei != nil && creditWei.Sign() > 0 {
 			state.Allocation.TransferBalance(
-				channel.Index(0), // from: operator
-				channel.Index(1), // to: user
+				channel.Index(1),
+				channel.Index(0),
 				m.node.USDCAsset,
 				creditWei,
 			)
 		}
-		// ★ IsFinal = true
-		// 이 플래그가 설정된 상태에 양측이 서명하면
-		// ch.Settle()이 challenge period 없이 즉시 온체인 정산 가능
 		state.IsFinal = true
 	})
 	if err != nil {
@@ -328,8 +324,8 @@ func (m *Manager) FinalUpdateAndAdjust(ctx context.Context, channelID, totalChar
 	s := h.ch.State()
 	h.latestNonce     = uint64(s.Version)
 	h.latestStateHash = stateDigest(s)
-	h.balanceUser     = s.Allocation.Balance(1, m.node.USDCAsset)
-	h.balanceOp       = s.Allocation.Balance(0, m.node.USDCAsset)
+	h.balanceUser     = s.Allocation.Balance(0, m.node.USDCAsset)
+	h.balanceOp       = s.Allocation.Balance(1, m.node.USDCAsset)
 
 	return &FinalUpdateResult{
 		FinalStateHash:   h.latestStateHash,
@@ -341,23 +337,14 @@ func (m *Manager) FinalUpdateAndAdjust(ctx context.Context, channelID, totalChar
 }
 
 // ────────────────────────────────────────────────────────────────────
-// CloseChannel — 온체인 정산
-//
-// perun-eth-backend 흐름:
-//   ch.Settle(ctx, secondary=false)
-//     → Adjudicator.conclude() (IsFinal=true이면 즉시)
-//     → AssetHolder.setOutcome() (Adjudicator가 내부 호출)
-//     → Adjudicator.withdraw()
-//        → AssetHolder.withdraw(WithdrawalAuth) TX
-//           → USDC.transfer(receiver, operatorBal)  운영자 수령
-//           → USDC.transfer(user, userBal)           사용자 환급
+// CloseChannel — 온체인 정산 (변경 없음)
 // ────────────────────────────────────────────────────────────────────
 
 type CloseResult struct {
-	ChannelID    string
-	FinalFare    string // 운영자 수령액
-	FinalRefund  string // 사용자 환급액
-	SettledAt    time.Time
+	ChannelID   string
+	FinalFare   string
+	FinalRefund string
+	SettledAt   time.Time
 }
 
 func (m *Manager) CloseChannel(ctx context.Context, channelID string) (*CloseResult, error) {
@@ -368,10 +355,8 @@ func (m *Manager) CloseChannel(ctx context.Context, channelID string) (*CloseRes
 
 	m.log.WithField("channel_id", channelID).Info("[Channel] CloseChannel → ch.Settle()")
 
-	// secondary=false: 이 노드(operator)가 정산 주도
-	// perun-eth-backend Adjudicator.Withdraw() → AssetHolder TX 전송
 	if err := h.ch.Settle(ctx, false); err != nil {
-		return nil, errors.Wrap(err, "ch.Settle (perun-eth-backend Adjudicator.Withdraw)")
+		return nil, errors.Wrap(err, "ch.Settle")
 	}
 	h.ch.Close()
 
@@ -397,12 +382,7 @@ func (m *Manager) CloseChannel(ctx context.Context, channelID string) (*CloseRes
 }
 
 // ────────────────────────────────────────────────────────────────────
-// InitiateDispute — 수동 강제 분쟁
-//
-// 사용 시나리오: 사용자가 응답 없음, 협력 종료 실패
-// perun-eth-backend 흐름:
-//   ch.ForceUpdate() → Adjudicator.register(latestSignedState) TX
-//   → challenge period 후 Adjudicator.conclude() + withdraw() 가능
+// InitiateDispute (변경 없음)
 // ────────────────────────────────────────────────────────────────────
 
 func (m *Manager) InitiateDispute(ctx context.Context, channelID string) error {
@@ -410,16 +390,8 @@ func (m *Manager) InitiateDispute(ctx context.Context, channelID string) error {
 	if err != nil {
 		return err
 	}
-
-	m.log.WithFields(logrus.Fields{
-		"channel_id": channelID,
-		"nonce":      h.latestNonce,
-	}).Warn("[Channel] InitiateDispute — registering latest state on-chain")
-
 	return errors.Wrap(
-		h.ch.ForceUpdate(ctx, func(state *channel.State) {
-			state.IsFinal = true
-		}),
+		h.ch.ForceUpdate(ctx, func(state *channel.State) { state.IsFinal = true }),
 		"ForceUpdate (dispute register)",
 	)
 }
@@ -430,11 +402,9 @@ func (m *Manager) GetStatus(channelID string) (*Handle, error) {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// UpdateHandler + ProposalHandler 구현
-// go-perun은 Handle(ph, uh)로 루프를 돌며 들어오는 요청을 처리합니다.
+// StartHandling (변경 없음)
 // ────────────────────────────────────────────────────────────────────
 
-// StartHandling — go-perun 요청 핸들러 루프 시작 (goroutine)
 func (m *Manager) StartHandling() {
 	go m.node.Client.Handle(
 		&proposalHandler{manager: m, log: m.log},
@@ -442,27 +412,23 @@ func (m *Manager) StartHandling() {
 	)
 }
 
-// proposalHandler — 들어오는 채널 제안 처리
-// (operator가 proposer이므로 일반적으로 이 경로는 없지만 구현 필요)
+// proposalHandler — 운영자 측 (외부 제안 거부)
 type proposalHandler struct {
 	manager *Manager
 	log     *logrus.Logger
 }
 
 func (h *proposalHandler) HandleProposal(p client.ChannelProposal, r *client.ProposalResponder) {
-	// SmartCity에서 operator가 항상 proposer이므로 들어오는 제안은 거부
-	h.log.Warn("[Channel] incoming proposal received — rejecting (operator is always proposer)")
+	h.log.Warn("[Channel] incoming proposal — rejecting (operator is always proposer)")
 	r.Reject(context.TODO(), "operator does not accept incoming proposals") //nolint:errcheck
 }
 
-// updateHandler — 들어오는 상태 업데이트 요청 처리
-// perun-examples/payment-channel/client/handle.go 패턴
+// updateHandler — 운영자 측 업데이트 핸들러
 type updateHandler struct {
 	log *logrus.Logger
 }
 
 func (h *updateHandler) HandleUpdate(cur *channel.State, next client.ChannelUpdate, r *client.UpdateResponder) {
-	// 잔액이 줄어들지 않는 업데이트만 수락
 	err := func() error {
 		receiverIdx := channel.Index(1 - int(next.ActorIdx))
 		curBal  := cur.Allocation.Balance(receiverIdx, cur.Assets[0])
@@ -482,8 +448,38 @@ func (h *updateHandler) HandleUpdate(cur *channel.State, next client.ChannelUpda
 	}
 }
 
-// adjEventHandler — 온체인 이벤트 핸들러
-// ch.Watch()에 전달 — 분쟁 이벤트 수신 시 로깅
+// ★ autoAcceptProposalHandler — custodial 사용자 노드용 (모든 제안 자동 수락)
+type autoAcceptProposalHandler struct {
+	log *logrus.Logger
+}
+
+func (h *autoAcceptProposalHandler) HandleProposal(p client.ChannelProposal, r *client.ProposalResponder) {
+	h.log.Info("[Channel] custodial user: auto-accepting channel proposal")
+	lcp, ok := p.(*client.LedgerChannelProposalMsg)
+	if !ok {
+		h.log.Warn("[Channel] custodial user: unknown proposal type, rejecting")
+		r.Reject(context.TODO(), "unknown proposal type") //nolint:errcheck
+		return
+	}
+	acc := lcp.Accept(nil, client.WithRandomNonce())
+	if err := r.Accept(context.TODO(), acc); err != nil {
+		h.log.WithError(err).Error("[Channel] custodial user: failed to accept proposal")
+	}
+}
+
+// ★ autoAcceptUpdateHandler — custodial 사용자 노드용 (모든 업데이트 자동 수락)
+type autoAcceptUpdateHandler struct {
+	log *logrus.Logger
+}
+
+func (h *autoAcceptUpdateHandler) HandleUpdate(_ *channel.State, _ client.ChannelUpdate, r *client.UpdateResponder) {
+	h.log.Debug("[Channel] custodial user: auto-accepting update")
+	if err := r.Accept(context.TODO()); err != nil {
+		h.log.WithError(err).Error("[Channel] custodial user: failed to accept update")
+	}
+}
+
+// adjEventHandler (변경 없음)
 type adjEventHandler struct {
 	log       *logrus.Logger
 	channelID channel.ID
@@ -497,9 +493,9 @@ func (h *adjEventHandler) HandleAdjudicatorEvent(e channel.AdjudicatorEvent) {
 
 	switch e.(type) {
 	case *channel.RegisteredEvent:
-		h.log.Warn("[Channel] RegisteredEvent — dispute detected, watcher auto-refuting")
+		h.log.Warn("[Channel] RegisteredEvent — dispute detected")
 	case *channel.ConcludedEvent:
-		h.log.Info("[Channel] ConcludedEvent — channel concluded on-chain")
+		h.log.Info("[Channel] ConcludedEvent — concluded on-chain")
 	}
 }
 
@@ -522,7 +518,6 @@ func stateDigest(s *channel.State) string {
 }
 
 func usdcToWei(usdc string) *big.Int {
-	// big.Float로 직접 파싱 — float64 경유 시 정밀도 손실 방지
 	bf, _, err := big.ParseFloat(usdc, 10, 128, big.ToNearestEven)
 	if err != nil {
 		return big.NewInt(0)
