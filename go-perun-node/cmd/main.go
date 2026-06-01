@@ -4,10 +4,11 @@
 //   1) 환경변수 로드
 //   2) setup.NewPerunNode() — perun-eth-backend 기반 실제 초기화
 //   3) Manager / Orchestrator 조립
-//   4) gRPC 서버 시작
+//   4) HTTP 헬스체크 서버 시작 (Railway용, PORT 환경변수)
+//   5) gRPC 서버 시작
 //
 // 환경변수:
-//   BASE_RPC_URL        — https://sepolia.base.org
+//   BASE_RPC_URL        — wss://... (Alchemy Base Sepolia)
 //   CHAIN_ID            — 84532 (Base Sepolia)
 //   OPERATOR_PRIVKEY    — hex 개인키 (0x 없이)
 //   ADJUDICATOR_ADDR    — perun-eth-contracts Adjudicator 주소
@@ -15,12 +16,14 @@
 //   USDC_TOKEN_ADDR     — 0x036CbD53842c5426634e7929541eC2318f3dCF7e (Base Sepolia)
 //   RECEIVER_ADDR       — 운영자 수령 주소
 //   GRPC_PORT           — 기본 50051
+//   PORT                — Railway 자동 주입 HTTP 포트 (헬스체크용)
 //   DEPLOY_CONTRACTS    — "true" 이면 컨트랙트 배포 후 종료
 package main
 
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 
@@ -54,7 +57,7 @@ func main() {
 	// ── 컨트랙트 배포 모드 ────────────────────────────────────────────
 	if os.Getenv("DEPLOY_CONTRACTS") == "true" {
 		deployCfg := *cfg
-		deployCfg.AdjudicatorAddr = common.Address{} // 배포 전이므로 비워도 됨
+		deployCfg.AdjudicatorAddr = common.Address{}
 		deployCfg.AssetHolderAddr = common.Address{}
 		addrs, err := setup.DeployContracts(context.Background(), &deployCfg, log)
 		if err != nil {
@@ -80,10 +83,28 @@ func main() {
 	refundMgr  := refund.NewManager(log)
 	auditLog   := audit.NewLogger(log)
 
-	// go-perun Handle 루프 시작 (incoming proposals / updates 처리)
 	channelMgr.StartHandling()
 
 	orch := channel.NewOrchestrator(channelMgr, sessionMgr, refundMgr, auditLog, log)
+
+	// ── HTTP 헬스체크 서버 (Railway PORT 환경변수) ────────────────────
+	// Railway는 서비스가 PORT로 HTTP 응답해야 healthy로 인식함
+	httpPort := envOr("PORT", "8080")
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"ok","service":"go-perun-node"}`))
+		})
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"status":"ok"}`))
+		})
+		log.WithField("port", httpPort).Info("[HTTP] health server listening")
+		if err := http.ListenAndServe(":"+httpPort, mux); err != nil {
+			log.WithError(err).Warn("[HTTP] health server error")
+		}
+	}()
 
 	// ── gRPC 서버 시작 ────────────────────────────────────────────────
 	grpcPort := envInt("GRPC_PORT", 50051)
@@ -122,4 +143,3 @@ func envInt(key string, def int) int {
 	n, _ := strconv.Atoi(v)
 	return n
 }
-
