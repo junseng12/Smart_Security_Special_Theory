@@ -7,6 +7,7 @@ const logger      = require('../utils/logger');
 const sessionMgr  = require('./sessionManager');
 const perun       = require('./perunClient');
 const settleMgr   = require('./settlementManager');
+const escrowSvc   = require('./escrowPayoutService');  // ★ 추가
 
 async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsdc, userWireAddr = '' }) {
   const dbSession = await sessionMgr.startSession({ userAddress, serviceType, depositUsdc });
@@ -64,19 +65,23 @@ async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usa
 }
 
 /**
- * 세션 종료 → go-perun EndSession
- * ★ DB에서 charged_usdc를 읽어서 go-perun에 폴백으로 전달
- *   (컨테이너 재시작으로 인메모리 세션이 사라진 경우 대비)
+ * 세션 종료 → go-perun EndSession → 에스크로 컨트랙트 settleAndRelease
+ *
+ * 흐름:
+ *  1) DB에서 charged_usdc 읽어 chargedUsdc 확정 (go-perun 인메모리 폴백)
+ *  2) go-perun EndSession gRPC 호출 (오프체인 채널 정산)
+ *  3) 에스크로 컨트랙트 settleAndRelease 호출 (온체인 환불 실행) ★
+ *  4) DB 정산 기록
  */
 async function endSessionAndSettle({ sessionId, channelId, userAddress, userFinalSig = '', fareUsdc, adjustment }) {
-  // DB에서 charged_usdc 읽기 (go-perun 인메모리 폴백용)
+  // ── 1. chargedUsdc 확정 (DB > fareUsdc 파라미터 우선순위) ──────────────────
   let chargedUsdc = fareUsdc || '0';
   try {
     const db = require('./db');
     const result = await db.getPool().query(
       'SELECT charged_usdc FROM sessions WHERE id = $1', [sessionId]
     );
-    if (result.rows[0] && result.rows[0].charged_usdc) {
+    if (result.rows[0]?.charged_usdc) {
       chargedUsdc = String(result.rows[0].charged_usdc);
     }
   } catch { /* DB 조회 실패 시 fareUsdc 사용 */ }
@@ -84,34 +89,62 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
   await sessionMgr.endSession(sessionId).catch(() => {});
   await sessionMgr.markSettling(sessionId).catch(() => {});
 
-  logger.info('[Orchestrator] endSession with chargedUsdc fallback', {
+  logger.info('[Orchestrator] endSession with chargedUsdc', {
     sessionId, channelId, chargedUsdc,
   });
 
+  // ── 2. go-perun EndSession (오프체인 채널 종료) ────────────────────────────
   const perunRes = await perun.endSession({
-    sessionId,
-    channelId,
-    userAddress,
-    userFinalSig,
-    chargedUsdc,  // ★ go-perun 인메모리 미스 시 폴백
+    sessionId, channelId, userAddress, userFinalSig, chargedUsdc,
   });
+
+  // go-perun이 반환한 fare_usdc 사용. 없으면 chargedUsdc 폴백
+  const finalFareUsdc = perunRes.fare_usdc || chargedUsdc || '0';
+
+  logger.info('[Orchestrator] go-perun EndSession done', {
+    sessionId, fare_usdc: perunRes.fare_usdc, finalFareUsdc,
+  });
+
+  // ── 3. 에스크로 컨트랙트 settleAndRelease (온체인 환불) ★ ─────────────────
+  let escrowResult = null;
+  try {
+    escrowResult = await escrowSvc.settleAndRelease({
+      sessionId,
+      fareUsdc: finalFareUsdc,
+    });
+    logger.info('[Orchestrator] escrow settleAndRelease done', {
+      sessionId,
+      escrowResult: JSON.stringify(escrowResult),
+    });
+  } catch (escrowErr) {
+    // 에스크로 실패는 치명적 — 로그 남기고 throw
+    logger.error('[Orchestrator] escrow settleAndRelease FAILED', {
+      sessionId, error: escrowErr.message,
+    });
+    throw new Error(`Escrow settle failed: ${escrowErr.message}`);
+  }
+
+  // ── 4. DB 정산 기록 ───────────────────────────────────────────────────────
+  const refundUsdc = escrowResult?.refundUsdc || perunRes.refund_usdc || '0';
+  const txHash     = escrowResult?.txHash     || perunRes.tx_hash     || 'settled_via_perun';
 
   await settleMgr.recordSettlement({
     sessionId, channelId,
-    txHash:     perunRes.tx_hash || 'perun_settled',
-    fareUsdc:   perunRes.fare_usdc,
-    refundUsdc: perunRes.refund_usdc,
+    txHash,
+    fareUsdc:   finalFareUsdc,
+    refundUsdc,
     userAddress,
   }).catch(() => {});
 
-  logger.info('[Orchestrator] endSessionAndSettle OK', {
-    sessionId, fareUsdc: perunRes.fare_usdc, refundUsdc: perunRes.refund_usdc,
+  logger.info('[Orchestrator] endSessionAndSettle complete', {
+    sessionId, finalFareUsdc, refundUsdc, txHash,
   });
 
   return {
-    txHash:     perunRes.tx_hash || 'settled_via_perun',
-    fareUsdc:   perunRes.fare_usdc,
-    refundUsdc: perunRes.refund_usdc,
+    txHash,
+    fareUsdc:   finalFareUsdc,
+    refundUsdc,
+    escrow:     escrowResult,
   };
 }
 
