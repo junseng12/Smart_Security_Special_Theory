@@ -57,7 +57,11 @@ const mock = {
       escrow_id: `escrow_${sessionId}`, hold_deadline: Math.floor(Date.now()/1000)+(req.hold_seconds||120),
       state_hash: `0x${Buffer.from('init').toString('hex').padEnd(64,'0')}` };
   },
-  EndSession(req) { return { ok: true, fare_usdc: '0.05', refund_usdc: '0.0' }; },
+  EndSession(req) {
+    // user_final_sig 필드에 chargedUsdc 값이 실려 옴 (orchestrator 폴백)
+    const chargedUsdc = parseFloat(req.user_final_sig || '0') || 0.05;
+    return { ok: true, fare_usdc: String(chargedUsdc.toFixed(6)), refund_usdc: '0.0', tx_hash: '0xmock_settle' };
+  },
   ProposeUsageUpdate(req) {
     return { ok: true, fare_usdc: '0.01', policy_hash: '0xpolicy', new_nonce: 1,
       state_hash: '0xstatehash', balance_user: String(parseFloat(req.deposit_usdc||'1')-0.01) };
@@ -141,3 +145,4 @@ function getMode() { return _mode; }
 
 module.exports = { startSession, endSession, proposeUsageUpdate, getChannelStatus,
   initiateDispute, accumulateCredit, postCompensation, ping, reinit, getMode };
+
