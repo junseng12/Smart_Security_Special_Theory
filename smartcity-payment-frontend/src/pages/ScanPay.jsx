@@ -1,23 +1,28 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   approveUsdcForEscrow,
   userDeposit as escrowUserDeposit,
   getUsdcBalance,
-  ESCROW_V3_ADDRESS,
 } from '@/lib/walletUtils';
 
-// ──────────────────────────────────────────────────────────────────────────────
-// 상수
-// ──────────────────────────────────────────────────────────────────────────────
 const BACKEND          = "https://payment-backend-production.up.railway.app";
 const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
 
+// QR 페이로드 포맷: basecity://pay?svc=ev_charging&id=EV-001&dep=5.0
+// 또는 단순 JSON: {"svc":"ev_charging","id":"EV-001","dep":"5.0"}
+const SERVICE_META = {
+  bicycle:     { label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0 },
+  ev_charging: { label: "EV 충전",     emoji: "⚡", depositUsdc: 5.0 },
+  parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
+};
+
+// 수동 선택용 fallback 목록
 const SERVICE_TYPES = [
-  { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, serviceId: "BIKE-001" },
-  { id: "ev_charging", label: "EV 충전",     emoji: "⚡", depositUsdc: 5.0, serviceId: "EV-001"  },
-  { id: "parking",     label: "주차",         emoji: "🅿️", depositUsdc: 2.0, serviceId: "PARK-001"},
+  { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
+  { id: "ev_charging", label: "EV 충전",     emoji: "⚡", depositUsdc: 5.0, deviceId: "EV-001"  },
+  { id: "parking",     label: "주차",         emoji: "🅿️", depositUsdc: 2.0, deviceId: "PARK-001" },
 ];
 
 const SESSION_KEY  = "active_session";
@@ -25,9 +30,6 @@ const saveSession  = (d) => localStorage.setItem(SESSION_KEY, JSON.stringify(d))
 const clearSession = ()  => localStorage.removeItem(SESSION_KEY);
 const loadSession  = ()  => { try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch { return null; } };
 
-// ──────────────────────────────────────────────────────────────────────────────
-// API 유틸
-// ──────────────────────────────────────────────────────────────────────────────
 async function apiCall(path, method = "GET", body = null) {
   const res = await fetch(BACKEND + path, {
     method,
@@ -35,470 +37,502 @@ async function apiCall(path, method = "GET", body = null) {
     body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json();
-  if (!res.ok || data.ok === false) throw new Error(
-    data.errors?.[0] || data.error || "API Error"
-  );
+  if (!res.ok || data.ok === false) throw new Error(data.errors?.[0] || data.error || "API Error");
   return data.data ?? data;
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
-// 메인 컴포넌트
-// ──────────────────────────────────────────────────────────────────────────────
+/** QR 문자열 파싱 → { serviceType, deviceId, depositUsdc } */
+function parseQrPayload(raw) {
+  try {
+    // URL 스킴: basecity://pay?svc=ev_charging&id=EV-001&dep=5.0
+    if (raw.startsWith("basecity://")) {
+      const url    = new URL(raw.replace("basecity://", "https://basecity.app/"));
+      const svc    = url.searchParams.get("svc");
+      const id     = url.searchParams.get("id");
+      const dep    = parseFloat(url.searchParams.get("dep") || "0");
+      if (svc && SERVICE_META[svc]) return { serviceType: svc, deviceId: id || svc, depositUsdc: dep || SERVICE_META[svc].depositUsdc };
+    }
+    // JSON 포맷
+    const obj = JSON.parse(raw);
+    const svc = obj.svc || obj.serviceType;
+    if (svc && SERVICE_META[svc]) return { serviceType: svc, deviceId: obj.id || obj.deviceId || svc, depositUsdc: parseFloat(obj.dep || obj.depositUsdc || SERVICE_META[svc].depositUsdc) };
+  } catch {}
+  return null;
+}
+
 export default function ScanPay() {
   const navigate    = useNavigate();
   const queryClient = useQueryClient();
   const mmAddress   = localStorage.getItem("mm_address");
 
   // ── 상태 ──
-  const [step,         setStep]         = useState("select"); // select|scanning|active|ended
-  const [selectedSvc,  setSelectedSvc]  = useState(null);
+  // step: "home" | "camera" | "manual" | "processing" | "active" | "ending" | "ended"
+  const [step,         setStep]         = useState("home");
+  const [selectedSvc,  setSelectedSvc]  = useState(null);  // { serviceType, deviceId, depositUsdc }
   const [sessionData,  setSessionData]  = useState(null);
   const [elapsed,      setElapsed]      = useState(0);
   const [totalCharged, setTotalCharged] = useState(0);
   const [fareInfo,     setFareInfo]     = useState(null);
   const [ending,       setEnding]       = useState(false);
   const [log,          setLog]          = useState([]);
-  const [error,        setError]        = useState(null);
+  const [holdCountdown,setHoldCountdown]= useState(null);
+  const [cameraError,  setCameraError]  = useState(null);
 
-  // ── ref ──
-  const sessionRef    = useRef(null);
-  const serviceRef    = useRef(null);
-  const startedAtRef  = useRef(null);
-  const chargedMinRef = useRef(0);
-  const timerRef      = useRef(null);
-  const chargeRef     = useRef(null);
+  const videoRef    = useRef(null);
+  const canvasRef   = useRef(null);
+  const streamRef   = useRef(null);
+  const scannerRef  = useRef(null);
+  const timerRef    = useRef(null);
+  const holdTimerRef= useRef(null);
 
-  // wallet: MetaMask 직접 잔액 조회로 대체
-
-  // ── 세션 복구 ──
+  // 로컬 세션 복구
   useEffect(() => {
     const saved = loadSession();
-    if (saved?.sessionData && saved?.service) {
-      const elapsedSec = Math.floor((Date.now() - saved.startedAt) / 1000);
-      setSelectedSvc(saved.service);
-      setSessionData(saved.sessionData);
-      sessionRef.current    = saved.sessionData;
-      serviceRef.current    = saved.service;
-      startedAtRef.current  = saved.startedAt;
-      chargedMinRef.current = Math.floor(elapsedSec / 60);
-      setElapsed(elapsedSec);
+    if (saved?.sessionId && saved?.status === "active") {
+      setSessionData(saved);
+      setSelectedSvc(saved.svc);
       setStep("active");
     }
   }, []);
 
-  // ── 경과시간 타이머 ──
+  // 경과 시간 타이머
   useEffect(() => {
-    if (step !== "active") { clearInterval(timerRef.current); return; }
-    timerRef.current = setInterval(() => {
-      if (startedAtRef.current)
-        setElapsed(Math.floor((Date.now() - startedAtRef.current) / 1000));
-    }, 1000);
+    if (step === "active") {
+      timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000);
+    } else {
+      clearInterval(timerRef.current);
+      if (step === "home") setElapsed(0);
+    }
     return () => clearInterval(timerRef.current);
   }, [step]);
 
-  // ── 60초 Perun 오프체인 charge 타이머 ──
+  // holdDeadline 카운트다운
   useEffect(() => {
-    if (step !== "active") { clearInterval(chargeRef.current); return; }
-    chargeRef.current = setInterval(async () => {
-      const sd  = sessionRef.current;
-      const svc = serviceRef.current;
-      if (!sd || !svc || !mmAddress) return;
-      const minutesSoFar = Math.floor((Date.now() - startedAtRef.current) / 60000);
-      if (minutesSoFar <= chargedMinRef.current) return;
-      const durationMinutes = minutesSoFar - chargedMinRef.current;
-      try {
-        const chargeData = await apiCall(`/api/v1/sessions/${sd.sessionId}/charge`, "POST", {
-          channelId: sd.channelId, userAddress: mmAddress,
-          serviceType: svc.id, usage: { durationMinutes },
-        });
-        const fare = parseFloat(chargeData.fare?.fareUsdc || "0");
-        chargedMinRef.current = minutesSoFar;
-        setTotalCharged(prev => prev + fare);
-        setFareInfo(chargeData.fare);
-        addLog(`⚡ [${minutesSoFar}분] 오프체인 차감 ${chargeData.fare?.fareUsdc} USDC`, "info");
-      } catch (e) { addLog(`⚠️ charge 오류: ${e.message}`, "error"); }
-    }, 60_000);
-    return () => clearInterval(chargeRef.current);
-  }, [step, mmAddress]);
+    if (sessionData?.holdDeadline) {
+      const tick = () => {
+        const left = sessionData.holdDeadline - Math.floor(Date.now() / 1000);
+        setHoldCountdown(left > 0 ? left : 0);
+      };
+      tick();
+      holdTimerRef.current = setInterval(tick, 1000);
+    }
+    return () => clearInterval(holdTimerRef.current);
+  }, [sessionData?.holdDeadline]);
 
   const addLog = (msg, type = "info") =>
-    setLog(prev => [...prev.slice(-25), { msg, type, ts: new Date().toLocaleTimeString() }]);
+    setLog(prev => [...prev, { msg, type, ts: Date.now() }]);
 
-  const fmt = (s) =>
-    `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  // ── 카메라 시작 ──────────────────────────────────────────────────────────────
+  const startCamera = useCallback(async () => {
+    setCameraError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" }, width: { ideal: 640 }, height: { ideal: 480 } }
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+      startQrScan();
+    } catch (err) {
+      setCameraError(`카메라 접근 실패: ${err.message}`);
+    }
+  }, []);
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // ★ 세션 시작 — V3 Escrow 정상 흐름
-  //   1) 백엔드 /start → sessionId + escrowId + holdDeadline (2분)
-  //   2) MetaMask approve → 에스크로 컨트랙트에 USDC 지출 허가
-  //   3) MetaMask userDeposit() → 에스크로 컨트랙트에 USDC 잠금
-  //   4) 백엔드 /deposit → DB 기록 + 자동 operatorDeposit 트리거
-  // ────────────────────────────────────────────────────────────────────────────
-  const startSession = async (svc) => {
-    const saved = loadSession();
-    if (saved?.sessionData) {
-      setError(`이미 진행 중인 세션(${saved.service?.emoji} ${saved.service?.label})이 있습니다.`);
+  const stopCamera = useCallback(() => {
+    if (scannerRef.current) { clearInterval(scannerRef.current); scannerRef.current = null; }
+    if (streamRef.current)  { streamRef.current.getTracks().forEach(t => t.stop()); streamRef.current = null; }
+  }, []);
+
+  // QR 스캔 루프 (BarcodeDetector API 우선, fallback 없음)
+  const startQrScan = useCallback(() => {
+    if (!("BarcodeDetector" in window)) {
+      setCameraError("이 브라우저는 QR 스캔을 지원하지 않습니다. 수동 선택을 이용해주세요.");
       return;
     }
-    setSelectedSvc(svc);
-    serviceRef.current = svc;
-    setStep("scanning");
-    setError(null);
-    chargedMinRef.current = 0;
-    setTotalCharged(0);
+    const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
+    scannerRef.current = setInterval(async () => {
+      if (!videoRef.current || videoRef.current.readyState < 2) return;
+      try {
+        const codes = await detector.detect(videoRef.current);
+        if (codes.length > 0) {
+          const raw    = codes[0].rawValue;
+          const parsed = parseQrPayload(raw);
+          if (parsed) {
+            stopCamera();
+            onQrScanned(parsed);
+          }
+        }
+      } catch {}
+    }, 300);
+  }, [stopCamera]);
 
+  useEffect(() => {
+    if (step === "camera") startCamera();
+    else stopCamera();
+  }, [step, startCamera, stopCamera]);
+
+  // ── QR 스캔 성공 → 결제 시작 ─────────────────────────────────────────────────
+  const onQrScanned = useCallback(async (svc) => {
+    setSelectedSvc(svc);
+    await startPayment(svc);
+  }, [mmAddress]);
+
+  // ── 수동 선택 → 결제 시작 ─────────────────────────────────────────────────────
+  const onManualSelect = async (svcItem) => {
+    const svc = { serviceType: svcItem.id, deviceId: svcItem.deviceId, depositUsdc: svcItem.depositUsdc };
+    setSelectedSvc(svc);
+    await startPayment(svc);
+  };
+
+  // ── 결제 시작 핵심 로직 ──────────────────────────────────────────────────────
+  const startPayment = async (svc) => {
+    if (!mmAddress) { alert("먼저 MetaMask를 연결하세요"); return; }
+    setStep("processing");
+    setLog([]);
     try {
-      // STEP 1: 백엔드 세션 생성
-      addLog("🔧 백엔드 세션 생성 중...", "info");
+      // 1. 백엔드 세션 생성
+      addLog("① 세션 생성 중...", "info");
       const startData = await apiCall("/api/v1/sessions/start", "POST", {
-        userAddress: mmAddress,
-        serviceType: svc.id,
-        depositUsdc: String(svc.depositUsdc),
+        userAddress:  mmAddress,
+        serviceType:  svc.serviceType,
+        depositUsdc:  String(svc.depositUsdc),
       });
       const { sessionId, channelId, escrowId, holdDeadline } = startData;
-      addLog(`✅ 세션 생성 완료 — ${sessionId.slice(0, 12)}...`, "success");
+      if (!escrowId || !holdDeadline) throw new Error("백엔드 응답에 escrowId/holdDeadline 없음");
+      addLog(`✅ 세션: ${sessionId.slice(0, 8)}...`, "success");
 
-      if (!escrowId || !holdDeadline)
-        throw new Error("백엔드 응답에 escrowId / holdDeadline이 없습니다.");
+      // 2. USDC Approve
+      addLog("② MetaMask: USDC 승인 서명 요청...", "info");
+      await approveUsdcForEscrow(mmAddress, svc.depositUsdc);
+      addLog("✅ USDC 승인 완료", "success");
 
-      // STEP 2: MetaMask approve
-      addLog(`🦊 MetaMask: USDC approve ${svc.depositUsdc} USDC...`, "info");
-      const approveTxHash = await approveUsdcForEscrow(mmAddress, ESCROW_V3_ADDRESS, svc.depositUsdc);
-      addLog(`✅ approve TX: ${approveTxHash.slice(0, 16)}...`, "success");
-      addLog("⏳ approve 컨펌 대기 (6초)...", "info");
-      await new Promise(r => setTimeout(r, 6000));
+      // 3. userDeposit
+      addLog("③ MetaMask: 에스크로 예치 서명 요청...", "info");
+      const depositTxHash = await escrowUserDeposit(mmAddress, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline);
+      addLog(`✅ TX: ${depositTxHash.slice(0, 16)}...`, "success");
 
-      // STEP 3: MetaMask userDeposit
-      addLog(`🦊 MetaMask: 에스크로 예치 ${svc.depositUsdc} USDC...`, "info");
-      const depositTxHash = await escrowUserDeposit(
-        mmAddress, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline,
-      );
-      addLog(`✅ userDeposit TX: ${depositTxHash.slice(0, 16)}...`, "success");
-      addLog("⏳ deposit 컨펌 대기 (6초)...", "info");
-      await new Promise(r => setTimeout(r, 6000));
-
-      // STEP 4: 백엔드 /deposit 기록
-      addLog("🔧 백엔드 예치 기록 + operator 자동 예치 중...", "info");
+      // 4. 백엔드 예치 기록
+      addLog("④ 예치 기록 중...", "info");
       await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
         channelId, userAddress: mmAddress,
         operatorAddress: OPERATOR_ADDRESS,
         depositUsdc: String(svc.depositUsdc),
         holdDeadline, depositTxHash,
       });
-      addLog("✅ 에스크로 FullyFunded! 서비스 시작됩니다.", "success");
+      addLog("✅ 예치 완료! 서비스 시작", "success");
 
-      const now = Date.now();
-      startedAtRef.current = now;
-      sessionRef.current   = startData;
-      setSessionData(startData);
-      saveSession({ service: svc, sessionData: startData, startedAt: now });
+      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash };
+      saveSession(sd);
+      setSessionData(sd);
       setStep("active");
-      // 트랜잭션 기록: payment-backend DB 자동 저장
 
-      const newBal = await getUsdcBalance(mmAddress).catch(() => null);
-      if (newBal !== null) {
-        localStorage.setItem("mm_balance", newBal);
-        queryClient.invalidateQueries({ queryKey: ['wallets'] });
-      }
-    } catch (e) {
-      setError(e.message);
-      setStep("select");
-      addLog(`❌ 실패: ${e.message}`, "error");
+    } catch (err) {
+      addLog(`❌ ${err.message}`, "error");
+      setStep("home");
     }
   };
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // ★ 세션 종료 — 정산 흐름
-  //   1) 마지막 남은 시간 /charge
-  //   2) /end → 백엔드가 holdDeadline(2분) 이후 settleAndRelease 자동 호출
-  //      → 컨트랙트: fare → operator, (deposit - fare) → user 자동 환불
-  // ────────────────────────────────────────────────────────────────────────────
-  const endSession = async () => {
-    if (ending) return;
-    setEnding(true);
-    clearInterval(chargeRef.current);
-    clearInterval(timerRef.current);
-
-    const sd  = sessionRef.current;
-    const svc = serviceRef.current;
-    const totalElapsedMin = Math.max(elapsed / 60, 0.1);
-    let finalFareUsdc = 0;
-
+  // ── Charge (1분마다 자동 청구) ────────────────────────────────────────────────
+  const doCharge = useCallback(async () => {
+    if (!sessionData) return;
     try {
-      const remainMin = totalElapsedMin - chargedMinRef.current;
-      if (remainMin > 0.05) {
-        const chargeData = await apiCall(`/api/v1/sessions/${sd.sessionId}/charge`, "POST", {
-          channelId: sd.channelId, userAddress: mmAddress,
-          serviceType: svc.id, usage: { durationMinutes: remainMin },
-        });
-        finalFareUsdc = parseFloat(chargeData.fare?.fareUsdc || "0");
-        setFareInfo(chargeData.fare);
-        addLog(`💰 최종 요금: ${chargeData.fare?.fareUsdc} USDC`, "success");
-      } else {
-        finalFareUsdc = 0;
-        addLog(`💰 누적 요금: ${totalCharged.toFixed(4)} USDC`, "success");
-      }
-    } catch (e) {
-      addLog(`⚠️ 최종 요금 계산 실패: ${e.message}`, "error");
-    }
-
-    const totalFare  = totalCharged + finalFareUsdc;
-    const refundUsdc = Math.max(0, (svc?.depositUsdc || 0) - totalFare);
-
-    try {
-      await apiCall(`/api/v1/sessions/${sd.sessionId}/end`, "POST", {
-        channelId:    sd.channelId,
-        userAddress:  mmAddress,
-        userFinalSig: "0xmock_signature_for_demo",
-        fareUsdc:     totalFare.toFixed(6),
+      const res = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/charge`, "POST", {
+        channelId:   sessionData.channelId,
+        userAddress: mmAddress,
+        serviceType: sessionData.svc.serviceType,
+        usage: { durationMinutes: 1 },
       });
-      addLog("🏁 정산 요청 완료 — holdDeadline(2분) 이후 자동 온체인 정산", "success");
-      addLog(`📤 요금 ${totalFare.toFixed(4)} USDC → operator`, "info");
-      addLog(`📥 환불 ${refundUsdc.toFixed(4)} USDC → 내 지갑 (약 2분 후)`, "success");
-    } catch (e) {
-      addLog(`⚠️ /end 오류: ${e.message}`, "error");
+      const fare = parseFloat(res.fare?.fareUsdc || "0");
+      setTotalCharged(c => c + fare);
+      setFareInfo(res.fare);
+    } catch {}
+  }, [sessionData, mmAddress]);
+
+  useEffect(() => {
+    if (step !== "active") return;
+    const id = setInterval(doCharge, 60_000);
+    return () => clearInterval(id);
+  }, [step, doCharge]);
+
+  // ── 세션 종료 ─────────────────────────────────────────────────────────────────
+  const endSession = async () => {
+    if (!sessionData || ending) return;
+    setEnding(true);
+    setStep("ending");
+    setLog([]);
+    try {
+      addLog("① 세션 종료 요청...", "info");
+      const res = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
+        channelId:    sessionData.channelId,
+        userAddress:  mmAddress,
+        userFinalSig: String(totalCharged.toFixed(6)),
+      });
+      addLog(`✅ 요금: ${res.fareUsdc} USDC`, "success");
+      addLog(`✅ 환불: ${res.refundUsdc} USDC (holdDeadline 후 지갑으로)`, "success");
+
+      clearSession();
+      setSessionData({ ...sessionData, result: res, status: "ended" });
+      setStep("ended");
+      queryClient.invalidateQueries({ queryKey: ['sessions-history'] });
+    } catch (err) {
+      addLog(`❌ ${err.message}`, "error");
+      setStep("active");
+    } finally {
+      setEnding(false);
     }
-      // 트랜잭션 기록: payment-backend DB 자동 저장
-
-    // 3분 후 온체인 잔액 갱신 (settleAndRelease 완료 후)
-    setTimeout(async () => {
-      const newBal = await getUsdcBalance(mmAddress).catch(() => null);
-      if (newBal !== null) {
-        localStorage.setItem("mm_balance", newBal);
-        queryClient.invalidateQueries({ queryKey: ['wallets'] });
-      }
-    }, 180_000);
-
-    clearSession();
-    setEnding(false);
-    setStep("ended");
   };
 
-  const reset = () => {
-    clearSession();
-    startedAtRef.current  = null; sessionRef.current  = null;
-    serviceRef.current    = null; chargedMinRef.current = 0;
-    setStep("select"); setSelectedSvc(null); setSessionData(null);
-    setElapsed(0); setLog([]); setError(null); setFareInfo(null); setTotalCharged(0);
-  };
+  const formatTime = (s) => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
 
-  // ────────────────────────────────────────────────────────────────────────────
-  // 렌더
-  // ────────────────────────────────────────────────────────────────────────────
-  if (!mmAddress) return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl p-8 shadow-sm text-center">
-        <div className="text-4xl mb-4">🦊</div>
-        <h2 className="text-xl font-bold mb-2">MetaMask 연결 필요</h2>
-        <p className="text-gray-500 mb-6">결제를 위해 먼저 MetaMask를 연결해주세요.</p>
-        <button onClick={() => navigate('/profile')}
-          className="bg-blue-600 text-white px-6 py-3 rounded-xl font-semibold">
-          프로필에서 연결
-        </button>
-      </div>
-    </div>
-  );
-
+  // ══════════════════════════════════════════════════════════════════════════════
+  // RENDER
+  // ══════════════════════════════════════════════════════════════════════════════
   return (
     <div className="min-h-screen bg-gray-50 pb-24">
-      {/* 헤더 */}
-      <div className="bg-white border-b px-4 py-4 flex items-center gap-3 sticky top-0 z-10 shadow-sm">
-        <button onClick={() => navigate(-1)} className="text-gray-500 hover:text-gray-700 p-1">
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/>
-          </svg>
-        </button>
-        <div>
+      <div className="max-w-md mx-auto px-4 pt-6 space-y-4">
+
+        {/* Header */}
+        <div className="flex items-center gap-3">
+          <button onClick={() => { stopCamera(); setStep("home"); navigate("/"); }}
+            className="p-2 rounded-xl hover:bg-gray-100 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7"/>
+            </svg>
+          </button>
           <h1 className="text-lg font-bold text-gray-900">QR 결제</h1>
-          <p className="text-xs text-gray-500">Perun 오프체인 마이크로페이먼트 · V3 Escrow</p>
         </div>
-      </div>
 
-      <div className="px-4 py-6 space-y-4 max-w-md mx-auto">
-
-        {/* ── 서비스 선택 ── */}
-        {step === "select" && (
+        {/* ── HOME: QR 스캔 / 수동 선택 ── */}
+        {step === "home" && (
           <div className="space-y-4">
-            <div className="bg-blue-50 rounded-xl p-3 text-xs text-blue-700">
-              💡 서비스 선택 시 MetaMask로 USDC를 에스크로 컨트랙트에 예치합니다.<br/>
-              사용 후 종료하면 요금을 제외한 잔액이 약 2분 후 자동 환불됩니다.
-            </div>
-            {error && (
-              <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">
-                ⚠️ {error}
+            {/* QR 스캔 버튼 */}
+            <button onClick={() => setStep("camera")}
+              className="w-full bg-blue-600 text-white rounded-2xl p-6 flex flex-col items-center gap-3 shadow-lg active:scale-95 transition-transform">
+              <div className="text-5xl">📷</div>
+              <div>
+                <div className="text-lg font-bold">QR 코드 스캔</div>
+                <div className="text-blue-100 text-sm">기기의 QR 코드를 카메라로 인식</div>
               </div>
-            )}
-            <h2 className="text-base font-bold text-gray-800">서비스를 선택하세요</h2>
-            {SERVICE_TYPES.map(svc => (
-              <button key={svc.id} onClick={() => startSession(svc)}
-                className="w-full bg-white rounded-2xl p-5 shadow-sm border border-gray-100 flex items-center gap-4 hover:border-blue-300 hover:shadow-md transition-all text-left">
-                <div className="text-4xl">{svc.emoji}</div>
-                <div className="flex-1">
-                  <div className="font-bold text-gray-900">{svc.label}</div>
-                  <div className="text-sm text-gray-500">예치금 {svc.depositUsdc} USDC · 사용 후 잔액 자동 환불</div>
+            </button>
+
+            {/* 수동 선택 */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm">
+              <p className="text-xs text-gray-400 mb-3 font-medium">또는 서비스 직접 선택</p>
+              <div className="space-y-2">
+                {SERVICE_TYPES.map(svc => (
+                  <button key={svc.id} onClick={() => { setStep("manual"); }}
+                    className="w-full flex items-center gap-4 p-4 rounded-xl border border-gray-100 hover:border-blue-200 hover:bg-blue-50 transition-all text-left">
+                    <span className="text-3xl">{svc.emoji}</span>
+                    <div className="flex-1">
+                      <div className="font-semibold text-gray-900">{svc.label}</div>
+                      <div className="text-xs text-gray-400">{svc.deviceId} · 보증금 {svc.depositUsdc} USDC</div>
+                    </div>
+                    <svg className="w-4 h-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7"/>
+                    </svg>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ── CAMERA: QR 스캔 화면 ── */}
+        {step === "camera" && (
+          <div className="space-y-3">
+            <div className="relative rounded-2xl overflow-hidden bg-black shadow-lg" style={{ aspectRatio: "4/3" }}>
+              <video ref={videoRef} className="w-full h-full object-cover" playsInline muted autoPlay />
+              <canvas ref={canvasRef} className="hidden" />
+              {/* 스캔 가이드 오버레이 */}
+              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                <div className="w-52 h-52 border-2 border-white rounded-2xl opacity-70 relative">
+                  <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-blue-400 rounded-tl-lg" />
+                  <div className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-blue-400 rounded-tr-lg" />
+                  <div className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-blue-400 rounded-bl-lg" />
+                  <div className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-blue-400 rounded-br-lg" />
+                  {/* 스캔 라인 애니메이션 */}
+                  <div className="absolute top-0 left-0 right-0 h-0.5 bg-blue-400 animate-[scan_2s_linear_infinite]" style={{ boxShadow: '0 0 8px #60a5fa' }} />
                 </div>
-                <svg className="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7"/>
-                </svg>
+              </div>
+            </div>
+
+            {cameraError ? (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-sm text-red-700">{cameraError}</div>
+            ) : (
+              <p className="text-center text-sm text-gray-500">기기의 QR 코드를 사각형 안에 맞춰주세요</p>
+            )}
+
+            <div className="flex gap-2">
+              <button onClick={() => { stopCamera(); setStep("home"); }}
+                className="flex-1 py-3 rounded-xl border border-gray-200 text-gray-600 font-medium text-sm">
+                취소
+              </button>
+              <button onClick={() => { stopCamera(); setStep("manual"); }}
+                className="flex-1 py-3 rounded-xl bg-gray-100 text-gray-700 font-medium text-sm">
+                직접 선택
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── MANUAL: 서비스 선택 ── */}
+        {step === "manual" && (
+          <div className="bg-white rounded-2xl p-4 shadow-sm space-y-2">
+            <h2 className="font-bold text-gray-800 mb-3">서비스 선택</h2>
+            {SERVICE_TYPES.map(svc => (
+              <button key={svc.id} onClick={() => onManualSelect(svc)}
+                className="w-full flex items-center gap-4 p-4 rounded-xl border border-gray-100 hover:border-blue-300 hover:bg-blue-50 transition-all text-left active:scale-[0.98]">
+                <span className="text-3xl">{svc.emoji}</span>
+                <div className="flex-1">
+                  <div className="font-semibold text-gray-900">{svc.label}</div>
+                  <div className="text-xs text-gray-400">{svc.deviceId}</div>
+                </div>
+                <div className="text-right">
+                  <div className="font-bold text-blue-600">{svc.depositUsdc} USDC</div>
+                  <div className="text-xs text-gray-400">보증금</div>
+                </div>
               </button>
             ))}
+            <button onClick={() => setStep("home")}
+              className="w-full py-3 rounded-xl text-gray-400 text-sm">← 돌아가기</button>
           </div>
         )}
 
-        {/* ── 처리 중 ── */}
-        {step === "scanning" && (
+        {/* ── PROCESSING: MetaMask 서명 진행 중 ── */}
+        {step === "processing" && (
           <div className="bg-white rounded-2xl p-8 shadow-sm text-center space-y-4">
-            <div className="text-5xl animate-pulse">📡</div>
-            <h2 className="text-xl font-bold">처리 중...</h2>
-            <p className="text-gray-500 text-sm">MetaMask에서 단계별로 승인해주세요</p>
-            <div className="text-xs text-gray-400 bg-gray-50 rounded-lg p-3 text-left space-y-1">
-              <div>① 백엔드 세션 생성</div>
-              <div>② MetaMask: USDC approve 서명</div>
-              <div>③ MetaMask: 에스크로 예치(userDeposit) 서명</div>
-              <div>④ 백엔드 예치 기록 완료</div>
+            <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto">
+              <div className="w-8 h-8 border-3 border-blue-600 border-t-transparent rounded-full animate-spin" />
             </div>
-          </div>
-        )}
-
-        {/* ── 세션 활성 ── */}
-        {step === "active" && selectedSvc && (
-          <>
-            <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-6 text-white shadow-lg">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-3">
-                  <span className="text-3xl">{selectedSvc.emoji}</span>
-                  <div>
-                    <div className="font-bold text-lg">{selectedSvc.label}</div>
-                    <div className="text-blue-200 text-sm">이용 중 · Perun 오프체인 활성</div>
-                  </div>
-                </div>
-                <div className="bg-white/20 rounded-xl px-3 py-2 text-center">
-                  <div className="text-xs text-blue-200">경과</div>
-                  <div className="font-mono font-bold">{fmt(elapsed)}</div>
-                </div>
-              </div>
-              <div className="bg-white/10 rounded-xl p-3 space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-blue-200">에스크로 예치금</span>
-                  <span className="font-bold">{selectedSvc.depositUsdc} USDC</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-blue-200">누적 차감 (오프체인)</span>
-                  <span className="text-yellow-300 font-bold">− {totalCharged.toFixed(4)} USDC</span>
-                </div>
-                <div className="border-t border-white/20 pt-2 flex justify-between">
-                  <span className="text-blue-200">예상 환불액</span>
-                  <span className="text-green-300 font-bold text-base">
-                    ≈ {Math.max(0, selectedSvc.depositUsdc - totalCharged).toFixed(4)} USDC
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {sessionData && (
-              <div className="bg-white rounded-2xl p-4 shadow-sm text-xs text-gray-400 space-y-1">
-                <div className="flex justify-between">
-                  <span>세션 ID</span><span className="font-mono">{sessionData.sessionId?.slice(0,20)}...</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>escrowId</span><span className="font-mono">{sessionData.escrowId?.slice(0,20)}...</span>
-                </div>
-                <div className="flex justify-between">
-                  <span>holdDeadline</span>
-                  <span className="font-mono">
-                    {sessionData.holdDeadline
-                      ? new Date(sessionData.holdDeadline * 1000).toLocaleTimeString()
-                      : '-'}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {fareInfo && (
-              <div className="bg-white rounded-2xl p-4 shadow-sm">
-                <h3 className="text-sm font-semibold text-gray-700 mb-2">💡 최근 요금</h3>
-                <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div className="bg-gray-50 rounded-xl p-3">
-                    <div className="text-gray-400 text-xs">단가</div>
-                    <div className="font-bold">{fareInfo.ratePerMin ?? fareInfo.ratePerKwh ?? '-'} USDC/분</div>
-                  </div>
-                  <div className="bg-blue-50 rounded-xl p-3">
-                    <div className="text-blue-400 text-xs">이번 청구</div>
-                    <div className="font-bold text-blue-700">{fareInfo.fareUsdc} USDC</div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            <button onClick={endSession} disabled={ending}
-              className="w-full bg-red-500 hover:bg-red-600 disabled:opacity-50 text-white font-bold py-4 rounded-2xl shadow transition-all text-lg">
-              {ending ? "⏳ 정산 중..." : "🏁 서비스 종료 & 정산"}
-            </button>
-          </>
-        )}
-
-        {/* ── 종료 완료 ── */}
-        {step === "ended" && (
-          <div className="bg-white rounded-2xl p-8 shadow-sm text-center space-y-4">
-            <div className="text-6xl">✅</div>
-            <h2 className="text-2xl font-bold">정산 완료</h2>
-            {selectedSvc && (
-              <div className="bg-gray-50 rounded-xl p-4 space-y-2 text-sm text-left">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">서비스</span>
-                  <span className="font-semibold">{selectedSvc.emoji} {selectedSvc.label}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">이용 시간</span>
-                  <span className="font-semibold">{fmt(elapsed)}</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">예치금</span>
-                  <span className="font-semibold">{selectedSvc.depositUsdc} USDC</span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">총 요금</span>
-                  <span className="font-bold text-red-600">
-                    − {(totalCharged + parseFloat(fareInfo?.fareUsdc || 0)).toFixed(4)} USDC
-                  </span>
-                </div>
-                <div className="border-t pt-2 flex justify-between">
-                  <span className="font-semibold text-gray-700">환불 예정</span>
-                  <span className="font-bold text-green-600 text-base">
-                    + {Math.max(0, selectedSvc.depositUsdc - totalCharged - parseFloat(fareInfo?.fareUsdc || 0)).toFixed(4)} USDC
-                  </span>
-                </div>
-              </div>
-            )}
-            <div className="bg-green-50 rounded-xl p-3 text-xs text-green-700">
-              🔄 온체인 환불은 약 2분 후 MetaMask 지갑에 자동 입금됩니다.
-            </div>
-            <button onClick={reset}
-              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-xl transition-all">
-              다시 이용하기
-            </button>
-          </div>
-        )}
-
-        {/* ── 이벤트 로그 ── */}
-        {log.length > 0 && (
-          <div className="bg-white rounded-2xl p-4 shadow-sm">
-            <h3 className="text-sm font-semibold text-gray-700 mb-3">📋 이벤트 로그</h3>
-            <div className="space-y-1 max-h-52 overflow-y-auto">
-              {log.slice().reverse().map((l, i) => (
-                <div key={i} className={`text-xs flex gap-2 ${
-                  l.type === 'error'   ? 'text-red-500' :
-                  l.type === 'success' ? 'text-green-600' : 'text-gray-500'
-                }`}>
-                  <span className="text-gray-300 shrink-0">{l.ts}</span>
+            <h2 className="text-lg font-bold text-gray-900">결제 준비 중</h2>
+            <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4 text-left space-y-2">
+              {log.map((l, i) => (
+                <div key={i} className={`flex gap-2 ${l.type === "error" ? "text-red-600" : l.type === "success" ? "text-green-600" : "text-gray-600"}`}>
                   <span>{l.msg}</span>
                 </div>
               ))}
+              {log.length === 0 && <div className="text-gray-400">진행 중...</div>}
             </div>
+          </div>
+        )}
+
+        {/* ── ACTIVE: 세션 활성 ── */}
+        {step === "active" && selectedSvc && (
+          <div className="space-y-3">
+            {/* 서비스 카드 */}
+            <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-6 text-white shadow-lg">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="text-4xl">{SERVICE_META[selectedSvc.serviceType]?.emoji || '📦'}</span>
+                <div>
+                  <div className="font-bold text-lg">{SERVICE_META[selectedSvc.serviceType]?.label}</div>
+                  <div className="text-blue-200 text-sm">{selectedSvc.deviceId}</div>
+                </div>
+                <div className="ml-auto flex items-center gap-1">
+                  <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
+                  <span className="text-xs text-green-300">이용 중</span>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="bg-white/10 rounded-xl p-3">
+                  <div className="text-xl font-bold font-mono">{formatTime(elapsed)}</div>
+                  <div className="text-xs text-blue-200 mt-0.5">경과 시간</div>
+                </div>
+                <div className="bg-white/10 rounded-xl p-3">
+                  <div className="text-xl font-bold">{totalCharged.toFixed(4)}</div>
+                  <div className="text-xs text-blue-200 mt-0.5">USDC 청구</div>
+                </div>
+                <div className="bg-white/10 rounded-xl p-3">
+                  <div className="text-xl font-bold">{holdCountdown !== null ? (holdCountdown > 0 ? `${holdCountdown}s` : "✅") : "--"}</div>
+                  <div className="text-xs text-blue-200 mt-0.5">정산 대기</div>
+                </div>
+              </div>
+            </div>
+
+            {/* 세션 정보 */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm text-sm space-y-2">
+              <div className="flex justify-between text-gray-500">
+                <span>세션 ID</span>
+                <span className="font-mono text-gray-800">{sessionData?.sessionId?.slice(0,12)}...</span>
+              </div>
+              <div className="flex justify-between text-gray-500">
+                <span>보증금</span>
+                <span className="font-bold text-gray-800">{selectedSvc.depositUsdc} USDC</span>
+              </div>
+              <div className="flex justify-between text-gray-500">
+                <span>예상 환불</span>
+                <span className="font-bold text-green-600">
+                  {(selectedSvc.depositUsdc - totalCharged).toFixed(4)} USDC
+                </span>
+              </div>
+            </div>
+
+            {/* 종료 버튼 */}
+            <button onClick={endSession}
+              className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-2xl shadow-lg active:scale-95 transition-all">
+              서비스 종료 및 정산
+            </button>
+          </div>
+        )}
+
+        {/* ── ENDING: 종료 처리 중 ── */}
+        {step === "ending" && (
+          <div className="bg-white rounded-2xl p-8 shadow-sm text-center space-y-4">
+            <div className="text-5xl animate-pulse">⚡</div>
+            <h2 className="text-lg font-bold">정산 처리 중...</h2>
+            <div className="text-sm text-gray-500 bg-gray-50 rounded-xl p-4 text-left space-y-2">
+              {log.map((l, i) => (
+                <div key={i} className={`${l.type === "error" ? "text-red-600" : l.type === "success" ? "text-green-600" : "text-gray-600"}`}>
+                  {l.msg}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* ── ENDED: 완료 ── */}
+        {step === "ended" && sessionData?.result && (
+          <div className="space-y-3">
+            <div className="bg-white rounded-2xl p-6 shadow-sm text-center">
+              <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                <svg className="w-8 h-8 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
+                </svg>
+              </div>
+              <h2 className="text-xl font-bold text-gray-900 mb-1">결제 완료</h2>
+              <p className="text-sm text-gray-500">holdDeadline 이후 환불이 지갑으로 자동 전송됩니다</p>
+            </div>
+
+            <div className="bg-white rounded-2xl p-5 shadow-sm space-y-3">
+              <div className="flex justify-between py-2 border-b border-gray-50">
+                <span className="text-gray-500 text-sm">이용 요금</span>
+                <span className="font-bold text-gray-900">{sessionData.result.fareUsdc} USDC</span>
+              </div>
+              <div className="flex justify-between py-2 border-b border-gray-50">
+                <span className="text-gray-500 text-sm">환불 예정</span>
+                <span className="font-bold text-green-600">{sessionData.result.refundUsdc} USDC</span>
+              </div>
+              <div className="flex justify-between py-2">
+                <span className="text-gray-500 text-sm">이용 시간</span>
+                <span className="font-mono text-gray-900">{formatTime(elapsed)}</span>
+              </div>
+            </div>
+
+            {sessionData.result.txHash && sessionData.result.txHash !== 'settled_via_perun' && (
+              <a href={`https://sepolia.basescan.org/tx/${sessionData.result.txHash}`} target="_blank" rel="noreferrer"
+                className="block w-full text-center bg-gray-100 hover:bg-gray-200 text-gray-600 py-3 rounded-xl text-sm transition-colors">
+                🔗 BaseScan에서 TX 확인
+              </a>
+            )}
+
+            <button onClick={() => { setStep("home"); setSelectedSvc(null); setSessionData(null); setTotalCharged(0); setElapsed(0); setLog([]); }}
+              className="w-full bg-blue-600 text-white font-bold py-4 rounded-2xl shadow-lg">
+              홈으로
+            </button>
           </div>
         )}
       </div>
     </div>
   );
 }
-
