@@ -83,7 +83,20 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [mmAddress]);
 
+  // 모바일 감지
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const hasEthereum = typeof window !== 'undefined' && !!window.ethereum;
+
+  // MetaMask 앱 딥링크 (모바일 외부 브라우저용)
+  const FRONTEND_URL = window.location.origin + window.location.pathname;
+  const MM_DEEPLINK  = `https://metamask.app.link/dapp/${FRONTEND_URL.replace(/^https?:\/\//, '')}`;
+
   const handleConnectMetaMask = async () => {
+    // 모바일인데 window.ethereum 없음 → MetaMask 앱으로 리디렉션
+    if (isMobile && !hasEthereum) {
+      window.location.href = MM_DEEPLINK;
+      return;
+    }
     setMmConnecting(true); setMmError(null);
     try {
       const addr = await connectMetaMask();
@@ -151,12 +164,29 @@ export default function Dashboard() {
               <AlertTriangle className="w-5 h-5 text-orange-500" />
               <span className="text-sm font-semibold text-orange-800">MetaMask 연결 필요</span>
             </div>
-            <p className="text-xs text-orange-700 mb-3">결제 기능을 사용하려면 MetaMask를 연결해주세요.</p>
-            {mmError && <p className="text-xs text-red-600 mb-2">{mmError}</p>}
-            <button onClick={handleConnectMetaMask} disabled={mmConnecting}
-              className="w-full py-2 bg-orange-500 text-white text-sm font-semibold rounded-lg hover:bg-orange-600 disabled:opacity-50">
-              {mmConnecting ? '연결 중...' : 'MetaMask 연결'}
-            </button>
+            {isMobile && !hasEthereum ? (
+              <>
+                <p className="text-xs text-orange-700 mb-3">
+                  MetaMask 앱 내장 브라우저에서 접속하거나, 아래 버튼으로 MetaMask 앱을 열어주세요.
+                </p>
+                <a href={MM_DEEPLINK}
+                  className="block w-full text-center py-2.5 bg-orange-500 text-white text-sm font-semibold rounded-lg">
+                  MetaMask 앱에서 열기 →
+                </a>
+                <p className="text-xs text-orange-400 mt-2 text-center">
+                  또는 MetaMask 앱 → 브라우저 탭 → 이 주소 직접 입력
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-orange-700 mb-3">결제 기능을 사용하려면 MetaMask를 연결해주세요.</p>
+                {mmError && <p className="text-xs text-red-600 mb-2">{mmError}</p>}
+                <button onClick={handleConnectMetaMask} disabled={mmConnecting}
+                  className="w-full py-2 bg-orange-500 text-white text-sm font-semibold rounded-lg hover:bg-orange-600 disabled:opacity-50">
+                  {mmConnecting ? '연결 중...' : 'MetaMask 연결'}
+                </button>
+              </>
+            )}
           </motion.div>
         )}
 
@@ -228,3 +258,4 @@ export default function Dashboard() {
     </div>
   );
 }
+
