@@ -5,6 +5,7 @@ import {
   approveUsdcForEscrow,
   userDeposit as escrowUserDeposit,
 } from '@/lib/walletUtils';
+import BottomNav from '@/components/wallet/BottomNav';
 
 const BACKEND          = "https://payment-backend-production.up.railway.app";
 const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
@@ -59,7 +60,16 @@ function parseQrPayload(raw) {
 export default function ScanPay() {
   const navigate    = useNavigate();
   const queryClient = useQueryClient();
-  const mmAddress   = localStorage.getItem("mm_address");
+  const [mmAddress, setMmAddress] = React.useState(() => localStorage.getItem("mm_address"));
+
+  // localStorage 변경 감지 (다른 탭/컴포넌트에서 연결된 경우)
+  React.useEffect(() => {
+    const sync = () => setMmAddress(localStorage.getItem("mm_address"));
+    window.addEventListener('storage', sync);
+    // 포커스 복귀 시 재동기화 (MetaMask 앱 승인 후 돌아올 때)
+    window.addEventListener('focus', sync);
+    return () => { window.removeEventListener('storage', sync); window.removeEventListener('focus', sync); };
+  }, []);
 
   // step: "home" | "camera" | "manual" | "processing" | "active" | "ending" | "ended"
   const [step,          setStep]          = useState("home");
@@ -221,35 +231,33 @@ export default function ScanPay() {
   // ── QR 스캔 성공 ─────────────────────────────────────────────────────────────
   const onQrSuccess = (svc) => {
     setSelectedSvc(svc);
-    if (!mmAddress) {
-      // MetaMask 미연결이면 manual 화면으로 — 연결 후 다시 선택
-      alert("MetaMask를 먼저 연결한 후 다시 스캔해주세요");
+    const addr = localStorage.getItem("mm_address");
+    if (!addr) {
+      setMmAddress(null);
       setStep("home");
       return;
     }
-    startPayment(svc);
+    startPayment(svc, addr);
   };
 
   // ── 수동 선택 ─────────────────────────────────────────────────────────────────
   const onManualSelect = (svcItem) => {
     const svc = { serviceType: svcItem.id, deviceId: svcItem.deviceId, depositUsdc: svcItem.depositUsdc };
     setSelectedSvc(svc);
-    if (!mmAddress) {
-      alert("MetaMask를 먼저 연결해주세요 (홈 화면에서 연결)");
-      setStep("home");
-      return;
-    }
-    startPayment(svc);
+    const addr = localStorage.getItem("mm_address");
+    if (!addr) { setStep("home"); return; }
+    startPayment(svc, addr);
   };
 
   // ── 결제 시작 ─────────────────────────────────────────────────────────────────
-  const startPayment = async (svc) => {
+  const startPayment = async (svc, addr = mmAddress) => {
+    if (addr) setMmAddress(addr);
     setStep("processing");
     setLog([]);
     try {
       addLog("① 세션 생성 중...", "info");
       const startData = await apiCall("/api/v1/sessions/start", "POST", {
-        userAddress:  mmAddress,
+        userAddress:  addr,
         serviceType:  svc.serviceType,
         depositUsdc:  String(svc.depositUsdc),
       });
@@ -258,16 +266,16 @@ export default function ScanPay() {
       addLog(`✅ 세션: ${sessionId.slice(0, 8)}...`, "success");
 
       addLog("② MetaMask: USDC 승인 서명 요청...", "info");
-      await approveUsdcForEscrow(mmAddress, svc.depositUsdc);
+      await approveUsdcForEscrow(addr, svc.depositUsdc);
       addLog("✅ USDC 승인 완료", "success");
 
       addLog("③ MetaMask: 에스크로 예치 서명 요청...", "info");
-      const depositTxHash = await escrowUserDeposit(mmAddress, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline);
+      const depositTxHash = await escrowUserDeposit(addr, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline);
       addLog(`✅ TX: ${depositTxHash.slice(0, 16)}...`, "success");
 
       addLog("④ 예치 기록 중...", "info");
       await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
-        channelId, userAddress: mmAddress,
+        channelId, userAddress: addr,
         operatorAddress: OPERATOR_ADDRESS,
         depositUsdc: String(svc.depositUsdc),
         holdDeadline, depositTxHash,
@@ -595,6 +603,8 @@ export default function ScanPay() {
           </div>
         )}
       </div>
+      <BottomNav />
     </div>
   );
 }
+
