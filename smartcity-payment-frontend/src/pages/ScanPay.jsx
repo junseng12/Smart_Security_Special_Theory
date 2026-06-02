@@ -254,13 +254,14 @@ export default function ScanPay() {
   const startPayment = async (svc, addr = mmAddress) => {
     if (addr) setMmAddress(addr);
     // 모바일 외부 브라우저(Safari/Chrome)에서는 window.ethereum 없음 → MetaMask 앱으로 리디렉션
-    if (!window.ethereum) {
-      const mmDeeplink = `https://metamask.app.link/dapp/${window.location.host}${window.location.pathname}`;
-      window.location.href = mmDeeplink;
-      return;
-    }
     setStep("processing");
     setLog([]);
+    if (!window.ethereum) {
+      addLog("❌ MetaMask를 찾을 수 없습니다.", "error");
+      addLog("📱 MetaMask 앱 → 브라우저에서 이 페이지를 열어주세요.", "info");
+      setTimeout(() => setStep("home"), 6000);
+      return;
+    }
     try {
       addLog("① 세션 생성 중...", "info");
       const startData = await apiCall("/api/v1/sessions/start", "POST", {
@@ -295,8 +296,8 @@ export default function ScanPay() {
       setStep("active");
 
     } catch (err) {
-      addLog(`❌ ${err.message}`, "error");
-      setStep("home");
+      addLog(`❌ 오류: ${err.message}`, "error");
+      setTimeout(() => setStep("home"), 6000);
     }
   };
 
@@ -491,7 +492,14 @@ export default function ScanPay() {
                 </div>
               ))}
             </div>
-            <p className="text-xs text-gray-400">MetaMask 팝업이 뜨면 승인해주세요</p>
+            {log.some(l => l.type === "error") ? (
+              <button onClick={() => { setStep("home"); setLog([]); }}
+                className="w-full py-3 bg-red-50 text-red-600 rounded-xl text-sm font-medium border border-red-100">
+                ← 홈으로 돌아가기
+              </button>
+            ) : (
+              <p className="text-xs text-gray-400">MetaMask 팝업이 뜨면 승인해주세요</p>
+            )}
           </div>
         )}
 
@@ -614,5 +622,6 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
