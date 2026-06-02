@@ -8,7 +8,8 @@ import {
 import BottomNav from '@/components/wallet/BottomNav';
 
 const BACKEND          = "https://payment-backend-production.up.railway.app";
-const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
+const OPERATOR_ADDRESS  = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
+const ESCROW_V3_ADDRESS = "0xb6094337a6F37306eBDadd9923991275Cc6220f7";
 
 const SERVICE_META = {
   bicycle:     { label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0 },
@@ -252,6 +253,12 @@ export default function ScanPay() {
   // ── 결제 시작 ─────────────────────────────────────────────────────────────────
   const startPayment = async (svc, addr = mmAddress) => {
     if (addr) setMmAddress(addr);
+    // 모바일 외부 브라우저(Safari/Chrome)에서는 window.ethereum 없음 → MetaMask 앱으로 리디렉션
+    if (!window.ethereum) {
+      const mmDeeplink = `https://metamask.app.link/dapp/${window.location.host}${window.location.pathname}`;
+      window.location.href = mmDeeplink;
+      return;
+    }
     setStep("processing");
     setLog([]);
     try {
@@ -266,7 +273,7 @@ export default function ScanPay() {
       addLog(`✅ 세션: ${sessionId.slice(0, 8)}...`, "success");
 
       addLog("② MetaMask: USDC 승인 서명 요청...", "info");
-      await approveUsdcForEscrow(addr, svc.depositUsdc);
+      await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
       addLog("✅ USDC 승인 완료", "success");
 
       addLog("③ MetaMask: 에스크로 예치 서명 요청...", "info");
@@ -607,4 +614,5 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
