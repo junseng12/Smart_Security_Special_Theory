@@ -1,68 +1,68 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { Zap, AlertTriangle, LogOut } from 'lucide-react';
+import { Zap, AlertTriangle, LogOut, ChevronRight, RefreshCw } from 'lucide-react';
 import BottomNav from '@/components/wallet/BottomNav';
 import BalanceCard from '@/components/wallet/BalanceCard';
 import QuickActions from '@/components/wallet/QuickActions';
-import RecentTransactions from '@/components/wallet/RecentTransactions';
 import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage, getConnectedMetaMaskAddress } from '@/lib/walletUtils';
 
-const BACKEND = "https://payment-backend-production.up.railway.app";
+const BACKEND     = "https://payment-backend-production.up.railway.app";
 const SESSION_KEY = "active_session";
 
-export default function Dashboard() {
-  const navigate = useNavigate();
-  const [showBalance, setShowBalance] = useState(true);
-  const [mmAddress, setMmAddress] = useState(null);
-  const [mmBalance, setMmBalance] = useState(null);
-  const [mmConnecting, setMmConnecting] = useState(false);
-  const [mmError, setMmError] = useState(null);
-  const [activeSession, setActiveSession] = useState(null);
-  const [transactions, setTransactions] = useState([]);
-  const queryClient = useQueryClient();
+const SERVICE_EMOJI = { bicycle: '🚲', ev_charging: '⚡', parking: '🅿️' };
+const STATUS_COLOR  = {
+  Active:   'text-blue-600',
+  Settled:  'text-green-600',
+  Settling: 'text-orange-600',
+  Ended:    'text-gray-500',
+};
 
+async function fetchRecentSessions(userAddress) {
+  const res  = await fetch(`${BACKEND}/api/v1/sessions?userAddress=${userAddress}&limit=5`);
+  const data = await res.json();
+  return data.ok ? data.data : [];
+}
+
+export default function Dashboard() {
+  const navigate     = useNavigate();
+  const queryClient  = useQueryClient();
+  const [showBalance,  setShowBalance]  = useState(true);
+  const [mmAddress,    setMmAddress]    = useState(null);
+  const [mmBalance,    setMmBalance]    = useState(null);
+  const [mmConnecting, setMmConnecting] = useState(false);
+  const [mmError,      setMmError]      = useState(null);
+  const [activeSession,setActiveSession]= useState(null);
+
+  // 최근 세션 (결제 내역 미리보기)
+  const { data: recentSessions = [], isFetching: sessionsFetching, refetch: refetchSessions } = useQuery({
+    queryKey: ['sessions-recent', mmAddress],
+    queryFn:  () => fetchRecentSessions(mmAddress),
+    enabled:  !!mmAddress,
+    staleTime: 30_000,
+  });
+
+  // MetaMask 동기화
   useEffect(() => {
     const syncMetaMask = async () => {
       const actualAddr = await getConnectedMetaMaskAddress();
       const storedAddr = localStorage.getItem("mm_address");
-
       if (!actualAddr) {
-        if (storedAddr) {
-          localStorage.removeItem("mm_address");
-          localStorage.removeItem("mm_balance");
-        }
-        setMmAddress(null);
-        setMmBalance(null);
+        if (storedAddr) { localStorage.removeItem("mm_address"); localStorage.removeItem("mm_balance"); }
+        setMmAddress(null); setMmBalance(null);
       } else if (actualAddr.toLowerCase() === storedAddr?.toLowerCase()) {
         setMmAddress(actualAddr);
-        getUsdcBalance(actualAddr).then(bal => {
-          setMmBalance(bal);
-          localStorage.setItem("mm_balance", bal);
-        }).catch(() => {});
+        getUsdcBalance(actualAddr).then(bal => { setMmBalance(bal); localStorage.setItem("mm_balance", bal); }).catch(() => {});
       } else {
-        clearMetaMaskStorage();
-        setMmAddress(null);
-        setMmBalance(null);
+        clearMetaMaskStorage(); setMmAddress(null); setMmBalance(null);
       }
     };
     syncMetaMask();
-
     if (window.ethereum) {
-      const onAccountsChanged = (accounts) => {
-        if (!accounts || accounts.length === 0) {
-          clearMetaMaskStorage();
-          setMmAddress(null);
-          setMmBalance(null);
-        } else {
-          clearMetaMaskStorage();
-          setMmAddress(null);
-          setMmBalance(null);
-        }
-      };
-      window.ethereum.on('accountsChanged', onAccountsChanged);
-      return () => window.ethereum.removeListener('accountsChanged', onAccountsChanged);
+      const handler = () => { clearMetaMaskStorage(); setMmAddress(null); setMmBalance(null); };
+      window.ethereum.on('accountsChanged', handler);
+      return () => window.ethereum.removeListener('accountsChanged', handler);
     }
   }, []);
 
@@ -70,34 +70,21 @@ export default function Dashboard() {
   useEffect(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(SESSION_KEY));
-      if (saved?.sessionData && saved?.service) setActiveSession(saved);
+      if (saved?.sessionId && saved?.status === "active") setActiveSession(saved);
     } catch {}
   }, []);
 
-  // MetaMask 주소가 있을 때 잔액 주기적 갱신
+  // 잔액 주기적 갱신
   useEffect(() => {
     if (!mmAddress) return;
-    const interval = setInterval(() => {
-      getUsdcBalance(mmAddress).then(bal => {
-        setMmBalance(bal);
-        localStorage.setItem("mm_balance", bal);
-      }).catch(() => {});
-    }, 15000);
-    return () => clearInterval(interval);
-  }, [mmAddress]);
-
-  // 최근 트랜잭션 (payment-backend에서 조회)
-  useEffect(() => {
-    if (!mmAddress) return;
-    fetch(`${BACKEND}/api/transactions/${mmAddress}`)
-      .then(r => r.ok ? r.json() : [])
-      .then(setTransactions)
-      .catch(() => setTransactions([]));
+    const id = setInterval(() => {
+      getUsdcBalance(mmAddress).then(bal => { setMmBalance(bal); localStorage.setItem("mm_balance", bal); }).catch(() => {});
+    }, 15_000);
+    return () => clearInterval(id);
   }, [mmAddress]);
 
   const handleConnectMetaMask = async () => {
-    setMmConnecting(true);
-    setMmError(null);
+    setMmConnecting(true); setMmError(null);
     try {
       const addr = await connectMetaMask();
       if (addr) {
@@ -107,35 +94,32 @@ export default function Dashboard() {
         setMmBalance(bal);
         localStorage.setItem("mm_balance", bal);
       }
-    } catch (e) {
-      setMmError(e.message || "MetaMask 연결 실패");
-    } finally {
-      setMmConnecting(false);
-    }
+    } catch (e) { setMmError(e.message || "MetaMask 연결 실패"); }
+    finally      { setMmConnecting(false); }
   };
 
   const handleLogout = () => {
-    clearMetaMaskStorage();
-    setMmAddress(null);
-    setMmBalance(null);
-    localStorage.removeItem(SESSION_KEY);
-    setActiveSession(null);
+    clearMetaMaskStorage(); setMmAddress(null); setMmBalance(null);
+    localStorage.removeItem(SESSION_KEY); setActiveSession(null);
   };
 
-  const shortAddr = mmAddress
-    ? `${mmAddress.slice(0, 6)}...${mmAddress.slice(-4)}`
-    : null;
+  const shortAddr = mmAddress ? `${mmAddress.slice(0,6)}...${mmAddress.slice(-4)}` : null;
+
+  const formatDate = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  };
 
   return (
     <div className="min-h-screen bg-background pb-24">
       <div className="max-w-md mx-auto px-4">
+
         {/* Header */}
         <div className="flex items-center justify-between pt-12 pb-4">
           <div>
             <p className="text-sm text-muted-foreground">BasePay Smart City</p>
-            <h1 className="text-2xl font-bold">
-              {mmAddress ? shortAddr : '지갑 미연결'}
-            </h1>
+            <h1 className="text-2xl font-bold">{mmAddress ? shortAddr : '지갑 미연결'}</h1>
           </div>
           {mmAddress && (
             <button onClick={handleLogout} className="p-2 rounded-full hover:bg-muted">
@@ -144,64 +128,101 @@ export default function Dashboard() {
           )}
         </div>
 
-        {/* 진행 중인 세션 배너 */}
+        {/* 진행 중 세션 배너 */}
         {activeSession && (
-          <motion.div
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-xl flex items-center gap-2"
-          >
-            <Zap className="w-4 h-4 text-yellow-600" />
-            <span className="text-sm text-yellow-800 flex-1">
-              {activeSession.service?.name || '서비스'} 이용 중
+          <motion.div initial={{ opacity:0, y:-10 }} animate={{ opacity:1, y:0 }}
+            className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-2">
+            <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+            <span className="text-sm text-blue-800 flex-1">
+              {SERVICE_EMOJI[activeSession.svc?.serviceType] || '📦'} {activeSession.svc?.serviceType} 이용 중
             </span>
-            <button
-              onClick={() => navigate('/scan')}
-              className="text-xs text-yellow-700 font-medium underline"
-            >
-              계속하기
+            <button onClick={() => navigate('/scan')}
+              className="text-xs text-blue-700 font-bold flex items-center gap-0.5">
+              계속하기 <ChevronRight className="w-3 h-3" />
             </button>
           </motion.div>
         )}
 
-        {/* MetaMask 연결 안 된 경우 */}
+        {/* MetaMask 미연결 */}
         {!mmAddress && (
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            className="mb-4 p-4 bg-orange-50 border border-orange-200 rounded-xl"
-          >
-            <div className="flex items-center gap-2 mb-3">
+          <motion.div initial={{ opacity:0, y:10 }} animate={{ opacity:1, y:0 }}
+            className="mb-4 p-4 bg-orange-50 border border-orange-200 rounded-xl">
+            <div className="flex items-center gap-2 mb-2">
               <AlertTriangle className="w-5 h-5 text-orange-500" />
-              <span className="text-sm font-medium text-orange-800">MetaMask 연결 필요</span>
+              <span className="text-sm font-semibold text-orange-800">MetaMask 연결 필요</span>
             </div>
-            <p className="text-xs text-orange-700 mb-3">
-              결제 기능을 사용하려면 MetaMask를 연결해주세요.
-            </p>
+            <p className="text-xs text-orange-700 mb-3">결제 기능을 사용하려면 MetaMask를 연결해주세요.</p>
             {mmError && <p className="text-xs text-red-600 mb-2">{mmError}</p>}
-            <button
-              onClick={handleConnectMetaMask}
-              disabled={mmConnecting}
-              className="w-full py-2 bg-orange-500 text-white text-sm font-medium rounded-lg hover:bg-orange-600 disabled:opacity-50"
-            >
+            <button onClick={handleConnectMetaMask} disabled={mmConnecting}
+              className="w-full py-2 bg-orange-500 text-white text-sm font-semibold rounded-lg hover:bg-orange-600 disabled:opacity-50">
               {mmConnecting ? '연결 중...' : 'MetaMask 연결'}
             </button>
           </motion.div>
         )}
 
         {/* 잔액 카드 */}
-        <BalanceCard
-          balance={mmBalance}
-          address={mmAddress}
-          showBalance={showBalance}
-          onToggle={() => setShowBalance(b => !b)}
-        />
+        <BalanceCard balance={mmBalance} address={mmAddress}
+          showBalance={showBalance} onToggle={() => setShowBalance(b => !b)} />
 
         {/* 빠른 액션 */}
         <QuickActions address={mmAddress} />
 
-        {/* 최근 거래 */}
-        <RecentTransactions transactions={transactions} />
+        {/* ── 최근 결제 내역 ───────────────────────────────────────── */}
+        {mmAddress && (
+          <div className="mt-6">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-bold text-gray-900">최근 결제 내역</h2>
+              <div className="flex items-center gap-2">
+                <button onClick={() => refetchSessions()}
+                  className={`p-1 rounded-lg hover:bg-gray-100 ${sessionsFetching ? 'animate-spin' : ''}`}>
+                  <RefreshCw className="w-3.5 h-3.5 text-gray-400" />
+                </button>
+                <button onClick={() => navigate('/history')}
+                  className="text-xs text-blue-600 font-medium flex items-center gap-0.5">
+                  전체보기 <ChevronRight className="w-3 h-3" />
+                </button>
+              </div>
+            </div>
+
+            {recentSessions.length === 0 ? (
+              <div className="bg-card border border-border rounded-2xl p-6 text-center">
+                <div className="text-3xl mb-2">📭</div>
+                <p className="text-sm text-muted-foreground">결제 내역이 없습니다</p>
+                <button onClick={() => navigate('/scan')}
+                  className="mt-3 text-blue-600 text-sm font-medium">첫 결제 시작하기</button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {recentSessions.map((s, i) => (
+                  <motion.div key={s.id}
+                    initial={{ opacity:0, x:-10 }} animate={{ opacity:1, x:0 }}
+                    transition={{ delay: i * 0.05 }}
+                    className="bg-card border border-border rounded-xl flex items-center gap-3 p-3">
+                    <div className="w-10 h-10 bg-gray-100 rounded-xl flex items-center justify-center text-xl flex-shrink-0">
+                      {s.serviceEmoji}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold text-gray-900 truncate">{s.serviceLabel}</div>
+                      <div className="text-xs text-gray-400">{formatDate(s.startedAt)}</div>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <div className={`text-sm font-bold ${STATUS_COLOR[s.status] || 'text-gray-700'}`}>
+                        {s.fareUsdc
+                          ? `-${parseFloat(s.fareUsdc).toFixed(4)} USDC`
+                          : `${parseFloat(s.depositUsdc||0).toFixed(2)} USDC`
+                        }
+                      </div>
+                      {s.refundUsdc && parseFloat(s.refundUsdc) > 0 && (
+                        <div className="text-xs text-green-600">+{parseFloat(s.refundUsdc).toFixed(4)} 환불</div>
+                      )}
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
       </div>
       <BottomNav />
     </div>
