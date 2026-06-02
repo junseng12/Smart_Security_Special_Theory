@@ -12,7 +12,7 @@ import {
 // ──────────────────────────────────────────────────────────────────────────────
 // 상수
 // ──────────────────────────────────────────────────────────────────────────────
-const BACKEND          = "https://payment-backend-production.up.railway.app";
+const BACKEND          = "https://app-0c87bccf.base44.app/functions/smartcityApi";
 const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
 
 const SERVICE_TYPES = [
@@ -30,14 +30,15 @@ const loadSession  = ()  => { try { return JSON.parse(localStorage.getItem(SESSI
 // API 유틸
 // ──────────────────────────────────────────────────────────────────────────────
 async function apiCall(path, method = "GET", body = null) {
-  const res = await fetch(`${BACKEND}${path}`, {
-    method,
+  const res = await fetch(BACKEND, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
+    body: JSON.stringify({ path, method, body }),
   });
   const data = await res.json();
-  if (!data.ok && data.error)  throw new Error(data.error);
-  if (!data.ok && data.errors) throw new Error(data.errors.join(', '));
+  if (!res.ok || data.ok === false) throw new Error(
+    data.errors?.[0] || data.error || "API Error"
+  );
   return data.data ?? data;
 }
 
