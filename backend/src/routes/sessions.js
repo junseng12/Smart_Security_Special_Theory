@@ -114,6 +114,76 @@ router.post('/:id/sign', validate(signSchema), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+
+// ── POST /sessions/:id/deposit ────────────────────────────────────────────────
+// 사용자 deposit TX 완료 후 프론트가 호출 → 백엔드가 operatorDeposit 자동 실행
+const depositSchema = Joi.object({
+  channelId:       Joi.string().required(),
+  userAddress:     ethAddress().required(),
+  operatorAddress: ethAddress().required(),
+  depositUsdc:     usdcAmount(),
+  holdDeadline:    Joi.alternatives().try(Joi.string(), Joi.number()).required(),
+  depositTxHash:   Joi.string().required(),
+});
+
+router.post('/:id/deposit', validate(depositSchema), async (req, res, next) => {
+  try {
+    const { channelId, userAddress, depositUsdc, holdDeadline, depositTxHash } = req.body;
+    const sessionId = req.params.id;
+
+    // 세션 존재 확인
+    const session = await sessionMgr.getSession(sessionId);
+    if (!session) return res.status(404).json({ ok: false, error: 'Session not found' });
+
+    // escrowId 계산 (keccak256(sessionId))
+    const { ethers } = require('ethers');
+    const escrowId = ethers.keccak256(ethers.toUtf8Bytes(sessionId));
+
+    // operatorDeposit 자동 실행 (백엔드 운영자 키로)
+    const operatorAddress  = process.env.OPERATOR_ADDRESS;
+    const operatorPrivKey  = process.env.OPERATOR_PRIVATE_KEY;
+    const rpcUrl           = process.env.BASE_RPC_URL;
+    const escrowAddress    = process.env.ESCROW_CONTRACT_ADDRESS;
+    const usdcAddress      = process.env.USDC_CONTRACT_ADDRESS;
+    const HOLD_SECONDS     = 2 * 60; // 2분 holdDeadline
+
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const opWallet = new ethers.Wallet(operatorPrivKey, provider);
+
+    const USDC_ABI   = ['function approve(address spender, uint256 amount) returns (bool)'];
+    const ESCROW_ABI = [
+      'function operatorDeposit(bytes32 escrowId, uint256 amount) external',
+      'function settleAndRelease(bytes32 escrowId, uint256 fareAmount) external',
+    ];
+
+    const usdcContract   = new ethers.Contract(usdcAddress, USDC_ABI, opWallet);
+    const escrowContract = new ethers.Contract(escrowAddress, ESCROW_ABI, opWallet);
+
+    const depositWei = ethers.parseUnits(depositUsdc, 6);
+
+    logger.info('operator: approve USDC for operatorDeposit', { sessionId, depositUsdc });
+    const approveTx = await usdcContract.approve(escrowAddress, depositWei);
+    await approveTx.wait();
+
+    logger.info('operator: calling operatorDeposit', { sessionId, escrowId });
+    const depTx = await escrowContract.operatorDeposit(escrowId, depositWei);
+    const depReceipt = await depTx.wait();
+
+    logger.info('operatorDeposit complete', { sessionId, txHash: depReceipt.hash });
+
+    // 세션 메타 업데이트
+    await sessionMgr.linkChannel(sessionId, channelId);
+
+    res.json({ ok: true, data: {
+      sessionId,
+      channelId,
+      escrowId,
+      userDepositTx: depositTxHash,
+      operatorDepositTx: depReceipt.hash,
+    }});
+  } catch (err) { next(err); }
+});
+
 // ── POST /sessions/:id/end ────────────────────────────────────────────────────
 const endSchema = Joi.object({
   channelId:    Joi.string().required(),
@@ -190,3 +260,4 @@ router.get('/:id/stream', async (req, res) => {
 });
 
 module.exports = router;
+
