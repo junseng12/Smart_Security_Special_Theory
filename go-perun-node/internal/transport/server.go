@@ -28,10 +28,7 @@ func New(orch *channel.Orchestrator, ref *refund.Manager, aud *audit.Logger, log
 	return &Server{orch: orch, refunds: ref, aud: aud, log: log}
 }
 
-// StartSession — gRPC deadline에서 독립된 context 사용 (온체인 펀딩은 오래 걸림)
 func (s *Server) StartSession(ctx context.Context, req *pb.StartSessionRequest) (*pb.StartSessionResponse, error) {
-	// ★ 온체인 tx 포함 작업이므로 gRPC deadline과 분리된 독립 context 사용
-	// gRPC ctx가 취소돼도 펀딩은 계속 진행
 	fundCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
@@ -62,17 +59,27 @@ func (s *Server) StartSession(ctx context.Context, req *pb.StartSessionRequest) 
 	}, nil
 }
 
-// EndSession — 온체인 정산도 시간이 걸림
+// EndSession — 온체인 정산
+// ★ user_final_sig 필드에 chargedUsdc 값이 실려 옴 (Node.js DB 폴백)
+//   인메모리 세션이 없을 때(컨테이너 재시작 등) 이 값으로 FinalUpdate 수행
 func (s *Server) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
 	settleCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
+
+	s.log.WithFields(logrus.Fields{
+		"session_id":   req.SessionId,
+		"channel_id":   req.ChannelId,
+		"charged_usdc": req.UserFinalSig, // user_final_sig 필드에 chargedUsdc 값 전달
+	}).Info("[Session] EndSession")
 
 	res, err := s.orch.EndSessionAndSettle(settleCtx, channel.EndRequest{
 		SessionID:   req.SessionId,
 		ChannelID:   req.ChannelId,
 		UserAddress: req.UserAddress,
+		ChargedUsdc: req.UserFinalSig, // ★ 폴백: Node.js DB에서 읽은 charged_usdc
 	})
 	if err != nil {
+		s.log.WithError(err).Error("[Session] EndSession failed")
 		return &pb.EndSessionResponse{Ok: false, Error: err.Error()}, nil
 	}
 	return &pb.EndSessionResponse{Ok: true, FareUsdc: res.FareUsdc, RefundUsdc: res.RefundUsdc}, nil
@@ -153,10 +160,7 @@ func Serve(port int, srv *Server) error {
 	if err != nil {
 		return fmt.Errorf("listen :%d: %w", port, err)
 	}
-	// ★ gRPC 서버 keepalive + 최대 수신 크기 설정
-	g := grpc.NewServer(
-		grpc.MaxRecvMsgSize(16*1024*1024),
-	)
+	g := grpc.NewServer(grpc.MaxRecvMsgSize(16 * 1024 * 1024))
 	pb.RegisterSmartCityNodeServer(g, srv)
 	reflection.Register(g)
 	srv.log.WithField("port", port).Info("[gRPC] server listening")
