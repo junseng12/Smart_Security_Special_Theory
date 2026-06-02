@@ -286,6 +286,107 @@ function _deriveStage(status, settlement) {
   return 'unknown';
 }
 
+
+// ── GET /sessions — 세션 목록 (결제 내역) ─────────────────────────────────────
+// Query params:
+//   userAddress (required) — 해당 지갑 주소의 세션만
+//   status      (optional) — Active|Ended|Settling|Settled|Disputed
+//   limit       (optional) — 기본 20, 최대 100
+//   offset      (optional) — 페이지네이션
+router.get('/', async (req, res, next) => {
+  try {
+    const { userAddress, status, limit = '20', offset = '0' } = req.query;
+    if (!userAddress) return res.status(400).json({ ok: false, error: 'userAddress required' });
+
+    const db = require('../services/db');
+    const lim = Math.min(parseInt(limit) || 20, 100);
+    const off = parseInt(offset) || 0;
+
+    // sessions + escrow_locks 조인으로 결제 정보 통합
+    const conditions = ['s.user_address = $1'];
+    const params     = [userAddress.toLowerCase()];
+    let   pidx       = 2;
+
+    if (status) {
+      conditions.push(`s.status = $${pidx++}`);
+      params.push(status);
+    }
+
+    const where = conditions.join(' AND ');
+
+    const { rows } = await db.getPool().query(
+      `SELECT
+         s.id,
+         s.user_address,
+         s.service_type,
+         s.channel_id,
+         s.status,
+         s.deposit_usdc,
+         s.charged_usdc,
+         s.started_at,
+         s.ended_at,
+         s.settled_at,
+         el.state         AS escrow_state,
+         el.fare_amount   AS fare_usdc,
+         el.user_deposit,
+         el.settle_tx     AS tx_hash,
+         el.hold_deadline,
+         -- 환불 금액 계산
+         CASE
+           WHEN el.user_deposit IS NOT NULL AND el.fare_amount IS NOT NULL
+           THEN (el.user_deposit - el.fare_amount)
+           ELSE 0
+         END              AS refund_usdc
+       FROM sessions s
+       LEFT JOIN escrow_locks el ON el.session_id = s.id
+       WHERE ${where}
+       ORDER BY s.started_at DESC
+       LIMIT $${pidx} OFFSET $${pidx + 1}`,
+      [...params, lim, off]
+    );
+
+    // 서비스 타입 한글 라벨 매핑
+    const SERVICE_LABELS = {
+      bicycle:     { label: '공유 자전거', emoji: '🚲' },
+      ev_charging: { label: 'EV 충전',     emoji: '⚡' },
+      parking:     { label: '주차',         emoji: '🅿️' },
+    };
+
+    const sessions = rows.map(r => ({
+      id:           r.id,
+      serviceType:  r.service_type,
+      serviceLabel: SERVICE_LABELS[r.service_type]?.label || r.service_type,
+      serviceEmoji: SERVICE_LABELS[r.service_type]?.emoji || '📦',
+      status:       r.status,
+      escrowState:  r.escrow_state,
+      depositUsdc:  r.deposit_usdc ? parseFloat(r.deposit_usdc).toFixed(2) : '0.00',
+      chargedUsdc:  r.charged_usdc ? parseFloat(r.charged_usdc).toFixed(6) : '0.000000',
+      fareUsdc:     r.fare_usdc    ? parseFloat(r.fare_usdc).toFixed(6)    : null,
+      refundUsdc:   r.refund_usdc  ? parseFloat(r.refund_usdc).toFixed(6)  : null,
+      txHash:       r.tx_hash,
+      startedAt:    r.started_at,
+      endedAt:      r.ended_at,
+      settledAt:    r.settled_at,
+      holdDeadline: r.hold_deadline ? Number(r.hold_deadline) : null,
+    }));
+
+    // 전체 건수
+    const { rows: countRows } = await db.getPool().query(
+      `SELECT COUNT(*) AS total FROM sessions s WHERE ${where}`,
+      params
+    );
+
+    res.json({
+      ok:    true,
+      data:  sessions,
+      total: parseInt(countRows[0].total),
+      limit: lim,
+      offset: off,
+    });
+  } catch (err) { next(err); }
+});
+
+
 // ── GET /sessions/:id/stream (SSE) ───────────────────────────────────────────
 router.get('/:id/stream', async (req, res) => {
   const { userAddress } = req.query;
@@ -312,3 +413,4 @@ router.get('/:id/stream', async (req, res) => {
 });
 
 module.exports = router;
+
