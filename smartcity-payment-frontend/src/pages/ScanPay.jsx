@@ -12,7 +12,7 @@ import {
 // ──────────────────────────────────────────────────────────────────────────────
 // 상수
 // ──────────────────────────────────────────────────────────────────────────────
-const BACKEND          = "https://smartcity-payment-backend-production.up.railway.app";
+const BACKEND          = "https://payment-backend-production.up.railway.app";
 const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
 
 const SERVICE_TYPES = [
@@ -261,6 +261,7 @@ export default function ScanPay() {
         channelId:    sd.channelId,
         userAddress:  mmAddress,
         userFinalSig: "0xmock_signature_for_demo",
+        fareUsdc:     totalFare.toFixed(6),
       });
       addLog("🏁 정산 요청 완료 — holdDeadline(2분) 이후 자동 온체인 정산", "success");
       addLog(`📤 요금 ${totalFare.toFixed(4)} USDC → operator`, "info");
