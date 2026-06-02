@@ -12,13 +12,6 @@ import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage, getConnectedMeta
 
 const SESSION_KEY = "active_session";
 
-function generateAddress() {
-  const chars = '0123456789abcdef';
-  let addr = '0x';
-  for (let i = 0; i < 40; i++) addr += chars[Math.floor(Math.random() * 16)];
-  return addr;
-}
-
 export default function Dashboard() {
   const navigate = useNavigate();
   const [showBalance, setShowBalance] = useState(true);
@@ -123,7 +116,7 @@ export default function Dashboard() {
   useEffect(() => {
     if (!walletsLoading && wallets.length === 0 && user) {
       base44.entities.Wallet.create({
-        address: generateAddress(),
+        address: '',  // MetaMask 연결 시 실제 주소로 업데이트됨
         balance: 0,
         network: 'Base Sepolia',
         is_active: true,
@@ -160,7 +153,7 @@ export default function Dashboard() {
     clearMetaMaskStorage();
     // DB wallet도 초기화
     if (wallet) {
-      base44.entities.Wallet.update(wallet.id, { address: generateAddress(), balance: 0 })
+      base44.entities.Wallet.update(wallet.id, { address: '', balance: 0 })
         .then(() => queryClient.invalidateQueries({ queryKey: ['wallets'] }));
     }
   };
