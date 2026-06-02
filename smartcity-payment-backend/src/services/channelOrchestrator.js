@@ -1,46 +1,29 @@
 /**
- * channelOrchestrator.js
- * ─────────────────────────────────────────────────────────────────────────────
- * Node.js 세션 라우트 ↔ go-perun 노드 gRPC 연결 오케스트레이터
+ * channelOrchestrator.js — Node.js 세션 라우트 ↔ go-perun 노드 gRPC 오케스트레이터
  */
-
 'use strict';
 
 const logger      = require('../utils/logger');
 const sessionMgr  = require('./sessionManager');
 const perun       = require('./perunClient');
 const settleMgr   = require('./settlementManager');
-const { isValidAddress } = require('./walletService');
-
-// ── 세션 시작 → go-perun StartSession (채널 오픈 포함) ────────────────────────
 
 async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsdc, userWireAddr = '' }) {
-  // 1. DB 세션 생성
   const dbSession = await sessionMgr.startSession({ userAddress, serviceType, depositUsdc });
-
-  // 2. go-perun StartSession gRPC
   const holdSeconds = parseInt(process.env.PERUN_HOLD_SECONDS || '120');
 
   logger.info('[Orchestrator] calling go-perun StartSession via gRPC', {
     userAddress, serviceType, depositUsdc, mode: perun.getMode(),
   });
 
-  // mock 없음 — gRPC 실패 시 에러 그대로 throw
   const perunRes = await perun.startSession({
-    userAddress,
-    serviceId:    serviceType,
-    depositUsdc,
-    userWireAddr,
-    holdSeconds,
+    userAddress, serviceId: serviceType, depositUsdc, userWireAddr, holdSeconds,
   });
 
-  // 3. DB 세션에 채널 ID 연결
   await sessionMgr.linkChannel(dbSession.id, perunRes.channel_id).catch(() => {});
 
   logger.info('[Orchestrator] startSessionAndOpenChannel OK', {
-    dbSessionId:  dbSession.id,
-    perunSession: perunRes.session_id,
-    channelId:    perunRes.channel_id,
+    dbSessionId: dbSession.id, perunSession: perunRes.session_id, channelId: perunRes.channel_id,
   });
 
   return {
@@ -53,21 +36,14 @@ async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsd
   };
 }
 
-// ── 사용량 기반 오프체인 요금 청구 ───────────────────────────────────────────
-
 async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usage = {} }) {
   const durationMinutes = usage.durationMinutes ?? 1;
   const energyKwh       = usage.energyKwh       ?? 0;
 
   const res = await perun.proposeUsageUpdate({
-    sessionId,
-    channelId,
-    serviceType,
-    durationMinutes,
-    energyKwh,
+    sessionId, channelId, serviceType, durationMinutes, energyKwh,
   });
 
-  // DB 누적 기록 (옵션)
   try {
     const db = require('./db');
     await db.getPool().query(
@@ -79,33 +55,49 @@ async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usa
   return {
     fare: { fareUsdc: res.fare_usdc, policyHash: res.policy_hash },
     updatedState: {
-      nonce:     Number(res.new_nonce),
+      nonce:    Number(res.new_nonce),
       stateHash: res.state_hash,
       balances:  { user: res.balance_user },
     },
-    signatureRequest: {
-      stateHash: res.state_hash,
-      nonce:     Number(res.new_nonce),
-    },
+    signatureRequest: { stateHash: res.state_hash, nonce: Number(res.new_nonce) },
   };
 }
 
-// ── 세션 종료 → go-perun EndSession ──────────────────────────────────────────
+/**
+ * 세션 종료 → go-perun EndSession
+ * ★ DB에서 charged_usdc를 읽어서 go-perun에 폴백으로 전달
+ *   (컨테이너 재시작으로 인메모리 세션이 사라진 경우 대비)
+ */
+async function endSessionAndSettle({ sessionId, channelId, userAddress, userFinalSig = '', fareUsdc, adjustment }) {
+  // DB에서 charged_usdc 읽기 (go-perun 인메모리 폴백용)
+  let chargedUsdc = fareUsdc || '0';
+  try {
+    const db = require('./db');
+    const result = await db.getPool().query(
+      'SELECT charged_usdc FROM sessions WHERE id = $1', [sessionId]
+    );
+    if (result.rows[0] && result.rows[0].charged_usdc) {
+      chargedUsdc = String(result.rows[0].charged_usdc);
+    }
+  } catch { /* DB 조회 실패 시 fareUsdc 사용 */ }
 
-async function endSessionAndSettle({ sessionId, channelId, userAddress, userFinalSig = '', adjustment }) {
   await sessionMgr.endSession(sessionId).catch(() => {});
   await sessionMgr.markSettling(sessionId).catch(() => {});
+
+  logger.info('[Orchestrator] endSession with chargedUsdc fallback', {
+    sessionId, channelId, chargedUsdc,
+  });
 
   const perunRes = await perun.endSession({
     sessionId,
     channelId,
     userAddress,
     userFinalSig,
+    chargedUsdc,  // ★ go-perun 인메모리 미스 시 폴백
   });
 
   await settleMgr.recordSettlement({
-    sessionId,
-    channelId,
+    sessionId, channelId,
     txHash:     perunRes.tx_hash || 'perun_settled',
     fareUsdc:   perunRes.fare_usdc,
     refundUsdc: perunRes.refund_usdc,
@@ -123,13 +115,9 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
   };
 }
 
-// ── 분쟁 등록 ─────────────────────────────────────────────────────────────────
-
 async function disputeChannel({ channelId }) {
   return perun.initiateDispute({ channelId });
 }
-
-// ── 채널 상태 조회 ────────────────────────────────────────────────────────────
 
 async function getChannelStatus({ channelId }) {
   return perun.getChannelStatus({ channelId });
