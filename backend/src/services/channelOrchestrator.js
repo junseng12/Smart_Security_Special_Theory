@@ -40,11 +40,19 @@ async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsd
     sessionId: newSession.id, channelId, depositUsdc,
   });
 
+  // escrowId = keccak256(sessionId), holdDeadline = 지금 + 2분
+  const { ethers } = require('ethers');
+  const HOLD_SECONDS = 2 * 60; // 2분
+  const escrowId     = ethers.keccak256(ethers.toUtf8Bytes(newSession.id));
+  const holdDeadline = String(Math.floor(Date.now() / 1000) + HOLD_SECONDS);
+
   return {
     sessionId: newSession.id,
     channelId,
     depositTx,
     initialState: state,
+    escrowId,
+    holdDeadline,
   };
 }
 
@@ -164,3 +172,4 @@ module.exports = {
   endSessionAndSettle,
   checkBalanceThreshold,
 };
+
