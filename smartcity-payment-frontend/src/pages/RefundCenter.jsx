@@ -6,18 +6,18 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowLeft, Shield, Search, CheckCircle2, AlertCircle, Loader2, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import BottomNav from '@/components/wallet/BottomNav';
-import { sendUsdcOnChain, getUsdcBalance } from '@/lib/walletUtils';
 
-const BACKEND = "https://payment-backend-production.up.railway.app";
+
+const BACKEND = "https://app-0c87bccf.base44.app/functions/smartcityApi";
 // 환불 발송 주소 (에스크로 → 사용자): 실제로는 에스크로 컨트랙트가 해야 하지만
 // 데모에서는 MetaMask 연결 주소(사용자)에서 다시 자신에게 보내는 것으로 시뮬레이션
 // → 실제 환불은 백엔드가 처리해야 하므로 여기서는 "환불 승인됨" 표시 + DB 기록으로 처리
 
 async function apiCall(path, method = "GET", body = null) {
-  const res = await fetch(`${BACKEND}${path}`, {
-    method,
+  const res = await fetch(BACKEND, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: body ? JSON.stringify(body) : undefined,
+    body: JSON.stringify({ path, method, body }),
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(
