@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { base44 } from '@/api/base44Client';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   approveUsdcForEscrow,
   userDeposit as escrowUserDeposit,
@@ -12,7 +11,7 @@ import {
 // ──────────────────────────────────────────────────────────────────────────────
 // 상수
 // ──────────────────────────────────────────────────────────────────────────────
-const BACKEND          = "https://app-0c87bccf.base44.app/functions/smartcityApi";
+const BACKEND          = "https://payment-backend-production.up.railway.app";
 const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
 
 const SERVICE_TYPES = [
@@ -30,10 +29,10 @@ const loadSession  = ()  => { try { return JSON.parse(localStorage.getItem(SESSI
 // API 유틸
 // ──────────────────────────────────────────────────────────────────────────────
 async function apiCall(path, method = "GET", body = null) {
-  const res = await fetch(BACKEND, {
-    method: "POST",
+  const res = await fetch(BACKEND + path, {
+    method,
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path, method, body }),
+    body: body ? JSON.stringify(body) : undefined,
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) throw new Error(
@@ -69,10 +68,7 @@ export default function ScanPay() {
   const timerRef      = useRef(null);
   const chargeRef     = useRef(null);
 
-  const { data: wallets = [] } = useQuery({
-    queryKey: ['wallets'], queryFn: () => base44.entities.Wallet.list(),
-  });
-  const wallet = wallets[0];
+  // wallet: MetaMask 직접 잔액 조회로 대체
 
   // ── 세션 복구 ──
   useEffect(() => {
@@ -197,19 +193,11 @@ export default function ScanPay() {
       setSessionData(startData);
       saveSession({ service: svc, sessionData: startData, startedAt: now });
       setStep("active");
-
-      await base44.entities.Transaction.create({
-        type: 'session_start', amount: svc.depositUsdc, status: 'active',
-        to_address: ESCROW_V3_ADDRESS, from_address: mmAddress,
-        merchant_name: `${svc.emoji} ${svc.label}`,
-        tx_hash: depositTxHash, wallet_id: wallet?.id,
-        note: `세션ID: ${sessionId}`,
-      }).catch(() => {});
+      // 트랜잭션 기록: payment-backend DB 자동 저장
 
       const newBal = await getUsdcBalance(mmAddress).catch(() => null);
       if (newBal !== null) {
         localStorage.setItem("mm_balance", newBal);
-        if (wallet) await base44.entities.Wallet.update(wallet.id, { balance: newBal }).catch(() => {});
         queryClient.invalidateQueries({ queryKey: ['wallets'] });
       }
     } catch (e) {
@@ -270,20 +258,13 @@ export default function ScanPay() {
     } catch (e) {
       addLog(`⚠️ /end 오류: ${e.message}`, "error");
     }
-
-    await base44.entities.Transaction.create({
-      type: 'payment', amount: totalFare, status: 'completed',
-      to_address: svc?.serviceId, from_address: mmAddress,
-      merchant_name: `${svc?.emoji} ${svc?.label}`,
-      tx_hash: sd?.sessionId, wallet_id: wallet?.id,
-    }).catch(() => {});
+      // 트랜잭션 기록: payment-backend DB 자동 저장
 
     // 3분 후 온체인 잔액 갱신 (settleAndRelease 완료 후)
     setTimeout(async () => {
       const newBal = await getUsdcBalance(mmAddress).catch(() => null);
       if (newBal !== null) {
         localStorage.setItem("mm_balance", newBal);
-        if (wallet) await base44.entities.Wallet.update(wallet.id, { balance: newBal }).catch(() => {});
         queryClient.invalidateQueries({ queryKey: ['wallets'] });
       }
     }, 180_000);
@@ -520,3 +501,4 @@ export default function ScanPay() {
     </div>
   );
 }
+
