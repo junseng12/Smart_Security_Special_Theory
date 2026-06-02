@@ -1,135 +1,221 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { base44 } from '@/api/base44Client';
 import { useQuery } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ArrowLeft, ArrowDownLeft, ArrowUpRight, QrCode, RefreshCw, Search } from 'lucide-react';
-import { format } from 'date-fns';
+import { ArrowLeft, RefreshCw, Search, ExternalLink, ChevronDown } from 'lucide-react';
 import BottomNav from '@/components/wallet/BottomNav';
 
-const TYPE_CONFIG = {
-  deposit: { icon: ArrowDownLeft, label: '입금', color: 'text-primary', bg: 'bg-primary/10', sign: '+' },
-  receive: { icon: ArrowDownLeft, label: '수신', color: 'text-primary', bg: 'bg-primary/10', sign: '+' },
-  send: { icon: ArrowUpRight, label: '송금', color: 'text-blue-400', bg: 'bg-blue-500/10', sign: '-' },
-  payment: { icon: QrCode, label: '결제', color: 'text-purple-400', bg: 'bg-purple-500/10', sign: '-' },
-  session_start: { icon: QrCode, label: '세션', color: 'text-yellow-400', bg: 'bg-yellow-500/10', sign: '-' },
-  refund: { icon: RefreshCw, label: '환불', color: 'text-orange-400', bg: 'bg-orange-500/10', sign: '+' },
+const BACKEND = "https://payment-backend-production.up.railway.app";
+
+const STATUS_CONFIG = {
+  Active:    { label: '이용 중',   color: 'bg-blue-100 text-blue-700',   dot: 'bg-blue-500'   },
+  Ended:     { label: '종료됨',    color: 'bg-yellow-100 text-yellow-700',dot: 'bg-yellow-500' },
+  Settling:  { label: '정산 중',   color: 'bg-orange-100 text-orange-700',dot: 'bg-orange-500' },
+  Settled:   { label: '정산 완료', color: 'bg-green-100 text-green-700',  dot: 'bg-green-500'  },
+  Disputed:  { label: '분쟁',      color: 'bg-red-100 text-red-700',      dot: 'bg-red-500'    },
+  ForceClosed:{ label: '강제종료', color: 'bg-gray-100 text-gray-700',    dot: 'bg-gray-400'   },
 };
 
 const FILTERS = [
-  { key: 'all', label: '전체' },
-  { key: 'deposit', label: '입금' },
-  { key: 'send', label: '송금' },
-  { key: 'payment', label: '결제' },
-  { key: 'refund', label: '환불' },
+  { key: 'all',      label: '전체'   },
+  { key: 'Active',   label: '이용 중' },
+  { key: 'Settled',  label: '완료'   },
+  { key: 'Settling', label: '정산 중' },
 ];
 
+async function fetchSessions(userAddress, status) {
+  const params = new URLSearchParams({ userAddress, limit: '50' });
+  if (status !== 'all') params.set('status', status);
+  const res = await fetch(`${BACKEND}/api/v1/sessions?${params}`);
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || '조회 실패');
+  return data;
+}
+
 export default function TransactionHistory() {
-  const navigate = useNavigate();
-  const [filter, setFilter] = useState('all');
-  const [search, setSearch] = useState('');
+  const navigate   = useNavigate();
+  const mmAddress  = localStorage.getItem("mm_address");
+  const [filter,   setFilter]   = useState('all');
+  const [search,   setSearch]   = useState('');
+  const [expanded, setExpanded] = useState(null);
 
-  const { data: transactions = [], isLoading } = useQuery({
-    queryKey: ['transactions-all'],
-    queryFn: () => base44.entities.Transaction.list('-created_date', 100),
+  const { data, isLoading, isFetching, refetch, error } = useQuery({
+    queryKey: ['sessions-history', mmAddress, filter],
+    queryFn:  () => fetchSessions(mmAddress, filter),
+    enabled:  !!mmAddress,
+    staleTime: 30_000,
   });
 
-  const filtered = transactions.filter(tx => {
-    if (filter !== 'all' && tx.type !== filter) return false;
-    if (search && !(tx.merchant_name || '').toLowerCase().includes(search.toLowerCase()) &&
-        !(tx.tx_hash || '').toLowerCase().includes(search.toLowerCase())) return false;
-    return true;
-  });
+  const sessions = (data?.data || []).filter(s =>
+    !search ||
+    s.serviceLabel?.includes(search) ||
+    s.id?.toLowerCase().includes(search.toLowerCase()) ||
+    s.txHash?.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const totalPaid   = sessions.filter(s => s.fareUsdc).reduce((a, s) => a + parseFloat(s.fareUsdc || 0), 0);
+  const totalRefund = sessions.filter(s => s.refundUsdc).reduce((a, s) => a + parseFloat(s.refundUsdc || 0), 0);
+
+  const formatDate = (iso) => {
+    if (!iso) return '-';
+    const d = new Date(iso);
+    return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  };
 
   return (
-    <div className="min-h-screen bg-background pb-24">
-      <div className="max-w-md mx-auto px-4 pt-6">
-        <div className="flex items-center gap-3 mb-6">
-          <button onClick={() => navigate('/')} className="p-2 rounded-xl hover:bg-secondary transition-colors">
-            <ArrowLeft className="w-5 h-5" />
+    <div className="min-h-screen bg-gray-50 pb-24">
+      <div className="max-w-md mx-auto px-4 pt-6 space-y-4">
+
+        {/* Header */}
+        <div className="flex items-center gap-3">
+          <button onClick={() => navigate('/')}
+            className="p-2 rounded-xl hover:bg-gray-100 transition-colors">
+            <ArrowLeft className="w-5 h-5 text-gray-600" />
           </button>
           <div className="flex-1">
-            <h1 className="text-lg font-semibold">사용 내역</h1>
-            <p className="text-xs text-muted-foreground">{transactions.length}건의 거래</p>
+            <h1 className="text-lg font-bold text-gray-900">사용 내역</h1>
+            <p className="text-xs text-gray-400">{data?.total ?? 0}건의 세션</p>
           </div>
+          <button onClick={() => refetch()}
+            className={`p-2 rounded-xl hover:bg-gray-100 transition-colors ${isFetching ? 'animate-spin' : ''}`}>
+            <RefreshCw className="w-4 h-4 text-gray-500" />
+          </button>
         </div>
 
-        {/* Search */}
-        <div className="relative mb-4">
-          <Search className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
+        {/* 통계 카드 */}
+        {sessions.length > 0 && (
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-white rounded-2xl p-4 shadow-sm">
+              <div className="text-xs text-gray-400 mb-1">총 결제</div>
+              <div className="text-xl font-bold text-gray-900">{totalPaid.toFixed(4)}</div>
+              <div className="text-xs text-gray-500">USDC</div>
+            </div>
+            <div className="bg-white rounded-2xl p-4 shadow-sm">
+              <div className="text-xs text-gray-400 mb-1">총 환불</div>
+              <div className="text-xl font-bold text-green-600">{totalRefund.toFixed(4)}</div>
+              <div className="text-xs text-gray-500">USDC</div>
+            </div>
+          </div>
+        )}
+
+        {/* 검색 */}
+        <div className="relative">
+          <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
           <input value={search} onChange={e => setSearch(e.target.value)}
-            placeholder="거래 검색..."
-            className="w-full bg-card border border-border rounded-xl pl-10 pr-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:border-primary/50 transition" />
+            placeholder="세션 ID, TX 해시 검색..."
+            className="w-full bg-white border border-gray-200 rounded-xl pl-10 pr-4 py-2.5 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:border-blue-300 transition shadow-sm" />
         </div>
 
-        {/* Filters */}
-        <div className="flex gap-2 overflow-x-auto pb-2 mb-4 scrollbar-hide">
+        {/* 필터 탭 */}
+        <div className="flex gap-2 overflow-x-auto pb-1 scrollbar-hide">
           {FILTERS.map(f => (
             <button key={f.key} onClick={() => setFilter(f.key)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all border ${
                 filter === f.key
-                  ? 'bg-primary/10 text-primary border border-primary/20'
-                  : 'bg-card border border-border text-muted-foreground hover:text-foreground'
+                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                  : 'bg-white text-gray-500 border-gray-200 hover:border-blue-200'
               }`}>{f.label}</button>
           ))}
         </div>
 
-        {/* Transactions */}
-        {isLoading ? (
-          <div className="flex justify-center py-12">
-            <div className="w-6 h-6 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+        {/* 목록 */}
+        {!mmAddress ? (
+          <div className="bg-white rounded-2xl p-8 text-center shadow-sm">
+            <p className="text-gray-400 text-sm">MetaMask를 먼저 연결해주세요</p>
+            <button onClick={() => navigate('/')} className="mt-3 text-blue-600 text-sm font-medium">연결하러 가기</button>
           </div>
-        ) : filtered.length === 0 ? (
-          <div className="text-center py-12">
-            <p className="text-sm text-muted-foreground">거래 내역이 없습니다</p>
+        ) : isLoading ? (
+          <div className="flex justify-center py-12">
+            <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+          </div>
+        ) : error ? (
+          <div className="bg-red-50 rounded-2xl p-6 text-center text-red-600 text-sm">{error.message}</div>
+        ) : sessions.length === 0 ? (
+          <div className="bg-white rounded-2xl p-10 text-center shadow-sm">
+            <div className="text-4xl mb-3">📭</div>
+            <p className="text-gray-400 text-sm">내역이 없습니다</p>
           </div>
         ) : (
-          <div className="space-y-2">
-            <AnimatePresence>
-              {filtered.map((tx, i) => {
-                const config = TYPE_CONFIG[tx.type] || TYPE_CONFIG.payment;
-                const TxIcon = config.icon;
+          <AnimatePresence>
+            <div className="space-y-2">
+              {sessions.map((s, i) => {
+                const status = STATUS_CONFIG[s.status] || STATUS_CONFIG.Active;
+                const isOpen = expanded === s.id;
                 return (
-                  <motion.div key={tx.id}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: i * 0.02 }}
-                    className="flex items-center gap-3 p-3 rounded-2xl bg-card border border-border">
-                    <div className={`w-10 h-10 rounded-xl ${config.bg} flex items-center justify-center shrink-0`}>
-                      <TxIcon className={`w-4 h-4 ${config.color}`} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium truncate">{tx.merchant_name || config.label}</p>
-                      <div className="flex items-center gap-2">
-                        <p className="text-[10px] text-muted-foreground">
-                          {tx.created_date ? format(new Date(tx.created_date), 'yyyy.MM.dd HH:mm') : ''}
-                        </p>
-                        {tx.tx_hash && (
-                          <p className="text-[10px] font-mono text-muted-foreground/50 truncate max-w-[100px]">
-                            {tx.tx_hash}
-                          </p>
+                  <motion.div key={s.id}
+                    initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: i * 0.03 }}
+                    className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                    {/* 헤더 행 */}
+                    <button className="w-full flex items-center gap-3 p-4 text-left"
+                      onClick={() => setExpanded(isOpen ? null : s.id)}>
+                      <div className="text-2xl flex-shrink-0">{s.serviceEmoji}</div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-gray-900 text-sm">{s.serviceLabel}</span>
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${status.color}`}>
+                            {status.label}
+                          </span>
+                        </div>
+                        <div className="text-xs text-gray-400 mt-0.5">{formatDate(s.startedAt)}</div>
+                      </div>
+                      <div className="text-right flex-shrink-0">
+                        <div className="font-bold text-gray-900 text-sm">
+                          {s.fareUsdc ? `-${parseFloat(s.fareUsdc).toFixed(4)}` : `-${parseFloat(s.depositUsdc || 0).toFixed(2)}`}
+                          <span className="text-xs text-gray-400 ml-0.5">USDC</span>
+                        </div>
+                        {s.refundUsdc && parseFloat(s.refundUsdc) > 0 && (
+                          <div className="text-xs text-green-600 font-medium">
+                            +{parseFloat(s.refundUsdc).toFixed(4)} 환불
+                          </div>
                         )}
                       </div>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className={`text-sm font-semibold ${config.sign === '+' ? 'text-primary' : 'text-foreground'}`}>
-                        {config.sign}{tx.amount?.toFixed(2)}
-                      </p>
-                      <p className={`text-[10px] ${
-                        tx.status === 'completed' ? 'text-primary' :
-                        tx.status === 'active' ? 'text-yellow-400' :
-                        tx.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'
-                      }`}>
-                        {tx.status === 'completed' ? '완료' :
-                         tx.status === 'active' ? '진행중' :
-                         tx.status === 'failed' ? '실패' : '대기중'}
-                      </p>
-                    </div>
+                      <ChevronDown className={`w-4 h-4 text-gray-300 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+                    </button>
+
+                    {/* 상세 (펼침) */}
+                    {isOpen && (
+                      <motion.div initial={{ height: 0 }} animate={{ height: 'auto' }}
+                        className="border-t border-gray-50 px-4 pb-4 pt-3 space-y-2 text-xs">
+                        <div className="flex justify-between text-gray-500">
+                          <span>세션 ID</span>
+                          <span className="font-mono text-gray-700">{s.id.slice(0, 16)}...</span>
+                        </div>
+                        <div className="flex justify-between text-gray-500">
+                          <span>보증금</span>
+                          <span className="text-gray-700">{parseFloat(s.depositUsdc || 0).toFixed(2)} USDC</span>
+                        </div>
+                        {s.fareUsdc && (
+                          <div className="flex justify-between text-gray-500">
+                            <span>이용 요금</span>
+                            <span className="text-gray-700">{parseFloat(s.fareUsdc).toFixed(6)} USDC</span>
+                          </div>
+                        )}
+                        {s.refundUsdc && (
+                          <div className="flex justify-between text-gray-500">
+                            <span>환불 금액</span>
+                            <span className="text-green-600 font-medium">{parseFloat(s.refundUsdc).toFixed(6)} USDC</span>
+                          </div>
+                        )}
+                        <div className="flex justify-between text-gray-500">
+                          <span>에스크로 상태</span>
+                          <span className="text-gray-700">{s.escrowState || '-'}</span>
+                        </div>
+                        {s.txHash && s.txHash !== 'settled_via_perun' && (
+                          <a href={`https://sepolia.basescan.org/tx/${s.txHash}`}
+                            target="_blank" rel="noreferrer"
+                            className="flex items-center gap-1 text-blue-600 hover:underline mt-1">
+                            <ExternalLink className="w-3 h-3" />
+                            <span>BaseScan에서 TX 확인</span>
+                          </a>
+                        )}
+                      </motion.div>
+                    )}
                   </motion.div>
                 );
               })}
-            </AnimatePresence>
-          </div>
+            </div>
+          </AnimatePresence>
         )}
       </div>
       <BottomNav />
