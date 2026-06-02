@@ -6,6 +6,7 @@ import { motion } from 'framer-motion';
 import { ArrowLeft, ArrowUpRight, CheckCircle2, AlertCircle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import BottomNav from '@/components/wallet/BottomNav';
+import { sendUsdcOnChain, getUsdcBalance } from '@/lib/walletUtils';
 
 export default function Send() {
   const navigate = useNavigate();
@@ -15,7 +16,10 @@ export default function Send() {
   const [note, setNote] = useState('');
   const [sending, setSending] = useState(false);
   const [done, setDone] = useState(false);
+  const [txHash, setTxHash] = useState(null);
   const [error, setError] = useState(null);
+
+  const mmAddress = localStorage.getItem("mm_address");
 
   const { data: wallets = [] } = useQuery({
     queryKey: ['wallets'],
@@ -28,30 +32,42 @@ export default function Send() {
     const num = parseFloat(amount);
     if (!num || num <= 0) return setError('유효한 금액을 입력하세요');
     if (!address || address.length < 10) return setError('유효한 주소를 입력하세요');
+    if (!mmAddress) return setError('MetaMask를 먼저 연결해주세요');
+
     const mmBalance = parseFloat(localStorage.getItem("mm_balance") || wallet?.balance || 0);
     if (num > mmBalance) return setError('잔액이 부족합니다');
 
     setSending(true);
-    await base44.entities.Transaction.create({
-      type: 'send',
-      amount: num,
-      status: 'completed',
-      to_address: address,
-      from_address: wallet?.address || '',
-      merchant_name: note || '송금',
-      tx_hash: '0x' + Math.random().toString(16).slice(2, 18),
-      wallet_id: wallet?.id,
-      note,
-    });
-    if (wallet) {
-      await base44.entities.Wallet.update(wallet.id, {
-        balance: Math.max(0, (wallet.balance || 0) - num),
+    try {
+      // 실제 온체인 USDC 전송 (MetaMask 팝업)
+      const hash = await sendUsdcOnChain(mmAddress, address, num);
+      setTxHash(hash);
+
+      await base44.entities.Transaction.create({
+        type: 'send',
+        amount: num,
+        status: 'completed',
+        to_address: address,
+        from_address: mmAddress,
+        merchant_name: note || '송금',
+        tx_hash: hash,
+        wallet_id: wallet?.id,
+        note,
       });
+
+      // 잔액 갱신
+      const newBal = await getUsdcBalance(mmAddress).catch(() => null);
+      if (newBal !== null) {
+        localStorage.setItem("mm_balance", newBal);
+        if (wallet) await base44.entities.Wallet.update(wallet.id, { balance: newBal });
+      }
+      queryClient.invalidateQueries({ queryKey: ['wallets'] });
+      queryClient.invalidateQueries({ queryKey: ['transactions'] });
+      setDone(true);
+    } catch (e) {
+      setError(e.message);
     }
-    queryClient.invalidateQueries({ queryKey: ['wallets'] });
-    queryClient.invalidateQueries({ queryKey: ['transactions'] });
     setSending(false);
-    setDone(true);
   };
 
   if (done) {
@@ -63,7 +79,13 @@ export default function Send() {
         </motion.div>
         <h2 className="text-2xl font-bold mb-2">송금 완료!</h2>
         <p className="text-sm text-muted-foreground mb-2">{amount} USDC 전송됨</p>
-        <p className="text-xs font-mono text-muted-foreground mb-6 truncate max-w-[250px]">→ {address}</p>
+        <p className="text-xs font-mono text-muted-foreground mb-2 truncate max-w-[250px]">→ {address}</p>
+        {txHash && (
+          <a href={`https://sepolia.basescan.org/tx/${txHash}`} target="_blank" rel="noreferrer"
+            className="text-xs text-primary underline mb-6 truncate max-w-[250px]">
+            BaseScan에서 보기 ↗
+          </a>
+        )}
         <Button onClick={() => navigate('/')} className="rounded-xl px-8">홈으로</Button>
         <BottomNav />
       </div>
@@ -83,14 +105,19 @@ export default function Send() {
           </div>
         </div>
 
-        {/* Balance Info */}
         <div className="rounded-2xl bg-card border border-border p-4 mb-6 flex items-center justify-between">
           <div>
             <p className="text-xs text-muted-foreground">가용 잔액</p>
-            <p className="text-xl font-bold">{(wallet?.balance || 0).toFixed(2)} <span className="text-sm text-muted-foreground">USDC</span></p>
+            <p className="text-xl font-bold">{parseFloat(localStorage.getItem("mm_balance") || wallet?.balance || 0).toFixed(2)} <span className="text-sm text-muted-foreground">USDC</span></p>
           </div>
           <ArrowUpRight className="w-5 h-5 text-blue-400" />
         </div>
+
+        {!mmAddress && (
+          <div className="flex items-center gap-2 p-3 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-yellow-600 text-sm mb-4">
+            <AlertCircle className="w-4 h-4 shrink-0" />MetaMask를 먼저 연결해주세요
+          </div>
+        )}
 
         {error && (
           <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
@@ -123,9 +150,9 @@ export default function Send() {
           </div>
         </div>
 
-        <Button onClick={handleSend} disabled={sending || !address || !amount}
+        <Button onClick={handleSend} disabled={sending || !address || !amount || !mmAddress}
           className="w-full h-12 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-semibold disabled:opacity-40">
-          {sending ? '전송 중...' : '송금하기'}
+          {sending ? '전송 중... (MetaMask 확인)' : '송금하기'}
         </Button>
       </div>
       <BottomNav />
