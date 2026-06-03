@@ -10,6 +10,7 @@ import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage, getConnectedMeta
 
 const BACKEND     = "https://payment-backend-production.up.railway.app";
 const SESSION_KEY = "active_session";
+const PROC_KEY    = "payment_processing";
 
 const SERVICE_EMOJI = { bicycle: '🚲', ev_charging: '⚡', parking: '🅿️' };
 const STATUS_COLOR  = {
@@ -66,11 +67,16 @@ export default function Dashboard() {
     }
   }, []);
 
-  // 진행 중인 세션 복원
+  // 진행 중인 세션 복원 (active + processing 모두)
   useEffect(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(SESSION_KEY));
-      if (saved?.sessionId && saved?.status === "active") setActiveSession(saved);
+      if (saved?.sessionId && saved?.status === "active") { setActiveSession(saved); return; }
+      // processing 중 나갔다가 메인으로 돌아온 경우도 표시
+      const proc = JSON.parse(localStorage.getItem(PROC_KEY));
+      if (proc?.sessionId && Date.now() - proc.savedAt < 10 * 60 * 1000) {
+        setActiveSession({ ...proc, status: "processing" });
+      }
     } catch {}
   }, []);
 
@@ -113,7 +119,7 @@ export default function Dashboard() {
 
   const handleLogout = () => {
     clearMetaMaskStorage(); setMmAddress(null); setMmBalance(null);
-    localStorage.removeItem(SESSION_KEY); setActiveSession(null);
+    localStorage.removeItem(SESSION_KEY); localStorage.removeItem(PROC_KEY); setActiveSession(null);
   };
 
   const shortAddr = mmAddress ? `${mmAddress.slice(0,6)}...${mmAddress.slice(-4)}` : null;
@@ -147,11 +153,14 @@ export default function Dashboard() {
             className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-2">
             <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
             <span className="text-sm text-blue-800 flex-1">
-              {SERVICE_EMOJI[activeSession.svc?.serviceType] || '📦'} {activeSession.svc?.serviceType} 이용 중
+              {SERVICE_EMOJI[activeSession.svc?.serviceType] || '📦'}{' '}
+              {activeSession.status === "processing"
+                ? `${activeSession.svc?.label || activeSession.svc?.serviceType} 결제 진행 중...`
+                : `${activeSession.svc?.label || activeSession.svc?.serviceType} 이용 중`}
             </span>
             <button onClick={() => navigate('/scan')}
               className="text-xs text-blue-700 font-bold flex items-center gap-0.5">
-              계속하기 <ChevronRight className="w-3 h-3" />
+              {activeSession.status === "processing" ? "재개하기" : "계속하기"} <ChevronRight className="w-3 h-3" />
             </button>
           </motion.div>
         )}
@@ -258,4 +267,5 @@ export default function Dashboard() {
     </div>
   );
 }
+
 
