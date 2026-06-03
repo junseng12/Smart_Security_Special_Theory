@@ -28,6 +28,12 @@ const saveSession  = (d) => localStorage.setItem(SESSION_KEY, JSON.stringify(d))
 const clearSession = ()  => localStorage.removeItem(SESSION_KEY);
 const loadSession  = ()  => { try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch { return null; } };
 
+// processing 단계별 저장 — MetaMask 서명 후 페이지 리마운트 시 재개를 위해
+const PROC_KEY    = "payment_processing";
+const saveProc    = (d) => localStorage.setItem(PROC_KEY, JSON.stringify({ ...d, savedAt: Date.now() }));
+const clearProc   = ()  => localStorage.removeItem(PROC_KEY);
+const loadProc    = ()  => { try { const d = JSON.parse(localStorage.getItem(PROC_KEY)); if (d && Date.now() - d.savedAt < 10 * 60 * 1000) return d; clearProc(); return null; } catch { return null; } };
+
 async function apiCall(path, method = "GET", body = null) {
   const res = await fetch(BACKEND + path, {
     method,
@@ -93,15 +99,26 @@ export default function ScanPay() {
   const holdTimerRef = useRef(null);
   const jsQrRef      = useRef(null);  // jsQR 라이브러리 동적 로드
 
-  // 로컬 세션 복구
+  // 로컬 세션 복구 (active + processing 단계 모두)
   useEffect(() => {
+    // 1) 이미 완전히 active 상태인 세션 복구
     const saved = loadSession();
     if (saved?.sessionId && saved?.status === "active") {
       setSessionData(saved);
       setSelectedSvc(saved.svc);
       setStep("active");
+      return;
     }
-  }, []);
+    // 2) processing 중 나갔다가 돌아온 경우 — 마지막 완료 단계부터 재개
+    const proc = loadProc();
+    if (proc?.sessionId && proc?.svc) {
+      setSelectedSvc(proc.svc);
+      setStep("processing");
+      setLog([{ msg: "⏳ 이전 결제 재개 중...", type: "info" }]);
+      // 비동기로 재개 (렌더 완료 후)
+      setTimeout(() => resumePayment(proc), 300);
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 경과 시간 타이머
   useEffect(() => {
@@ -250,10 +267,57 @@ export default function ScanPay() {
     startPayment(svc, addr);
   };
 
+  // ── 결제 재개 (processing 중 나갔다가 돌아온 경우) ─────────────────────────────
+  const resumePayment = async (proc) => {
+    const { svc, addr, sessionId, channelId, escrowId, holdDeadline, stage } = proc;
+    if (!window.ethereum) {
+      addLog("❌ MetaMask를 찾을 수 없습니다. MetaMask 앱 브라우저를 사용해주세요.", "error");
+      setTimeout(() => { clearProc(); setStep("home"); }, 5000);
+      return;
+    }
+    try {
+      // stage: "session_created" → approve부터 재개
+      //         "approved"        → userDeposit부터 재개
+      //         "deposited"       → /deposit API 호출부터 재개
+      if (stage === "session_created" || !stage) {
+        addLog("② MetaMask: USDC 승인 서명 요청...", "info");
+        await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
+        addLog("✅ USDC 승인 완료", "success");
+        saveProc({ ...proc, stage: "approved" });
+      }
+
+      if (stage !== "deposited") {
+        addLog("③ MetaMask: 에스크로 예치 서명 요청...", "info");
+        const depositTxHash = await escrowUserDeposit(addr, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline);
+        addLog(`✅ TX: ${depositTxHash.slice(0, 16)}...`, "success");
+        saveProc({ ...proc, stage: "deposited", depositTxHash });
+        proc.depositTxHash = depositTxHash;
+      }
+
+      addLog("④ 예치 기록 중...", "info");
+      await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
+        channelId, userAddress: addr,
+        operatorAddress: OPERATOR_ADDRESS,
+        depositUsdc: String(svc.depositUsdc),
+        holdDeadline, depositTxHash: proc.depositTxHash,
+      });
+      addLog("✅ 예치 완료! 서비스 시작", "success");
+
+      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash: proc.depositTxHash };
+      clearProc();
+      saveSession(sd);
+      setSessionData(sd);
+      setStep("active");
+    } catch (err) {
+      addLog(`❌ 재개 실패: ${err.message}`, "error");
+      addLog("처음부터 다시 시도해주세요.", "info");
+      setTimeout(() => { clearProc(); setStep("home"); }, 6000);
+    }
+  };
+
   // ── 결제 시작 ─────────────────────────────────────────────────────────────────
   const startPayment = async (svc, addr = mmAddress) => {
     if (addr) setMmAddress(addr);
-    // 모바일 외부 브라우저(Safari/Chrome)에서는 window.ethereum 없음 → MetaMask 앱으로 리디렉션
     setStep("processing");
     setLog([]);
     if (!window.ethereum) {
@@ -273,13 +337,18 @@ export default function ScanPay() {
       if (!escrowId || !holdDeadline) throw new Error("백엔드 응답에 escrowId/holdDeadline 없음");
       addLog(`✅ 세션: ${sessionId.slice(0, 8)}...`, "success");
 
+      // ★ 세션 생성 직후 processing 상태 저장 — 이후 MetaMask 서명 시 페이지 리마운트 대비
+      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "session_created" });
+
       addLog("② MetaMask: USDC 승인 서명 요청...", "info");
       await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
       addLog("✅ USDC 승인 완료", "success");
+      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "approved" });
 
       addLog("③ MetaMask: 에스크로 예치 서명 요청...", "info");
       const depositTxHash = await escrowUserDeposit(addr, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline);
       addLog(`✅ TX: ${depositTxHash.slice(0, 16)}...`, "success");
+      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "deposited", depositTxHash });
 
       addLog("④ 예치 기록 중...", "info");
       await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
@@ -291,13 +360,14 @@ export default function ScanPay() {
       addLog("✅ 예치 완료! 서비스 시작", "success");
 
       const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash };
+      clearProc();
       saveSession(sd);
       setSessionData(sd);
       setStep("active");
 
     } catch (err) {
       addLog(`❌ 오류: ${err.message}`, "error");
-      setTimeout(() => setStep("home"), 6000);
+      setTimeout(() => { clearProc(); setStep("home"); }, 6000);
     }
   };
 
@@ -622,6 +692,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
