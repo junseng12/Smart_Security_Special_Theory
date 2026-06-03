@@ -82,7 +82,16 @@ export default function ScanPay() {
   const [step,          setStep]          = useState("home");
   const [selectedSvc,   setSelectedSvc]   = useState(null);
   const [sessionData,   setSessionData]   = useState(null);
-  const [elapsed,       setElapsed]       = useState(0);
+  // elapsed: active 세션 복구 시 startedAt 기준으로 초기화
+  const [elapsed, setElapsed] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("active_session"));
+      if (saved?.startedAt && saved?.status === "active") {
+        return Math.floor((Date.now() - saved.startedAt) / 1000);
+      }
+    } catch {}
+    return 0;
+  });
   const [totalCharged,  setTotalCharged]  = useState(0);
   const [fareInfo,      setFareInfo]      = useState(null);
   const [ending,        setEnding]        = useState(false);
@@ -98,6 +107,8 @@ export default function ScanPay() {
   const timerRef     = useRef(null);
   const holdTimerRef = useRef(null);
   const jsQrRef      = useRef(null);  // jsQR 라이브러리 동적 로드
+  const resumeRef    = useRef(null);  // resumePayment 최신 참조 (클로저 버그 방지)
+  const pendingProc  = useRef(null);  // 마운트 후 처리할 proc 저장
 
   // 로컬 세션 복구 (active + processing 단계 모두)
   useEffect(() => {
@@ -109,16 +120,29 @@ export default function ScanPay() {
       setStep("active");
       return;
     }
-    // 2) processing 중 나갔다가 돌아온 경우 — 마지막 완료 단계부터 재개
+    // 2) processing 중 나갔다가 돌아온 경우 — pendingProc에 저장 후 resumeRef 통해 호출
     const proc = loadProc();
     if (proc?.sessionId && proc?.svc) {
       setSelectedSvc(proc.svc);
       setStep("processing");
       setLog([{ msg: "⏳ 이전 결제 재개 중...", type: "info" }]);
-      // 비동기로 재개 (렌더 완료 후)
-      setTimeout(() => resumePayment(proc), 300);
+      pendingProc.current = proc; // resumeRef 세팅 후 별도 effect에서 실행
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // resumeRef 최신화 + pendingProc 처리
+  // resumePayment가 정의된 후 실행되도록 분리
+  useEffect(() => {
+    resumeRef.current = resumePayment;
+  }); // 매 렌더마다 최신 함수 참조 갱신
+
+  useEffect(() => {
+    if (pendingProc.current && resumeRef.current) {
+      const proc = pendingProc.current;
+      pendingProc.current = null;
+      setTimeout(() => resumeRef.current(proc), 400);
+    }
+  }); // 매 렌더마다 체크 — pendingProc 있으면 실행
 
   // 경과 시간 타이머
   useEffect(() => {
@@ -303,7 +327,7 @@ export default function ScanPay() {
       });
       addLog("✅ 예치 완료! 서비스 시작", "success");
 
-      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash: proc.depositTxHash };
+      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash: proc.depositTxHash, startedAt: proc.startedAt || Date.now() };
       clearProc();
       saveSession(sd);
       setSessionData(sd);
@@ -338,7 +362,7 @@ export default function ScanPay() {
       addLog(`✅ 세션: ${sessionId.slice(0, 8)}...`, "success");
 
       // ★ 세션 생성 직후 processing 상태 저장 — 이후 MetaMask 서명 시 페이지 리마운트 대비
-      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "session_created" });
+      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "session_created", startedAt: Date.now() });
 
       addLog("② MetaMask: USDC 승인 서명 요청...", "info");
       await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
@@ -359,7 +383,7 @@ export default function ScanPay() {
       });
       addLog("✅ 예치 완료! 서비스 시작", "success");
 
-      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash };
+      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash, startedAt: Date.now() };
       clearProc();
       saveSession(sd);
       setSessionData(sd);
@@ -692,6 +716,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
