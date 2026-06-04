@@ -26,13 +26,37 @@ const SERVICE_TYPES = [
 const SESSION_KEY  = "active_session";
 const saveSession  = (d) => localStorage.setItem(SESSION_KEY, JSON.stringify(d));
 const clearSession = ()  => localStorage.removeItem(SESSION_KEY);
-const loadSession  = ()  => { try { return JSON.parse(localStorage.getItem(SESSION_KEY)); } catch { return null; } };
+const loadSession  = ()  => {
+  try {
+    const d = JSON.parse(localStorage.getItem(SESSION_KEY));
+    if (!d) return null;
+    // holdDeadline + 여유 30초 지났으면 만료된 세션 — 자동 정리
+    if (d.holdDeadline && Math.floor(Date.now() / 1000) > d.holdDeadline + 30) {
+      clearSession(); return null;
+    }
+    return d;
+  } catch { return null; }
+};
 
 // processing 단계별 저장 — MetaMask 서명 후 페이지 리마운트 시 재개를 위해
 const PROC_KEY    = "payment_processing";
 const saveProc    = (d) => localStorage.setItem(PROC_KEY, JSON.stringify({ ...d, savedAt: Date.now() }));
 const clearProc   = ()  => localStorage.removeItem(PROC_KEY);
-const loadProc    = ()  => { try { const d = JSON.parse(localStorage.getItem(PROC_KEY)); if (d && Date.now() - d.savedAt < 10 * 60 * 1000) return d; clearProc(); return null; } catch { return null; } };
+const loadProc    = ()  => {
+  try {
+    const d = JSON.parse(localStorage.getItem(PROC_KEY));
+    if (!d) return null;
+    // holdDeadline 지났으면 무효 처리
+    if (d.holdDeadline && Math.floor(Date.now() / 1000) > d.holdDeadline + 30) {
+      clearProc(); return null;
+    }
+    // savedAt 기준 5분 초과면 무효
+    if (d.savedAt && Date.now() - d.savedAt > 5 * 60 * 1000) {
+      clearProc(); return null;
+    }
+    return d;
+  } catch { return null; }
+};
 
 async function apiCall(path, method = "GET", body = null) {
   const res = await fetch(BACKEND + path, {
@@ -454,6 +478,18 @@ export default function ScanPay() {
     }
   };
 
+  // ended 화면에서 "완료" 또는 홈 이동 시 localStorage 완전 정리
+  const resetToHome = () => {
+    clearSession();
+    clearProc();
+    setSessionData(null);
+    setSelectedSvc(null);
+    setStep("home");
+    setElapsed(0);
+    setLog([]);
+    setEnding(false);
+  };
+
   const formatTime = (s) => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
 
   // ══════════════════════════════════════════════════════════════════════════════
@@ -596,7 +632,7 @@ export default function ScanPay() {
               ))}
             </div>
             {log.some(l => l.type === "error") ? (
-              <button onClick={() => { setStep("home"); setLog([]); }}
+              <button onClick={() => { clearProc(); setStep("home"); setLog([]); }}
                 className="w-full py-3 bg-red-50 text-red-600 rounded-xl text-sm font-medium border border-red-100">
                 ← 홈으로 돌아가기
               </button>
@@ -712,10 +748,8 @@ export default function ScanPay() {
               </a>
             )}
 
-            <button onClick={() => {
-              setStep("home"); setSelectedSvc(null); setSessionData(null);
-              setTotalCharged(0); setElapsed(0); setLog([]);
-            }} className="w-full bg-blue-600 text-white font-bold py-4 rounded-2xl shadow-lg">
+            <button onClick={resetToHome}
+              className="w-full bg-blue-600 text-white font-bold py-4 rounded-2xl shadow-lg">
               홈으로
             </button>
           </div>
@@ -725,6 +759,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
