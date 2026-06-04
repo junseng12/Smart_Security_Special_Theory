@@ -134,6 +134,7 @@ export default function ScanPay() {
     if (saved?.sessionId && saved?.status === "active") {
       setSessionData(saved);
       setSelectedSvc(saved.svc);
+      if (saved.totalCharged) setTotalCharged(parseFloat(saved.totalCharged) || 0);
       setStep("active");
       return;
     }
@@ -174,18 +175,23 @@ export default function ScanPay() {
     return () => clearInterval(timerRef.current);
   }, [step]);
 
-  // holdDeadline 카운트다운
+  // holdDeadline 카운트다운 + 만료 시 자동 종료
   useEffect(() => {
     if (sessionData?.holdDeadline) {
       const tick = () => {
         const left = sessionData.holdDeadline - Math.floor(Date.now() / 1000);
         setHoldCountdown(left > 0 ? left : 0);
+        // holdDeadline 만료 시 자동 endSession 시도 (한 번만)
+        if (left <= 0 && step === "active") {
+          clearInterval(holdTimerRef.current);
+          endSession();
+        }
       };
       tick();
       holdTimerRef.current = setInterval(tick, 1000);
     }
     return () => clearInterval(holdTimerRef.current);
-  }, [sessionData?.holdDeadline]);
+  }, [sessionData?.holdDeadline]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addLog = (msg, type = "info") =>
     setLog(prev => [...prev, { msg, type, ts: Date.now() }]);
@@ -365,7 +371,7 @@ export default function ScanPay() {
       addLog("✅ 예치 완료! 서비스 시작", "success");
 
       const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash: proc.depositTxHash,
-        startedAt: proc.startedAt || Date.now() };
+        startedAt: proc.startedAt || Date.now(), totalCharged: 0 };
       clearProc();
       saveSession(sd);
       setSessionData(sd);
@@ -421,7 +427,7 @@ export default function ScanPay() {
       });
       addLog("✅ 예치 완료! 서비스 시작", "success");
 
-      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash, startedAt: Date.now() };
+      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash, startedAt: Date.now(), totalCharged: 0 };
       clearProc();
       saveSession(sd);
       setSessionData(sd);
@@ -447,7 +453,16 @@ export default function ScanPay() {
         usage: { durationMinutes: 1 },
       });
       const fare = parseFloat(res.fare?.fareUsdc || "0");
-      setTotalCharged(c => c + fare);
+      setTotalCharged(c => {
+        const next = c + fare;
+        // localStorage 동기화 — 화면 복귀 시 복원용
+        try {
+          const s = JSON.parse(localStorage.getItem("active_session") || "{}");
+          s.totalCharged = next;
+          localStorage.setItem("active_session", JSON.stringify(s));
+        } catch {}
+        return next;
+      });
       setFareInfo(res.fare);
     } catch {}
   }, []); // 의존성 없음 — sessionDataRef로 최신값 참조
@@ -476,8 +491,9 @@ export default function ScanPay() {
       addLog("① 세션 종료 요청...", "info");
       const res = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
         channelId:    sessionData.channelId,
-        userAddress:  mmAddress,
+        userAddress:  mmAddress || localStorage.getItem("mm_address"),
         userFinalSig: String(totalCharged.toFixed(6)),
+        fareUsdc:     String(totalCharged.toFixed(6)),
       });
       addLog(`✅ 요금: ${res.fareUsdc} USDC`, "success");
       addLog(`✅ 환불: ${res.refundUsdc} USDC`, "success");
@@ -778,6 +794,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
