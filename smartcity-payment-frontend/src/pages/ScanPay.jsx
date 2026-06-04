@@ -119,25 +119,17 @@ export default function ScanPay() {
       setStep("active");
       return;
     }
-    // 2) processing 중 나갔다가 돌아온 경우 — pendingProc에 저장, resumePayment 준비 후 실행
+    // 2) processing 중 나갔다가 돌아온 경우
     const proc = loadProc();
     if (proc?.sessionId && proc?.svc) {
       setSelectedSvc(proc.svc);
       setStep("processing");
       setLog([{ msg: "⏳ 이전 결제 재개 중...", type: "info" }]);
-      pendingProc.current = proc; // useCallback effect에서 단 한 번 실행
+      pendingProc.current = proc; // resumePayment 정의 후 아래 effect에서 실행
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // pendingProc 처리: resumePayment 정의 후 한 번만 실행
-  // 의존성 배열에 resumePayment 포함 → 함수 준비됐을 때만 실행, 중복 없음
-  useEffect(() => {
-    if (!pendingProc.current) return;
-    const proc = pendingProc.current;
-    pendingProc.current = null;
-    const timer = setTimeout(() => resumePayment(proc), 400);
-    return () => clearTimeout(timer);
-  }, [resumePayment]); // resumePayment가 준비된 직후 단 한 번 실행
+
 
   // 경과 시간 타이머 — startedAt 기준 실시간 계산 (화면 이동해도 유지)
   useEffect(() => {
@@ -343,6 +335,16 @@ export default function ScanPay() {
       setTimeout(() => { clearProc(); setStep("home"); }, 6000);
     }
   }, []); // useCallback — 의존성 없음(addLog는 stable ref 패턴)
+
+  // ── pendingProc 처리: resumePayment 정의된 직후에 위치 (순서 보장) ────────────
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!pendingProc.current) return;
+    const proc = pendingProc.current;
+    pendingProc.current = null;
+    const t = setTimeout(() => resumePayment(proc), 400);
+    return () => clearTimeout(t);
+  }, []); // 마운트 시 단 한 번 — resumePayment는 이미 위에서 정의됨
 
   // ── 결제 시작 ─────────────────────────────────────────────────────────────────
   const startPayment = async (svc, addr = mmAddress) => {
@@ -721,6 +723,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
