@@ -123,6 +123,8 @@ export default function ScanPay() {
   const holdTimerRef = useRef(null);
   const jsQrRef         = useRef(null);  // jsQR 라이브러리 동적 로드
   const scannedRef      = useRef(false); // QR 중복 감지 방지 플래그
+  const sessionDataRef  = useRef(null);  // doCharge 클로저용 최신 sessionData
+  const lastChargeRef   = useRef(0);     // 마지막 charge 실행 시각 (unmount 후 복귀 대응)
   const resumePaymentRef = useRef(null);  // 항상 최신 resumePayment 참조
 
   // 로컬 세션 복구 (active + processing 단계 모두)
@@ -145,6 +147,9 @@ export default function ScanPay() {
       setTimeout(() => resumePaymentRef.current?.(proc), 300);
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // sessionDataRef 항상 최신으로 유지
+  useEffect(() => { sessionDataRef.current = sessionData; }, [sessionData]);
 
   // 경과 시간 타이머 — startedAt 기준 절대 계산 (화면 이동 후 복귀해도 유지)
   useEffect(() => {
@@ -429,23 +434,34 @@ export default function ScanPay() {
   };
 
   // ── Charge 자동 청구 ──────────────────────────────────────────────────────────
+  // sessionDataRef 사용 → 의존성 배열 고정 → interval이 재생성되지 않음
   const doCharge = useCallback(async () => {
-    if (!sessionData) return;
+    const sd = sessionDataRef.current;
+    if (!sd) return;
+    lastChargeRef.current = Date.now();
     try {
-      const res = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/charge`, "POST", {
-        channelId:   sessionData.channelId,
-        userAddress: mmAddress,
-        serviceType: sessionData.svc.serviceType,
+      const res = await apiCall(`/api/v1/sessions/${sd.sessionId}/charge`, "POST", {
+        channelId:   sd.channelId,
+        userAddress: localStorage.getItem("mm_address"),
+        serviceType: sd.svc.serviceType,
         usage: { durationMinutes: 1 },
       });
       const fare = parseFloat(res.fare?.fareUsdc || "0");
       setTotalCharged(c => c + fare);
       setFareInfo(res.fare);
     } catch {}
-  }, [sessionData, mmAddress]);
+  }, []); // 의존성 없음 — sessionDataRef로 최신값 참조
 
   useEffect(() => {
     if (step !== "active") return;
+
+    // 화면 복귀 시: 마지막 charge 이후 1분 이상 지났으면 즉시 1회 실행
+    const elapsed60 = lastChargeRef.current
+      ? Date.now() - lastChargeRef.current >= 60_000
+      : false;
+    if (elapsed60) doCharge();
+
+    // 이후 60초마다 정기 실행
     const id = setInterval(doCharge, 60_000);
     return () => clearInterval(id);
   }, [step, doCharge]);
@@ -483,9 +499,12 @@ export default function ScanPay() {
     clearSession();
     clearProc();
     setSessionData(null);
+    sessionDataRef.current = null;
+    lastChargeRef.current = 0;
     setSelectedSvc(null);
     setStep("home");
     setElapsed(0);
+    setTotalCharged(0);
     setLog([]);
     setEnding(false);
   };
@@ -759,6 +778,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
