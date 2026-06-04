@@ -98,6 +98,7 @@ export default function ScanPay() {
   const timerRef     = useRef(null);
   const holdTimerRef = useRef(null);
   const jsQrRef         = useRef(null);  // jsQR 라이브러리 동적 로드
+  const scannedRef      = useRef(false); // QR 중복 감지 방지 플래그
   const resumePaymentRef = useRef(null);  // 항상 최신 resumePayment 참조
 
   // 로컬 세션 복구 (active + processing 단계 모두)
@@ -204,6 +205,11 @@ export default function ScanPay() {
     setScanReady(false);
   }, []);
 
+  // 카메라 시작 시 scannedRef 초기화
+  useEffect(() => {
+    if (step === "camera") scannedRef.current = false;
+  }, [step]);
+
   // ── QR 스캔 루프 (jsQR + BarcodeDetector 이중 지원) ──────────────────────────
   const runScanLoop = useCallback(() => {
     const video  = videoRef.current;
@@ -227,18 +233,28 @@ export default function ScanPay() {
         const code = jsQrRef.current(imageData.data, canvas.width, canvas.height);
         if (code?.data) {
           const parsed = parseQrPayload(code.data);
-          if (parsed) { found = true; stopCamera(); onQrSuccess(parsed); return; }
+          if (parsed && !scannedRef.current) {
+            scannedRef.current = true;
+            found = true;
+            stopCamera();
+            onQrSuccess(parsed);
+            return;
+          }
         }
       } catch {}
     }
 
-    // 방법 2: BarcodeDetector (Chrome Android 등)
+    // 방법 2: BarcodeDetector (Chrome Android 등) — 비동기라 scannedRef로 중복 방지
     if (!found && "BarcodeDetector" in window) {
       const detector = new window.BarcodeDetector({ formats: ["qr_code"] });
       detector.detect(video).then(codes => {
-        if (codes.length > 0) {
+        if (codes.length > 0 && !scannedRef.current) {
           const parsed = parseQrPayload(codes[0].rawValue);
-          if (parsed) { stopCamera(); onQrSuccess(parsed); return; }
+          if (parsed) {
+            scannedRef.current = true;
+            stopCamera();
+            onQrSuccess(parsed);
+          }
         }
       }).catch(() => {});
     }
@@ -709,6 +725,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
