@@ -193,8 +193,68 @@ async function manualReject(caseId, reviewerNotes) {
   return { caseId, status: 'REJECTED' };
 }
 
+/**
+ * calcRefundFare — issueType + 실이용 fare 기반으로 refundFare 결정
+ *
+ * refundFare = 운영자에게 지급할 금액 (0이면 전액 환불)
+ * 컨트랙트 refundToBuyer(escrowId, refundFare)에 직접 전달됨
+ *
+ * @param {string} issueType         — escrowPayoutService issueTypeMap의 키
+ * @param {number|string} confirmedUsageFare — 백엔드가 확인한 실이용 요금 (USDC)
+ * @param {number|string} totalUserDeposit   — 사용자 예치금 (상한 검증용)
+ * @returns {string} refundFare as USDC string (6 decimal)
+ */
+function calcRefundFare(issueType, confirmedUsageFare = '0', totalUserDeposit = '0') {
+  const fare    = Math.max(0, parseFloat(confirmedUsageFare) || 0);
+  const deposit = Math.max(0, parseFloat(totalUserDeposit)  || 0);
+
+  let refundFare;
+
+  switch (issueType) {
+    // 서비스 시작 전 실패 — 이용 없음 → 전액 환불
+    case 'unlock_failure':
+    case 'service_outage':
+      refundFare = 0;
+      break;
+
+    // 부분 이용 후 장애 — 실이용 fare만 operator 지급, 나머지 환불
+    case 'device_fault':
+    case 'device_malfunction':
+      refundFare = fare;
+      break;
+
+    // 잘못된 요금 계산 — 정상 fare만 operator 지급, 과다 청구분 환불
+    case 'wrong_charge':
+    case 'wrong_amount':
+    case 'sensor_failure':
+      refundFare = fare;  // confirmedUsageFare = 백엔드가 정상 계산한 요금
+      break;
+
+    // 중복 청구 — 중복분 제외한 정상 fare만 지급
+    case 'double_charge':
+      refundFare = fare;
+      break;
+
+    // 수동 요청 — 백엔드가 confirmedUsageFare 직접 지정
+    case 'manual_request':
+      refundFare = fare;
+      break;
+
+    default:
+      refundFare = fare;
+  }
+
+  // 상한: userDeposit 초과 방지
+  if (deposit > 0) refundFare = Math.min(refundFare, deposit);
+
+  logger.info('calcRefundFare', { issueType, confirmedUsageFare, refundFare: refundFare.toFixed(6) });
+  return refundFare.toFixed(6);
+}
+
 module.exports = {
   evaluateCase,
   manualApprove,
   manualReject,
+  calcRefundFare,
 };
+
