@@ -1,0 +1,18 @@
+{
+  "name": "smartcity-escrow-contracts",
+  "version": "3.2.0",
+  "description": "SmartCityEscrow V3.2 — card-network-style intermediary settlement contract",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy:sepolia": "hardhat run smartcontract/deploy.js --network baseSepolia",
+    "verify": "hardhat verify --network baseSepolia $CONTRACT_ADDRESS"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "hardhat": "^2.22.0",
+    "dotenv": "^16.0.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}
