@@ -63,7 +63,8 @@ const ESCROW_ABI_V3 = [
   'function operatorDeposit(bytes32 escrowId, uint256 amount) external',
   'function settleAndRelease(bytes32 escrowId, uint256 fareAmount) external',
   'function registerRefundIssue(bytes32 escrowId, uint8 issueType, string calldata description, bool penalizeOperator) external',
-  'function refundToBuyer(bytes32 escrowId) external',
+  'function refundToBuyer(bytes32 escrowId, uint256 refundFare) external',
+  'function claimSettlement(bytes32 escrowId) external',
   'function forceRefund(bytes32 escrowId) external',
   'function emergencyCancel(bytes32 escrowId) external',
   // 조회
@@ -73,6 +74,8 @@ const ESCROW_ABI_V3 = [
   'event OperatorDeposited(bytes32 indexed escrowId, address indexed operator, uint256 amount)',
   'event SettledAndReleased(bytes32 indexed escrowId, address indexed operator, uint256 fare, address indexed user, uint256 refund, uint256 operatorRefund)',
   'event RefundedToBuyer(bytes32 indexed escrowId, address indexed user, uint256 amount, uint256 penalty)',
+  'event SettlementReserved(bytes32 indexed escrowId, address indexed operator, uint256 fare, address indexed user, uint256 userRefund, uint256 operatorRefund, uint256 claimableAfter)',
+  'event SettlementClaimed(bytes32 indexed escrowId, address indexed operator, uint256 fare, address indexed user, uint256 userRefund, uint256 operatorRefund)',
 ];
 
 const USDC_ABI = [
@@ -299,11 +302,15 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
           const fw2 = ethers.parseUnits(String(fareUsdc || '0'), 6);
           const tx2 = await e2.settleAndRelease(eid2, fw2);
           const r2 = await tx2.wait();
+          const bgClaimableAfter = Math.floor(Date.now() / 1000) + 86400;
           await getPool().query(
-            `UPDATE escrow_locks SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3 WHERE session_id=$1`,
-            [sessionId, r2.hash, fareUsdc]
+            `UPDATE escrow_locks
+             SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3,
+                 claimable_after=to_timestamp($4)
+             WHERE session_id=$1`,
+            [sessionId, r2.hash, fareUsdc, bgClaimableAfter]
           );
-          logger.info('Background settleAndRelease ✅', { sessionId, txHash: r2.hash });
+          logger.info('Background settleAndRelease reserved ✅ (24h window)', { sessionId, txHash: r2.hash });
         } catch(e) {
           logger.error('Background settleAndRelease failed', { sessionId, error: e.message });
         }
@@ -366,19 +373,30 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   const opDep    = parseFloat(row.operator_deposit || 0);
   const refundUsdc = (userDep - parseFloat(fareUsdc || 0)).toFixed(6);
 
+  // V3.2: settleAndRelease는 24h 분쟁 기간 후 claimSettlement()로 실제 전송
+  // CLAIM_PERIOD = 24h → claimableAfter = 지금 + 86400s
+  const claimableAfter = Math.floor(Date.now() / 1000) + 86400;
+
   await getPool().query(
-    `UPDATE escrow_locks SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3 WHERE session_id=$1`,
-    [sessionId, receipt.hash, fareUsdc]
+    `UPDATE escrow_locks
+     SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3,
+         claimable_after=to_timestamp($4)
+     WHERE session_id=$1`,
+    [sessionId, receipt.hash, fareUsdc, claimableAfter]
   );
 
-  logger.info('settleAndRelease complete ✅', { sessionId, txHash: receipt.hash, fareUsdc, refundUsdc });
+  logger.info('settleAndRelease reserved ✅ (24h dispute window started)', {
+    sessionId, txHash: receipt.hash, fareUsdc, refundUsdc,
+    claimableAfter: new Date(claimableAfter * 1000).toISOString(),
+  });
   return {
     txHash: receipt.hash,
     escrowId,
     fareUsdc,
     refundUsdc,
     operatorDepositReturned: String(opDep),
-    mode: 'settle_and_release_v3',
+    claimableAfter: new Date(claimableAfter * 1000).toISOString(),
+    mode: 'settle_reserved_v32',  // 즉시 전송 아님 — 24h 후 claimSettlement
   };
 }
 
@@ -403,14 +421,24 @@ async function registerRefundIssue(sessionId, caseId, issueType, description, pe
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. refundToBuyer
+// 5. refundToBuyer — V3.2: refundFare 파라미터 추가
 // ─────────────────────────────────────────────────────────────────────────────
-async function refundToBuyer(sessionId, caseId) {
+/**
+ * @param {string} sessionId
+ * @param {string} caseId
+ * @param {number|string} refundFare  — 운영자에게 지급할 요금 (USDC)
+ *   0: 전액 환불 (unlock 실패, 완전 장애)
+ *   >0: 부분 환불 (실이용분 fare는 operator 지급, 나머지 user 환불)
+ *   refundDecisionEngine.calcRefundFare()가 issueType 기반으로 계산해서 전달
+ */
+async function refundToBuyer(sessionId, caseId, refundFare = '0') {
   const wallet   = getOperatorWallet();
   const escrow   = getEscrowContract(wallet);
   const escrowId = toEscrowId(sessionId);
+  const refundFareWei = ethers.parseUnits(String(parseFloat(refundFare).toFixed(6)), 6);
 
-  const tx      = await escrow.refundToBuyer(escrowId);
+  logger.info('refundToBuyer', { sessionId, caseId, refundFare });
+  const tx      = await escrow.refundToBuyer(escrowId, refundFareWei);
   const receipt = await tx.wait();
 
   await getPool().query(
@@ -419,7 +447,42 @@ async function refundToBuyer(sessionId, caseId) {
     [sessionId, receipt.hash, caseId]
   );
 
-  return { txHash: receipt.hash };
+  return { txHash: receipt.hash, refundFare };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5b. claimSettlement — V3.2: 24h 분쟁 기간 종료 후 실제 정산 실행
+// ─────────────────────────────────────────────────────────────────────────────
+async function claimSettlement(sessionId) {
+  const wallet   = getOperatorWallet();
+  const escrow   = getEscrowContract(wallet);
+  const escrowId = toEscrowId(sessionId);
+
+  // 온체인 claimable 여부 확인 (isClaimable view)
+  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com');
+  const escrowRO = new ethers.Contract(
+    process.env.ESCROW_CONTRACT_ADDRESS,
+    [...ESCROW_ABI_V3, 'function isClaimable(bytes32) view returns (bool)'],
+    roProvider
+  );
+  const claimable = await escrowRO.isClaimable(escrowId).catch(() => false);
+  if (!claimable) {
+    logger.info('claimSettlement: not yet claimable', { sessionId });
+    return { skipped: true, reason: 'not_yet_claimable' };
+  }
+
+  logger.info('claimSettlement: executing on-chain', { sessionId });
+  const tx      = await escrow.claimSettlement(escrowId);
+  const receipt = await tx.wait();
+
+  await getPool().query(
+    `UPDATE escrow_locks SET state='Claimed', settle_tx=$2, settled_at=NOW()
+     WHERE session_id=$1`,
+    [sessionId, receipt.hash]
+  );
+
+  logger.info('claimSettlement complete ✅', { sessionId, txHash: receipt.hash });
+  return { txHash: receipt.hash, mode: 'claim_settlement_v32' };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -490,7 +553,9 @@ module.exports = {
   settleAndRelease,
   registerRefundIssue,
   refundToBuyer,
+  claimSettlement,
   getEscrowStatus,
   processExpiredHolds,
   toEscrowId,
 };
+
