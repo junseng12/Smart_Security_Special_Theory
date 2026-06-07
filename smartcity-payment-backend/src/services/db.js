@@ -165,7 +165,8 @@ async function runMigrations() {
       settle_tx           TEXT,
       state               TEXT NOT NULL DEFAULT 'UserDeposited',
       locked_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      settled_at          TIMESTAMPTZ
+      settled_at          TIMESTAMPTZ,
+      claimable_after     TIMESTAMPTZ   -- V3.2: settleAndRelease 후 24h 분쟁 기간 종료 시각
     );
     -- V2→V3 마이그레이션: 구버전 컬럼 ADD IF NOT EXISTS (이미 생성된 DB 대응)
     ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS operator_address    TEXT;
@@ -176,6 +177,7 @@ async function runMigrations() {
     ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS operator_deposit_tx TEXT;
     ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS settle_tx           TEXT;
     ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS settled_at          TIMESTAMPTZ;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS claimable_after     TIMESTAMPTZ;  -- V3.2
     -- NOT NULL 없는 구버전 컬럼엔 기본값 채우기
     UPDATE escrow_locks SET operator_address = user_address WHERE operator_address IS NULL;
     UPDATE escrow_locks SET escrow_id_bytes  = '' WHERE escrow_id_bytes IS NULL;
@@ -275,3 +277,4 @@ module.exports = {
   saveRefundRecord,
   updateRefundRecord,
 };
+
