@@ -129,6 +129,17 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
   const escrowId = toEscrowId(sessionId);
   const opAddr   = operatorAddress || process.env.OPERATOR_ADDRESS;
 
+  // holdDeadline이 없으면 sessions 테이블에서 가져옴
+  // (세션 생성 시 이미 계산된 값 사용 — unix timestamp 또는 ISO string 모두 지원)
+  let finalHoldDeadline = holdDeadline;
+  if (!finalHoldDeadline || isNaN(Number(finalHoldDeadline))) {
+    const sessRow = await getPool().query('SELECT meta FROM sessions WHERE id=$1', [sessionId]).catch(() => ({ rows: [] }));
+    const meta = sessRow.rows[0]?.meta || {};
+    // meta에 holdDeadline이 있으면 사용, 없으면 현재 + 240초(4분) 기본값
+    finalHoldDeadline = meta.holdDeadline || (Math.floor(Date.now() / 1000) + 240);
+    logger.info('recordUserDeposit: holdDeadline from session meta', { sessionId, finalHoldDeadline });
+  }
+
   // 기존 DB가 구버전 schema(seller_address, amount_usdc)로 생성된 경우 대비
   // 컬럼 존재 여부 확인 후 안전 INSERT
   await getPool().query(
@@ -160,7 +171,7 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
            user_deposit_tx=$8, operator_address=$5,
            state='UserDeposited', locked_at=NOW()`,
     [sessionId, escrowId, channelId, userAddress, opAddr,
-     depositUsdc, new Date(holdDeadline * 1000), depositTxHash]
+     depositUsdc, new Date(Number(finalHoldDeadline) * 1000), depositTxHash]
   );
 
   logger.info('User deposit recorded in DB', { sessionId, depositUsdc, depositTxHash });
