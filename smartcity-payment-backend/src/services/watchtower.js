@@ -105,6 +105,42 @@ async function processPendingSettles() {
   }
 }
 
+// ── ClaimSettlement 워커 (V3.2) — 24h 분쟁 기간 종료 후 자동 정산 실행 ───────
+async function processClaimSettlements() {
+  try {
+    const db        = require('./db');
+    const escrowSvc = require('./escrowPayoutService');
+
+    // claimable_after가 지났고 아직 Released 상태인 에스크로
+    const { rows } = await db.getPool().query(
+      `SELECT session_id
+       FROM escrow_locks
+       WHERE state = 'Released'
+         AND claimable_after IS NOT NULL
+         AND claimable_after < NOW()
+       LIMIT 10`
+    );
+
+    if (rows.length > 0)
+      logger.info(`Watchtower: ClaimSettlement ${rows.length}건 처리 시작`);
+
+    for (const row of rows) {
+      try {
+        const result = await escrowSvc.claimSettlement(row.session_id);
+        if (result.skipped) {
+          logger.info('Watchtower: claimSettlement skipped', { sessionId: row.session_id, reason: result.reason });
+        } else {
+          logger.info('Watchtower: claimSettlement OK ✅', { sessionId: row.session_id, txHash: result.txHash });
+        }
+      } catch (e) {
+        logger.error('Watchtower: claimSettlement fail', { sessionId: row.session_id, error: e.message });
+      }
+    }
+  } catch (e) {
+    logger.error('Watchtower processClaimSettlements error', { error: e.message });
+  }
+}
+
 async function startLoop() {
   await connectRedis().catch(() => logger.warn('Watchtower: Redis 없음, DB only'));
   await connectDB();
@@ -113,6 +149,10 @@ async function startLoop() {
   // PendingSettle 처리 (30초마다)
   processPendingSettles();
   setInterval(processPendingSettles, 30_000);
+
+  // V3.2: ClaimSettlement 워커 (5분마다 — 24h 기간 대비 충분한 여유)
+  processClaimSettlements();
+  setInterval(processClaimSettlements, 5 * 60_000);
 
   // 채널 모니터링
   await runWatchtower();
@@ -123,3 +163,4 @@ startLoop().catch((err) => {
   logger.error('Watchtower fatal error', { error: err.message });
   process.exit(1);
 });
+
