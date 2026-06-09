@@ -21,11 +21,14 @@ const CASE_STATES = {
 };
 
 const REFUND_REASONS = [
+  'unlock_failure',       // 잠금 해제 실패 (V3.2 — 전액 환불)
   'sensor_failure',       // 반납 센서 미감지
   'double_charge',        // 중복 청구
-  'service_outage',       // 서비스 장애
+  'service_outage',       // 서비스 장애 (V3.2 — 전액 환불)
   'wrong_amount',         // 요금 오류
+  'wrong_charge',         // 잘못된 요금 산정 (V3.2)
   'device_malfunction',   // 기기 결함
+  'device_fault',         // 이용 중 기기 결함 (V3.2 — 부분 환불)
   'manual_request',       // 사용자 수동 요청
 ];
 
@@ -181,3 +184,4 @@ module.exports = {
   getCase,
   listCases,
 };
+
