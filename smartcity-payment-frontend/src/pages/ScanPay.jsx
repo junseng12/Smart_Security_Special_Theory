@@ -792,36 +792,7 @@ export default function ScanPay() {
               </div>
             </div>
 
-            {/* 이용 중 긴급 환불 버튼 — 세션 강제 종료 후 환불 페이지 이동 */}
-            <button
-              onClick={async () => {
-                const sid = sessionData?.sessionId;
-                // 1) 백엔드 세션 강제 종료 (환불 목적, 정산 없이 중단)
-                if (sid) {
-                  try {
-                    await fetch(`${BACKEND}/api/v1/sessions/${sid}/end`, {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        channelId: sessionData.channelId,
-                        userAddress: mmAddress || localStorage.getItem('mm_address'),
-                        userFinalSig: 'refund_abort',
-                        fareUsdc: String(totalCharged.toFixed(6)),
-                        forceRefund: true,
-                      }),
-                    }).catch(() => {});
-                  } catch {}
-                }
-                // 2) 로컬 세션 정리
-                clearSession(); clearProc();
-                // 3) 환불 센터로 이동
-                navigate('/refund', {
-                  state: { sessionId: sid, reason: 'unlock_failure' }
-                });
-              }}
-              className="w-full bg-orange-50 border border-orange-200 text-orange-700 font-medium py-3 rounded-2xl text-sm mb-2">
-              🚨 기기 문제? 즉시 환불 신청
-            </button>
+
 
             <button onClick={endSession}
               className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-2xl shadow-lg active:scale-95 transition-all">
