@@ -152,7 +152,7 @@ async function startLoop() {
 
   // V3.2: ClaimSettlement 워커 (5분마다 — 24h 기간 대비 충분한 여유)
   processClaimSettlements();
-  setInterval(processClaimSettlements, 5 * 60_000);
+  setInterval(processClaimSettlements, 60_000); // [TEST] 1분 폴링 (운영: 5분)
 
   // 채널 모니터링
   await runWatchtower();
@@ -163,4 +163,5 @@ startLoop().catch((err) => {
   logger.error('Watchtower fatal error', { error: err.message });
   process.exit(1);
 });
+
 
