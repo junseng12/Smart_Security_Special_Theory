@@ -50,7 +50,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
     // -------------------------------------------------------------------------
     // Time constants
     // -------------------------------------------------------------------------
-    uint256 public constant CLAIM_PERIOD = 24 hours;
+    uint256 public constant CLAIM_PERIOD = 4 minutes; // [TEST] 4분 분쟁 기간 (운영: 24 hours)
     uint256 public constant FORCE_REFUND_GRACE_PERIOD = 1 hours;
 
     // -------------------------------------------------------------------------
@@ -810,4 +810,5 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         emit RefundedToBuyer(escrowId, user, userRefund, 0);
     }
 }
+
 
