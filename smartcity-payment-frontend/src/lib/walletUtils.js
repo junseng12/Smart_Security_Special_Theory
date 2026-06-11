@@ -1,11 +1,11 @@
 export const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
-export const ESCROW_V3_ADDRESS = "0xb6094337a6F37306eBDadd9923991275Cc6220f7"; // SmartCityEscrowV3 최신 배포 주소
+export const ESCROW_V3_ADDRESS = "0x454Dd98f154cC4Af7ACB5390113151E2f0e489a1"; // SmartCityEscrow V3.2 (Base Sepolia 배포 확정)
 export const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"; // 컨트랙트 OPERATOR_ROLE
 export const SERVICE_PROVIDER_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"; // 요금 수취 = operator 동일
 const RPC_LIST = [
   "https://base-sepolia-rpc.publicnode.com",
-  "https://84532.rpc.thirdweb.com",
   "https://sepolia.base.org",
+  "https://84532.rpc.thirdweb.com",
 ];
 export const BASE_SEPOLIA_RPC = RPC_LIST[0]; // 체인 추가용 기본값
 export const BASE_SEPOLIA_CHAIN_ID = "0x14a34"; // 84532
