@@ -129,14 +129,13 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
 
   // ── 2. go-perun EndSession (오프체인 채널 종료) ────────────────────────────
   // go-perun endSession — 실패해도 에스크로 정산은 계속 진행
-  let perunRes = { fare_usdc: finalFareUsdc, refund_usdc: '0', tx_hash: null };
+  let perunRes = { fare_usdc: chargedUsdc, refund_usdc: '0', tx_hash: null };
   try {
-  const _perunEndRes = await perun.endSession({
-    sessionId, channelId, userAddress, userFinalSig, chargedUsdc,
-  });
-
-  // go-perun이 반환한 fare_usdc 사용. 없으면 chargedUsdc 폴백
-    perunRes = _perunEndRes;
+    const _perunEndRes = await perun.endSession({
+      sessionId, channelId, userAddress, userFinalSig, chargedUsdc,
+    });
+    // go-perun이 반환한 fare_usdc 사용. 없으면 chargedUsdc 폴백
+    if (_perunEndRes) perunRes = _perunEndRes;
   } catch (perunEndErr) {
     logger.warn('[Orchestrator] go-perun endSession 실패 → escrow-only 계속', { error: perunEndErr.message });
   }
@@ -202,4 +201,5 @@ module.exports = {
   disputeChannel,
   getChannelStatus,
 };
+
 
