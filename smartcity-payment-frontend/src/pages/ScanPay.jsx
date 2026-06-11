@@ -739,6 +739,18 @@ export default function ScanPay() {
               </div>
             </div>
 
+            {/* 이용 중 긴급 환불 버튼 */}
+            <button
+              onClick={() => navigate('/refund', {
+                state: {
+                  sessionId: sessionData?.sessionId,
+                  reason: 'unlock_failure',
+                }
+              })}
+              className="w-full bg-orange-50 border border-orange-200 text-orange-700 font-medium py-3 rounded-2xl text-sm mb-2">
+              🚨 기기 문제? 즉시 환불 신청
+            </button>
+
             <button onClick={endSession}
               className="w-full bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-2xl shadow-lg active:scale-95 transition-all">
               서비스 종료 및 정산
@@ -797,6 +809,18 @@ export default function ScanPay() {
               </a>
             )}
 
+            {/* 환불 신청 버튼 — 결제 완료 후 문제 발생 시 바로 환불 센터로 이동 */}
+            <button
+              onClick={() => navigate('/refund', {
+                state: {
+                  sessionId: sessionData?.sessionId,
+                  reason: 'sensor_failure',
+                }
+              })}
+              className="w-full bg-orange-50 border border-orange-200 text-orange-700 font-medium py-3 rounded-2xl text-sm">
+              ⚠️ 문제가 있나요? 환불 신청
+            </button>
+
             <button onClick={resetToHome}
               className="w-full bg-blue-600 text-white font-bold py-4 rounded-2xl shadow-lg">
               홈으로
@@ -808,6 +832,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
