@@ -347,23 +347,44 @@ export default function ScanPay() {
   }, [step]);
 
   // ── QR 스캔 성공 ─────────────────────────────────────────────────────────────
-  const onQrSuccess = (svc) => {
+  const onQrSuccess = async (svc) => {
     setSelectedSvc(svc);
-    const addr = localStorage.getItem("mm_address");
+    let addr = localStorage.getItem("mm_address") || mmAddress;
     if (!addr) {
-      setMmAddress(null);
-      setStep("home");
-      return;
+      if (!window.ethereum) { alert("MetaMask 앱 브라우저에서 열어주세요."); return; }
+      try {
+        const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+        addr = accounts[0];
+        if (!addr) return;
+        localStorage.setItem("mm_address", addr);
+        setMmAddress(addr);
+      } catch { return; }
     }
     startPayment(svc, addr);
   };
 
   // ── 수동 선택 ─────────────────────────────────────────────────────────────────
-  const onManualSelect = (svcItem) => {
+  const onManualSelect = async (svcItem) => {
     const svc = { serviceType: svcItem.id, deviceId: svcItem.deviceId, depositUsdc: svcItem.depositUsdc };
     setSelectedSvc(svc);
-    const addr = localStorage.getItem("mm_address");
-    if (!addr) { setStep("home"); return; }
+    let addr = localStorage.getItem("mm_address") || mmAddress;
+    // MetaMask 미연결 시 연결 먼저 시도
+    if (!addr) {
+      if (!window.ethereum) {
+        alert("MetaMask가 필요합니다.\nMetaMask 앱 브라우저에서 열어주세요.");
+        return;
+      }
+      try {
+        const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+        addr = accounts[0];
+        if (!addr) return;
+        localStorage.setItem("mm_address", addr);
+        setMmAddress(addr);
+      } catch (e) {
+        alert("MetaMask 연결을 거부하셨습니다.");
+        return;
+      }
+    }
     startPayment(svc, addr);
   };
 
@@ -589,16 +610,24 @@ export default function ScanPay() {
         {/* MetaMask 미연결 경고 (항상 상단에) */}
         {!mmAddress && step === "home" && (
           <div className="bg-orange-50 border border-orange-200 rounded-2xl p-4 text-sm text-orange-800">
-            ⚠️ 홈으로 돌아가서 MetaMask를 먼저 연결해주세요.
-            <button onClick={() => navigate("/")}
+            ⚠️ MetaMask가 연결되지 않았습니다.
+            <button
+              onClick={async () => {
+                if (!window.ethereum) { alert("MetaMask 앱 브라우저에서 열어주세요."); return; }
+                try {
+                  const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+                  const addr = accounts[0];
+                  if (addr) { localStorage.setItem("mm_address", addr); setMmAddress(addr); }
+                } catch { alert("MetaMask 연결을 거부하셨습니다."); }
+              }}
               className="block mt-2 w-full text-center bg-orange-500 text-white py-2 rounded-xl font-semibold">
-              홈으로 이동
+              MetaMask 연결하기
             </button>
           </div>
         )}
 
         {/* ── HOME ── */}
-        {step === "home" && mmAddress && (
+        {step === "home" && (
           <div className="space-y-4">
             <button onClick={() => setStep("camera")}
               className="w-full bg-blue-600 text-white rounded-2xl p-6 flex flex-col items-center gap-3 shadow-lg active:scale-95 transition-transform">
@@ -856,6 +885,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
