@@ -17,6 +17,16 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
+const RATE_PER_MIN = 0.01; // USDC/분 — 백엔드와 동일
+
+/** startedAt(ms) 기반으로 예상 누적 요금 계산 (화면 복귀 시 동기화용) */
+function calcChargedFromStart(startedAtMs, depositUsdc) {
+  if (!startedAtMs) return 0;
+  const elapsedMin = (Date.now() - startedAtMs) / 60_000;
+  const charged = Math.min(elapsedMin * RATE_PER_MIN, depositUsdc);
+  return Math.max(0, parseFloat(charged.toFixed(6)));
+}
+
 const SERVICE_TYPES = [
   { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
   { id: "ev_charging", label: "EV 충전",     emoji: "⚡", depositUsdc: 5.0, deviceId: "EV-001"  },
@@ -134,7 +144,21 @@ export default function ScanPay() {
     if (saved?.sessionId && saved?.status === "active") {
       setSessionData(saved);
       setSelectedSvc(saved.svc);
-      if (saved.totalCharged) setTotalCharged(parseFloat(saved.totalCharged) || 0);
+      // 화면 복귀 시 totalCharged: localStorage 저장값 vs startedAt 기반 재계산 중 큰 값
+      {
+        const storedCharged = parseFloat(saved.totalCharged) || 0;
+        const calcCharged   = saved.startedAt ? calcChargedFromStart(saved.startedAt, saved.svc?.depositUsdc || 3.0) : 0;
+        const resolvedCharged = Math.max(storedCharged, calcCharged);
+        setTotalCharged(resolvedCharged);
+        // localStorage도 업데이트
+        if (resolvedCharged > storedCharged) {
+          try {
+            const s = JSON.parse(localStorage.getItem("active_session") || "{}");
+            s.totalCharged = resolvedCharged;
+            localStorage.setItem("active_session", JSON.stringify(s));
+          } catch {}
+        }
+      }
       setStep("active");
       return;
     }
@@ -832,6 +856,7 @@ export default function ScanPay() {
     </div>
   );
 }
+
 
 
 
