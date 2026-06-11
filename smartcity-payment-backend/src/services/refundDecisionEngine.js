@@ -75,27 +75,57 @@ const RULES = {
   },
 
   /**
+   * 잠금 해제 실패: 서비스 자체를 이용 못 함 → 전액 환불 자동 승인
+   */
+  unlock_failure: async ({ requestedUsdc }) => ({
+    eligible: true,
+    refundUsdc: requestedUsdc || '3.000000',
+    reason: 'Unlock failure: full refund auto-approved',
+  }),
+
+  /**
    * 서비스 장애: 운영 장애 시간대와 세션 겹침
    */
-  service_outage: async ({ sessionId, evidence }) => {
+  service_outage: async ({ sessionId, evidence, requestedUsdc }) => {
     const outage = evidence.find((e) => e.type === 'outage_record');
-    if (!outage) return { eligible: false, reason: 'No outage record in evidence' };
-
+    // evidence 없으면 전액 환불 자동 승인
+    if (!outage) {
+      return {
+        eligible: true,
+        refundUsdc: requestedUsdc || '3.000000',
+        reason: 'Service outage: full refund auto-approved (no evidence required)',
+      };
+    }
     const fareRecord = await getLatestFareRecord(sessionId);
-    if (!fareRecord) return { eligible: false, reason: 'No fare record' };
-
-    // 장애 시간과 세션 겹침 비율에 따라 환불
+    if (!fareRecord) return { eligible: true, refundUsdc: requestedUsdc || '3.000000', reason: 'Service outage full refund' };
     const overlapMinutes = outage.overlapMinutes || 0;
     const totalMinutes = fareRecord.usage_data?.durationMinutes || 1;
     const refundRatio = Math.min(overlapMinutes / totalMinutes, 1.0);
     const refundUsdc = (parseFloat(fareRecord.final_fare) * refundRatio).toFixed(6);
-
     return {
       eligible: refundUsdc > 0,
       refundUsdc,
       reason: `Service outage ${overlapMinutes}min overlap out of ${totalMinutes}min session`,
     };
   },
+
+  /**
+   * 이용 중 기기 결함: 실이용 fare만 청구, 나머지 환불 (수동 검토)
+   */
+  device_fault: async () => ({
+    eligible: null,
+    requiresManualReview: true,
+    reason: 'Device fault: manual review required for partial refund calculation',
+  }),
+
+  /**
+   * 잘못된 요금 계산: 수동 검토
+   */
+  wrong_charge: async () => ({
+    eligible: null,
+    requiresManualReview: true,
+    reason: 'Wrong charge: manual review required',
+  }),
 
   /**
    * 요금 오류 / 기기 결함 / 수동 요청: 운영자 수동 검토
@@ -257,4 +287,5 @@ module.exports = {
   manualReject,
   calcRefundFare,
 };
+
 
