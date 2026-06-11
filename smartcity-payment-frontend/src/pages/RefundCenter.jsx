@@ -69,7 +69,6 @@ export default function RefundCenter() {
   const [form, setForm] = useState({
     reason: "sensor_failure",
     sessionId: "",
-    requestedUsdc: "",
     note: "",
   });
 
@@ -146,8 +145,7 @@ export default function RefundCenter() {
         userAddress:   mmAddress,
         reason:        form.reason,
         ...(form.sessionId    && { sessionId:    form.sessionId }),
-        ...(form.requestedUsdc && { requestedUsdc: form.requestedUsdc }),
-        evidence: form.note ? [{ type: "user_note", note: form.note }] : [],
+          evidence: form.note ? [{ type: "user_note", note: form.note }] : [],
       };
       const caseData = await apiCall("/api/v1/refunds", "POST", body);
 
@@ -167,7 +165,7 @@ export default function RefundCenter() {
           if (decision?.decision === "manual_required") {
             try {
               await apiCall(`/api/v1/refunds/${caseData.id}/approve`, "POST", {
-                approvedUsdc: String(parseFloat(form.requestedUsdc) || "3.000000"),
+                approvedUsdc: "3.000000", // 백엔드 재계산으로 결정됨
                 reviewerNotes: "Auto-approved after evaluation",
               });
             } catch {}
@@ -184,7 +182,7 @@ export default function RefundCenter() {
         // sessionId 없으면 승인만 처리
         try {
           await apiCall(`/api/v1/refunds/${caseData.id}/approve`, "POST", {
-            approvedUsdc: String(parseFloat(form.requestedUsdc) || "3.000000"),
+            approvedUsdc: "3.000000", // 백엔드 재계산으로 결정됨
             reviewerNotes: "Auto-approved — no sessionId for on-chain",
           });
         } catch {}
@@ -266,22 +264,6 @@ export default function RefundCenter() {
                 </div>
               </div>
 
-              {/* 요청 금액 */}
-              <div className="bg-card border rounded-xl p-4">
-                <label className="text-xs text-muted-foreground mb-2 block font-medium uppercase tracking-wide">
-                  요청 금액 (USDC) <span className="font-normal">(선택)</span>
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number" min="0" step="0.01"
-                    value={form.requestedUsdc}
-                    onChange={e => setForm(f => ({ ...f, requestedUsdc: e.target.value }))}
-                    placeholder="0.00"
-                    className="flex-1 text-sm bg-transparent outline-none"
-                  />
-                  <span className="text-sm text-muted-foreground">USDC</span>
-                </div>
-              </div>
 
               {/* 메모 */}
               <div className="bg-card border rounded-xl p-4">
@@ -362,7 +344,7 @@ export default function RefundCenter() {
               )}
 
               <div className="flex gap-3">
-                <Button variant="outline" onClick={() => { setSubmitted(null); setForm({ reason:"sensor_failure", sessionId:"", requestedUsdc:"", note:"" }); }}
+                <Button variant="outline" onClick={() => { setSubmitted(null); setForm({ reason:"sensor_failure", sessionId:"", note:"" }); }}
                   className="flex-1 rounded-xl">새 신청</Button>
                 <Button onClick={() => setTab("history")} className="flex-1 rounded-xl">
                   내 케이스 보기
@@ -480,4 +462,5 @@ function PayoutButton({ caseId, sessionId, onDone }) {
     </div>
   );
 }
+
 
