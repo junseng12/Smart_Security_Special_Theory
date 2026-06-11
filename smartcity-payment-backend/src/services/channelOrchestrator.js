@@ -30,24 +30,44 @@ async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsd
     userAddress, serviceType, depositUsdc, mode: perun.getMode(), escrowId,
   });
 
-  const perunRes = await perun.startSession({
-    userAddress, serviceId: serviceType, depositUsdc, userWireAddr, holdSeconds,
-  });
+  // go-perun gRPC 호출 — 실패 시 escrow-only fallback
+  let perunRes;
+  try {
+    perunRes = await perun.startSession({
+      userAddress, serviceId: serviceType, depositUsdc, userWireAddr, holdSeconds,
+    });
+  } catch (perunErr) {
+    // go-perun 펀딩/연결 실패 → escrow-only mock으로 폴백
+    logger.warn('[Orchestrator] go-perun startSession 실패 → escrow-only fallback', {
+      error: perunErr.message,
+    });
+    const { v4: uuidv4 } = require('uuid');
+    const fallbackChannelId = '0x' + Buffer.from(dbSession.id).toString('hex').slice(0, 64).padEnd(64, '0');
+    perunRes = {
+      ok: true,
+      session_id:   `fallback_${uuidv4().slice(0, 8)}`,
+      channel_id:   fallbackChannelId,
+      hold_deadline: String(Math.floor(Date.now() / 1000) + holdSeconds),
+      state_hash:   '0x' + Buffer.from('fallback').toString('hex').padEnd(64, '0'),
+      _fallback:    true,
+    };
+  }
 
   await sessionMgr.linkChannel(dbSession.id, perunRes.channel_id).catch(() => {});
 
   logger.info('[Orchestrator] startSessionAndOpenChannel OK', {
     dbSessionId: dbSession.id, perunSession: perunRes.session_id,
-    channelId: perunRes.channel_id, escrowId,
+    channelId: perunRes.channel_id, escrowId, fallback: !!perunRes._fallback,
   });
 
   return {
     sessionId:    dbSession.id,
     perunSession: perunRes.session_id,
     channelId:    perunRes.channel_id,
-    escrowId,                           // ★ keccak256(sessionId) — 백엔드/프론트 통일
+    escrowId,
     holdDeadline: perunRes.hold_deadline,
     stateHash:    perunRes.state_hash,
+    fallback:     !!perunRes._fallback,
   };
 }
 
@@ -108,11 +128,18 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
   });
 
   // ── 2. go-perun EndSession (오프체인 채널 종료) ────────────────────────────
-  const perunRes = await perun.endSession({
+  // go-perun endSession — 실패해도 에스크로 정산은 계속 진행
+  let perunRes = { fare_usdc: finalFareUsdc, refund_usdc: '0', tx_hash: null };
+  try {
+  const _perunEndRes = await perun.endSession({
     sessionId, channelId, userAddress, userFinalSig, chargedUsdc,
   });
 
   // go-perun이 반환한 fare_usdc 사용. 없으면 chargedUsdc 폴백
+    perunRes = _perunEndRes;
+  } catch (perunEndErr) {
+    logger.warn('[Orchestrator] go-perun endSession 실패 → escrow-only 계속', { error: perunEndErr.message });
+  }
   const finalFareUsdc = perunRes.fare_usdc || chargedUsdc || '0';
 
   logger.info('[Orchestrator] go-perun EndSession done', {
@@ -175,3 +202,4 @@ module.exports = {
   disputeChannel,
   getChannelStatus,
 };
+
