@@ -118,7 +118,7 @@ export default function ScanPay() {
   const [sessionData,   setSessionData]   = useState(null);
   const [elapsed,       setElapsed]       = useState(0);
   const [totalCharged,  setTotalCharged]  = useState(0);
-  const [fareInfo,      setFareInfo]      = useState(null);
+
   const [ending,        setEnding]        = useState(false);
   const [log,           setLog]           = useState([]);
   const [holdCountdown, setHoldCountdown] = useState(null);
@@ -875,17 +875,3 @@ export default function ScanPay() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
