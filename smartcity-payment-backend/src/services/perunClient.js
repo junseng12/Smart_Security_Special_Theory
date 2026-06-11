@@ -54,7 +54,7 @@ const mock = {
     const sessionId = `sess_${uuidv4().slice(0,8)}`;
     const channelId = `0x${Buffer.from(sessionId).toString('hex').slice(0,64).padEnd(64,'0')}`;
     return { ok: true, session_id: sessionId, channel_id: channelId,
-      escrow_id: `escrow_${sessionId}`, hold_deadline: Math.floor(Date.now()/1000)+(req.hold_seconds||120),
+      escrow_id: `escrow_${sessionId}`, hold_deadline: String(Math.floor(Date.now()/1000)+(req.hold_seconds||240)),
       state_hash: `0x${Buffer.from('init').toString('hex').padEnd(64,'0')}` };
   },
   EndSession(req) {
@@ -145,4 +145,5 @@ function getMode() { return _mode; }
 
 module.exports = { startSession, endSession, proposeUsageUpdate, getChannelStatus,
   initiateDispute, accumulateCredit, postCompensation, ping, reinit, getMode };
+
 
