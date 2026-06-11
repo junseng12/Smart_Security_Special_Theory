@@ -313,7 +313,7 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
           const fw2 = ethers.parseUnits(String(fareUsdc || '0'), 6);
           const tx2 = await e2.settleAndRelease(eid2, fw2);
           const r2 = await tx2.wait();
-          const bgClaimableAfter = Math.floor(Date.now() / 1000) + 86400;
+          const bgClaimableAfter = Math.floor(Date.now() / 1000) + 240; // [TEST] 4분
           await getPool().query(
             `UPDATE escrow_locks
              SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3,
@@ -385,8 +385,8 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   const refundUsdc = (userDep - parseFloat(fareUsdc || 0)).toFixed(6);
 
   // V3.2: settleAndRelease는 24h 분쟁 기간 후 claimSettlement()로 실제 전송
-  // CLAIM_PERIOD = 24h → claimableAfter = 지금 + 86400s
-  const claimableAfter = Math.floor(Date.now() / 1000) + 86400;
+  // CLAIM_PERIOD = 4min (TEST) → claimableAfter = 지금 + 240s
+  const claimableAfter = Math.floor(Date.now() / 1000) + 240;
 
   await getPool().query(
     `UPDATE escrow_locks
@@ -569,4 +569,5 @@ module.exports = {
   processExpiredHolds,
   toEscrowId,
 };
+
 
