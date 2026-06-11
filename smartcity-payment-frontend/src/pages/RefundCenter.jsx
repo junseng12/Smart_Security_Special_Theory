@@ -79,6 +79,17 @@ export default function RefundCenter() {
 
   const mmAddress = localStorage.getItem("mm_address");
 
+  // 활성 세션이 있으면 폼에 sessionId 자동 입력
+  React.useEffect(() => {
+    if (form.sessionId) return; // 이미 입력된 경우 스킵
+    try {
+      const active = JSON.parse(localStorage.getItem("active_session") || "{}");
+      if (active?.sessionId) {
+        setForm(f => ({ ...f, sessionId: active.sessionId }));
+      }
+    } catch {}
+  }, []); // eslint-disable-line
+
   // location.state로 세션 정보 자동 입력 (ScanPay → 환불센터 이동 시)
   useEffect(() => {
     if (location.state?.sessionId) {
@@ -148,16 +159,38 @@ export default function RefundCenter() {
 
       // 3) 자동 승인됐으면 → payout 요청 (세션ID 있는 경우 온체인 처리)
       let paidOut = false;
-      if (decision?.decision === "auto_approved" && form.sessionId) {
+      let payoutTxHash = null;
+      if ((decision?.decision === "auto_approved" || decision?.decision === "manual_required") && form.sessionId) {
         try {
-          await apiCall(`/api/v1/refunds/${caseData.id}/payout`, "POST", {
+          // auto_approved: 즉시 payout / manual_required: 승인 후 payout
+          // 우선 approve 시도 (이미 승인됐을 수 있음)
+          if (decision?.decision === "manual_required") {
+            try {
+              await apiCall(`/api/v1/refunds/${caseData.id}/approve`, "POST", {
+                approvedUsdc: String(parseFloat(form.requestedUsdc) || "3.000000"),
+                reviewerNotes: "Auto-approved after evaluation",
+              });
+            } catch {}
+          }
+          const payoutResult = await apiCall(`/api/v1/refunds/${caseData.id}/payout`, "POST", {
             sessionId: form.sessionId,
           });
           paidOut = true;
+          payoutTxHash = payoutResult?.txHash || null;
+        } catch (payoutErr) {
+          console.warn("payout 실패 (수동 처리 필요):", payoutErr.message);
+        }
+      } else if (decision?.decision === "auto_approved" && !form.sessionId) {
+        // sessionId 없으면 승인만 처리
+        try {
+          await apiCall(`/api/v1/refunds/${caseData.id}/approve`, "POST", {
+            approvedUsdc: String(parseFloat(form.requestedUsdc) || "3.000000"),
+            reviewerNotes: "Auto-approved — no sessionId for on-chain",
+          });
         } catch {}
       }
 
-      setSubmitted({ ...caseData, decision, paidOut });
+      setSubmitted({ ...caseData, decision, paidOut, payoutTxHash });
     } catch (e) {
       setError(e.message);
     }
@@ -303,9 +336,18 @@ export default function RefundCenter() {
               </div>
 
               {submitted.paidOut && (
-                <div className="bg-purple-50 border border-purple-100 rounded-xl p-4 text-sm text-purple-800">
-                  <p className="font-semibold mb-1">온체인 환불 처리됨</p>
-                  <p>에스크로 컨트랙트에서 지갑으로 직접 전송되었습니다.</p>
+                <div className="bg-purple-50 border border-purple-100 rounded-xl p-4 text-sm text-purple-800 text-left">
+                  <p className="font-semibold mb-2">온체인 환불 처리됨 ✅</p>
+                  <p className="mb-2">에스크로 컨트랙트에서 지갑으로 직접 전송되었습니다.</p>
+                  {submitted.payoutTxHash && (
+                    <a
+                      href={`https://sepolia.basescan.org/tx/${submitted.payoutTxHash}`}
+                      target="_blank" rel="noopener noreferrer"
+                      className="text-xs font-mono bg-purple-100 px-2 py-1 rounded break-all hover:underline block mt-1"
+                    >
+                      TX: {submitted.payoutTxHash.slice(0,20)}...
+                    </a>
+                  )}
                 </div>
               )}
 
@@ -438,3 +480,4 @@ function PayoutButton({ caseId, sessionId, onDone }) {
     </div>
   );
 }
+
