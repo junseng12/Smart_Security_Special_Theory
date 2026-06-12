@@ -17,7 +17,7 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
-const RATE_PER_MIN = 0.01; // USDC/분 — 백엔드와 동일
+const RATE_PER_MIN = 0.1;  // USDC/분 (0.1 USDC per minute)
 
 /** startedAt(ms) 기반으로 예상 누적 요금 계산 (화면 복귀 시 동기화용) */
 function calcChargedFromStart(startedAtMs, depositUsdc) {
@@ -407,14 +407,14 @@ export default function ScanPay() {
         addLog("② MetaMask: USDC 승인 서명 요청...", "info");
         await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
         addLog("✅ USDC 승인 완료", "success");
-        saveProc({ ...proc, stage: "approved", startedAt: proc.startedAt || Date.now() });
+        saveProc({ ...proc, stage: "approved", startedAt: null });
       }
 
       if (stage !== "deposited") {
         addLog("③ MetaMask: 에스크로 예치 서명 요청...", "info");
         const depositTxHash = await escrowUserDeposit(addr, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline);
         addLog(`✅ TX: ${depositTxHash.slice(0, 16)}...`, "success");
-        saveProc({ ...proc, stage: "deposited", depositTxHash, startedAt: proc.startedAt || Date.now() });
+        saveProc({ ...proc, stage: "deposited", depositTxHash, startedAt: null });
         proc.depositTxHash = depositTxHash;
       }
 
@@ -427,7 +427,7 @@ export default function ScanPay() {
       });
       addLog("✅ 예치 완료! 서비스 시작", "success");
 
-      const resumeStartedAt = proc.startedAt || Date.now();
+      const resumeStartedAt = Date.now(); // deposit 완료 시점이 실제 서비스 시작
       const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash: proc.depositTxHash,
         startedAt: resumeStartedAt, totalCharged: 0 };
       clearProc();
@@ -464,18 +464,18 @@ export default function ScanPay() {
       addLog(`✅ 세션: ${sessionId.slice(0, 8)}...`, "success");
 
       // ★ 세션 생성 직후 processing 상태 저장 — 이후 MetaMask 서명 시 페이지 리마운트 대비
-      const paymentStartedAt = Date.now();
-      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "session_created", startedAt: paymentStartedAt });
+      //   startedAt은 deposit 완료(실제 서비스 시작) 후 기록하므로 여기선 null
+      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "session_created", startedAt: null });
 
       addLog("② MetaMask: USDC 승인 서명 요청...", "info");
       await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
       addLog("✅ USDC 승인 완료", "success");
-      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "approved", startedAt: paymentStartedAt });
+      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "approved", startedAt: null });
 
       addLog("③ MetaMask: 에스크로 예치 서명 요청...", "info");
       const depositTxHash = await escrowUserDeposit(addr, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline);
       addLog(`✅ TX: ${depositTxHash.slice(0, 16)}...`, "success");
-      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "deposited", depositTxHash, startedAt: paymentStartedAt });
+      saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "deposited", depositTxHash, startedAt: null });
 
       addLog("④ 예치 기록 중...", "info");
       await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
@@ -485,8 +485,9 @@ export default function ScanPay() {
         holdDeadline, depositTxHash,
       });
       addLog("✅ 예치 완료! 서비스 시작", "success");
+      const serviceStartedAt = Date.now(); // ★ 실제 서비스 시작 시점 (MetaMask 서명 시간 제외)
 
-      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash, startedAt: paymentStartedAt, totalCharged: 0 };
+      const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash, startedAt: serviceStartedAt, totalCharged: 0 };
       clearProc();
       saveSession(sd);
       setSessionData(sd);
@@ -500,30 +501,22 @@ export default function ScanPay() {
 
   // ── Charge 자동 청구 ──────────────────────────────────────────────────────────
   // sessionDataRef 사용 → 의존성 배열 고정 → interval이 재생성되지 않음
-  const doCharge = useCallback(async () => {
+  const doCharge = useCallback(() => {
     const sd = sessionDataRef.current;
     if (!sd) return;
     lastChargeRef.current = Date.now();
-    try {
-      const res = await apiCall(`/api/v1/sessions/${sd.sessionId}/charge`, "POST", {
-        channelId:   sd.channelId,
-        userAddress: localStorage.getItem("mm_address"),
-        serviceType: sd.svc.serviceType,
-        usage: { durationMinutes: 1 },
-      });
-      const fare = parseFloat(res.fare?.fareUsdc || "0");
-      setTotalCharged(c => {
-        const next = c + fare;
-        // localStorage 동기화 — 화면 복귀 시 복원용
-        try {
-          const s = JSON.parse(localStorage.getItem("active_session") || "{}");
-          s.totalCharged = next;
-          localStorage.setItem("active_session", JSON.stringify(s));
-        } catch {}
-        return next;
-      });
-      setFareInfo(res.fare);
-    } catch {}
+    // 프론트엔드 독립 계산 — 백엔드 API 호출 없이 RATE_PER_MIN씩 직접 누적
+    const depositUsdc = parseFloat(sd.svc?.depositUsdc || 3.0);
+    setTotalCharged(c => {
+      const next = Math.min(parseFloat((c + RATE_PER_MIN).toFixed(6)), depositUsdc);
+      // localStorage 동기화 — 화면 복귀 시 복원용
+      try {
+        const s = JSON.parse(localStorage.getItem("active_session") || "{}");
+        s.totalCharged = next;
+        localStorage.setItem("active_session", JSON.stringify(s));
+      } catch {}
+      return next;
+    });
   }, []); // 의존성 없음 — sessionDataRef로 최신값 참조
 
   useEffect(() => {
