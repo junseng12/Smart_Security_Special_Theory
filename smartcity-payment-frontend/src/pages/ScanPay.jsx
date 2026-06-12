@@ -419,15 +419,15 @@ export default function ScanPay() {
       }
 
       addLog("④ 예치 기록 중...", "info");
+      const resumeStartedAt = Date.now(); // deposit 완료 시점이 실제 서비스 시작
       await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
         channelId, userAddress: addr,
         operatorAddress: OPERATOR_ADDRESS,
         depositUsdc: String(svc.depositUsdc),
         holdDeadline, depositTxHash: proc.depositTxHash,
+        serviceStartedAt: resumeStartedAt,
       });
       addLog("✅ 예치 완료! 서비스 시작", "success");
-
-      const resumeStartedAt = Date.now(); // deposit 완료 시점이 실제 서비스 시작
       const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash: proc.depositTxHash,
         startedAt: resumeStartedAt, totalCharged: 0 };
       clearProc();
@@ -478,14 +478,15 @@ export default function ScanPay() {
       saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "deposited", depositTxHash, startedAt: null });
 
       addLog("④ 예치 기록 중...", "info");
+      const serviceStartedAt = Date.now(); // ★ 실제 서비스 시작 시점 (MetaMask 서명 시간 제외)
       await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
         channelId, userAddress: addr,
         operatorAddress: OPERATOR_ADDRESS,
         depositUsdc: String(svc.depositUsdc),
         holdDeadline, depositTxHash,
+        serviceStartedAt, // 백엔드 DB started_at 동기화
       });
       addLog("✅ 예치 완료! 서비스 시작", "success");
-      const serviceStartedAt = Date.now(); // ★ 실제 서비스 시작 시점 (MetaMask 서명 시간 제외)
 
       const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash, startedAt: serviceStartedAt, totalCharged: 0 };
       clearProc();
