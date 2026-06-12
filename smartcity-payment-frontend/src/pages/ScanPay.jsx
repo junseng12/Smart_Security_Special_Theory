@@ -19,14 +19,6 @@ const SERVICE_META = {
 
 const RATE_PER_MIN = 0.01; // USDC/분 — 화면 표시용 (백엔드와 동일)
 
-/** startedAt(ms) 기반으로 예상 누적 요금 계산 (화면 복귀 시 동기화용) */
-function calcChargedFromStart(startedAtMs, depositUsdc) {
-  if (!startedAtMs) return 0;
-  const elapsedMin = (Date.now() - startedAtMs) / 60_000;
-  const charged = Math.min(elapsedMin * RATE_PER_MIN, depositUsdc);
-  return Math.max(0, parseFloat(charged.toFixed(6)));
-}
-
 const SERVICE_TYPES = [
   { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
   { id: "ev_charging", label: "EV 충전",     emoji: "⚡", depositUsdc: 5.0, deviceId: "EV-001"  },
@@ -133,8 +125,8 @@ export default function ScanPay() {
   const holdTimerRef = useRef(null);
   const jsQrRef         = useRef(null);  // jsQR 라이브러리 동적 로드
   const scannedRef      = useRef(false); // QR 중복 감지 방지 플래그
-  const sessionDataRef  = useRef(null);  // doCharge 클로저용 최신 sessionData
-  const lastChargeRef   = useRef(0);     // 마지막 charge 실행 시각 (unmount 후 복귀 대응)
+  const sessionDataRef  = useRef(null);  // liveCharged 계산용 최신 sessionData
+  // lastChargeRef 제거 — doCharge 방식 삭제로 불필요
   const resumePaymentRef = useRef(null);  // 항상 최신 resumePayment 참조
 
   // 로컬 세션 복구 (active + processing 단계 모두)
@@ -144,21 +136,8 @@ export default function ScanPay() {
     if (saved?.sessionId && saved?.status === "active") {
       setSessionData(saved);
       setSelectedSvc(saved.svc);
-      // 화면 복귀 시 totalCharged: localStorage 저장값 vs startedAt 기반 재계산 중 큰 값
-      {
-        const storedCharged = parseFloat(saved.totalCharged) || 0;
-        const calcCharged   = saved.startedAt ? calcChargedFromStart(saved.startedAt, saved.svc?.depositUsdc || 3.0) : 0;
-        const resolvedCharged = Math.max(storedCharged, calcCharged);
-        setTotalCharged(resolvedCharged);
-        // localStorage도 업데이트
-        if (resolvedCharged > storedCharged) {
-          try {
-            const s = JSON.parse(localStorage.getItem("active_session") || "{}");
-            s.totalCharged = resolvedCharged;
-            localStorage.setItem("active_session", JSON.stringify(s));
-          } catch {}
-        }
-      }
+      // totalCharged 초기화 — 화면 표시는 liveCharged(elapsed 기반 연속계산)가 담당
+      setTotalCharged(0);
       setStep("active");
       return;
     }
@@ -502,37 +481,18 @@ export default function ScanPay() {
 
   // ── Charge 자동 청구 ──────────────────────────────────────────────────────────
   // sessionDataRef 사용 → 의존성 배열 고정 → interval이 재생성되지 않음
-  const doCharge = useCallback(() => {
+  // totalCharged — elapsed(초) 기반 연속 계산
+  // 1초마다 elapsed가 갱신되면 자동으로 재계산됨 (useEffect 불필요)
+  // 화면 표시값 = 백엔드 최종 요금과 동일 공식 → 일치 보장
+  const liveCharged = (() => {
     const sd = sessionDataRef.current;
-    if (!sd) return;
-    lastChargeRef.current = Date.now();
-    // 프론트엔드 독립 계산 — 백엔드 API 호출 없이 RATE_PER_MIN씩 직접 누적
+    if (!sd || elapsed === 0) return totalCharged;
     const depositUsdc = parseFloat(sd.svc?.depositUsdc || 3.0);
-    setTotalCharged(c => {
-      const next = Math.min(parseFloat((c + RATE_PER_MIN).toFixed(6)), depositUsdc);
-      // localStorage 동기화 — 화면 복귀 시 복원용
-      try {
-        const s = JSON.parse(localStorage.getItem("active_session") || "{}");
-        s.totalCharged = next;
-        localStorage.setItem("active_session", JSON.stringify(s));
-      } catch {}
-      return next;
-    });
-  }, []); // 의존성 없음 — sessionDataRef로 최신값 참조
-
-  useEffect(() => {
-    if (step !== "active") return;
-
-    // 화면 복귀 시: 마지막 charge 이후 1분 이상 지났으면 즉시 1회 실행
-    const elapsed60 = lastChargeRef.current
-      ? Date.now() - lastChargeRef.current >= 60_000
-      : false;
-    if (elapsed60) doCharge();
-
-    // 이후 60초마다 정기 실행
-    const id = setInterval(doCharge, 60_000);
-    return () => clearInterval(id);
-  }, [step, doCharge]);
+    return Math.min(
+      Math.round((elapsed / 60) * RATE_PER_MIN * 1_000_000) / 1_000_000,
+      depositUsdc
+    );
+  })();
 
   // ── 세션 종료 ─────────────────────────────────────────────────────────────────
   const endSession = async () => {
@@ -545,7 +505,7 @@ export default function ScanPay() {
       const res = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
         channelId:    sessionData.channelId,
         userAddress:  mmAddress || localStorage.getItem("mm_address"),
-        userFinalSig: String(totalCharged.toFixed(6)),
+        userFinalSig: String(liveCharged.toFixed(6)),
         // fareUsdc는 백엔드가 started_at 기준으로 직접 계산 — 프론트 값 전달 안 함
       });
       addLog(`✅ 요금: ${res.fareUsdc} USDC`, "success");
@@ -569,7 +529,6 @@ export default function ScanPay() {
     clearProc();
     setSessionData(null);
     sessionDataRef.current = null;
-    lastChargeRef.current = 0;
     setSelectedSvc(null);
     setStep("home");
     setElapsed(0);
@@ -759,7 +718,7 @@ export default function ScanPay() {
                   <div className="text-xs text-blue-200 mt-0.5">경과 시간</div>
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
-                  <div className="text-xl font-bold">{totalCharged.toFixed(4)}</div>
+                  <div className="text-xl font-bold">{liveCharged.toFixed(4)}</div>
                   <div className="text-xs text-blue-200 mt-0.5">USDC 청구</div>
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
@@ -781,7 +740,7 @@ export default function ScanPay() {
               <div className="flex justify-between text-gray-500">
                 <span>예상 환불</span>
                 <span className="font-bold text-green-600">
-                  {(selectedSvc.depositUsdc - totalCharged).toFixed(4)} USDC
+                  {(selectedSvc.depositUsdc - liveCharged).toFixed(4)} USDC
                 </span>
               </div>
             </div>
