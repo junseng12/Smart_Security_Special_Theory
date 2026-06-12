@@ -7,7 +7,6 @@ import { AuthProvider } from '@/lib/AuthContext';
 import Dashboard from './pages/Dashboard';
 import ScanPay from './pages/ScanPay';
 import Deposit from './pages/Deposit';
-import Send from './pages/Send';
 import TransactionHistory from './pages/TransactionHistory';
 import Profile from './pages/Profile';
 import RefundCenter from './pages/RefundCenter';
@@ -21,7 +20,6 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/scan" element={<ScanPay />} />
             <Route path="/deposit" element={<Deposit />} />
-            <Route path="/send" element={<Send />} />
             <Route path="/history" element={<TransactionHistory />} />
             <Route path="/profile" element={<Profile />} />
             <Route path="/refund" element={<RefundCenter />} />
@@ -35,3 +33,4 @@ function App() {
 }
 
 export default App;
+
