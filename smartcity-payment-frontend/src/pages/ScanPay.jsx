@@ -128,6 +128,7 @@ export default function ScanPay() {
   const sessionDataRef  = useRef(null);  // liveCharged 계산용 최신 sessionData
   // lastChargeRef 제거 — doCharge 방식 삭제로 불필요
   const resumePaymentRef = useRef(null);  // 항상 최신 resumePayment 참조
+const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
   // 로컬 세션 복구 (active + processing 단계 모두)
   useEffect(() => {
@@ -170,11 +171,15 @@ export default function ScanPay() {
       } catch { return null; }
     };
 
-    // home 단계 → 초기화 후 타이머 중지
+    // home/ended 단계 → 모든 타이머 중지
     if (step === "home" || step === "ended") {
       clearInterval(timerRef.current);
+      clearInterval(chargeIntervalRef.current);
       setElapsed(0);
-      return () => clearInterval(timerRef.current);
+      return () => {
+        clearInterval(timerRef.current);
+        clearInterval(chargeIntervalRef.current);
+      };
     }
 
     // active / processing / ending / camera / manual → startedAt 있으면 절대 시간으로 카운팅
@@ -187,7 +192,36 @@ export default function ScanPay() {
     };
     tick();
     timerRef.current = setInterval(tick, 1000);
-    return () => clearInterval(timerRef.current);
+
+    // ── ProposeUsageUpdate: step=active일 때만 60초마다 오프체인 서명 누적 ──
+    if (step === "active") {
+      chargeIntervalRef.current = setInterval(async () => {
+        const sd = sessionDataRef.current;
+        if (!sd?.sessionId || !sd?.channelId) return;
+        try {
+          await apiCall(`/api/v1/sessions/${sd.sessionId}/charge`, "POST", {
+            channelId:   sd.channelId,
+            userAddress: localStorage.getItem("mm_address") || "",
+            serviceType: sd.svc?.serviceType || "bicycle",
+            usage: { durationMinutes: 1 },
+          });
+          // 성공 시 localStorage charged_usdc 누적 (화면 표시는 liveCharged가 담당)
+          try {
+            const s = JSON.parse(localStorage.getItem("active_session") || "{}");
+            s.chargedNonce = (s.chargedNonce || 0) + 1;
+            localStorage.setItem("active_session", JSON.stringify(s));
+          } catch {}
+        } catch (e) {
+          // 오프체인 서명 실패는 치명적이지 않음 — fareEngine 폴백으로 정산 가능
+          console.warn("[ProposeUsageUpdate] 오프체인 서명 실패:", e.message);
+        }
+      }, 60_000); // 60초마다
+    }
+
+    return () => {
+      clearInterval(timerRef.current);
+      clearInterval(chargeIntervalRef.current);
+    };
   }, [step]);
 
   // holdDeadline 카운트다운 + 만료 시 자동 종료
@@ -501,7 +535,10 @@ export default function ScanPay() {
     setStep("ending");
     setLog([]);
     try {
-      addLog("① 세션 종료 요청...", "info");
+      // 오프체인 누적 nonce 확인 (로그용)
+      const activeSession = JSON.parse(localStorage.getItem("active_session") || "{}");
+      const nonces = activeSession.chargedNonce || 0;
+      addLog(`① 세션 종료 요청... (오프체인 서명 누적: ${nonces}회)`, "info");
       const res = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
         channelId:    sessionData.channelId,
         userAddress:  mmAddress || localStorage.getItem("mm_address"),
@@ -719,6 +756,15 @@ export default function ScanPay() {
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
                   <div className="text-xl font-bold">{liveCharged.toFixed(4)}</div>
+              {/* 오프체인 서명 누적 횟수 표시 */}
+              {(() => {
+                try {
+                  const n = JSON.parse(localStorage.getItem("active_session") || "{}").chargedNonce || 0;
+                  return n > 0 ? (
+                    <div className="text-xs text-green-600 mt-1">🔏 오프체인 서명 {n}회 누적</div>
+                  ) : null;
+                } catch { return null; }
+              })()}
                   <div className="text-xs text-blue-200 mt-0.5">USDC 청구</div>
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
