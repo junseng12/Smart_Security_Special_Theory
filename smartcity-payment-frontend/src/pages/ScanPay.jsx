@@ -857,7 +857,7 @@ export default function ScanPay() {
               onClick={() => navigate('/refund', {
                 state: {
                   sessionId: sessionData?.sessionId,
-                  reason: 'sensor_failure',
+                  reason: 'device_malfunction',
                 }
               })}
               className="w-full bg-orange-50 border border-orange-200 text-orange-700 font-medium py-3 rounded-2xl text-sm">
