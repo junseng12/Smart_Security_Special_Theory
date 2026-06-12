@@ -108,17 +108,43 @@ async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usa
  *  4) DB 정산 기록
  */
 async function endSessionAndSettle({ sessionId, channelId, userAddress, userFinalSig = '', fareUsdc, adjustment }) {
-  // ── 1. chargedUsdc 확정 ─────────────────────────────────────────────────────
-  let chargedUsdc = fareUsdc || '0';
+  // ── 1. chargedUsdc 확정 — DB started_at 기준 백엔드 직접 계산 ──────────────
+  let chargedUsdc = '0';
   try {
     const db = require('./db');
-    const result = await db.getPool().query(
-      'SELECT charged_usdc FROM sessions WHERE id = $1', [sessionId]
+    const row = await db.getPool().query(
+      `SELECT started_at, service_type, deposit_usdc
+         FROM sessions WHERE id = $1`, [sessionId]
     );
-    if (result.rows[0]?.charged_usdc) {
-      chargedUsdc = String(result.rows[0].charged_usdc);
+    const sess = row.rows[0];
+    if (sess?.started_at && sess?.service_type) {
+      const startMs     = new Date(sess.started_at).getTime();
+      const nowMs       = Date.now();
+      const durationMin = (nowMs - startMs) / 60_000;
+      const depositUsdc = parseFloat(sess.deposit_usdc || 3.0);
+
+      const fareResult  = await fareEngine.calculateFare({
+        sessionId,
+        serviceType: sess.service_type,
+        usage: { durationMinutes: durationMin },
+      });
+      // cap: deposit 초과 불가
+      const raw = parseFloat(fareResult.fareUsdc);
+      chargedUsdc = String(Math.min(raw, depositUsdc).toFixed(6));
+      logger.info('[Orchestrator] fare recalculated from started_at', {
+        sessionId, durationMin: durationMin.toFixed(2),
+        fareResult: fareResult.fareUsdc, chargedUsdc,
+      });
+    } else {
+      // started_at 없는 경우 — 프론트 전달값 폴백
+      chargedUsdc = fareUsdc || '0';
+      logger.warn('[Orchestrator] started_at not found, using fareUsdc from client', { sessionId, fareUsdc });
     }
-  } catch { /* DB 조회 실패 시 fareUsdc 사용 */ }
+  } catch (e) {
+    // DB 오류 시 클라이언트 값 폴백
+    chargedUsdc = fareUsdc || '0';
+    logger.warn('[Orchestrator] fare recalc failed, fallback to fareUsdc', { sessionId, error: e.message });
+  }
 
   await sessionMgr.endSession(sessionId).catch(() => {});
   await sessionMgr.markSettling(sessionId).catch(() => {});
@@ -201,5 +227,6 @@ module.exports = {
   disputeChannel,
   getChannelStatus,
 };
+
 
 
