@@ -17,7 +17,7 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
-const RATE_PER_MIN = 0.1;  // USDC/분 (0.1 USDC per minute)
+const RATE_PER_MIN = 0.01; // USDC/분 — 화면 표시용 (백엔드와 동일)
 
 /** startedAt(ms) 기반으로 예상 누적 요금 계산 (화면 복귀 시 동기화용) */
 function calcChargedFromStart(startedAtMs, depositUsdc) {
@@ -545,7 +545,7 @@ export default function ScanPay() {
         channelId:    sessionData.channelId,
         userAddress:  mmAddress || localStorage.getItem("mm_address"),
         userFinalSig: String(totalCharged.toFixed(6)),
-        fareUsdc:     String(totalCharged.toFixed(6)),
+        // fareUsdc는 백엔드가 started_at 기준으로 직접 계산 — 프론트 값 전달 안 함
       });
       addLog(`✅ 요금: ${res.fareUsdc} USDC`, "success");
       addLog(`✅ 환불: ${res.refundUsdc} USDC`, "success");
