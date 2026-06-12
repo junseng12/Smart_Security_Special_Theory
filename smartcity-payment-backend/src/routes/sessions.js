@@ -129,6 +129,16 @@ const endSchema = Joi.object({
 
 router.post('/:id/end', validate(endSchema), async (req, res, next) => {
   try {
+    // ── 세션 존재 여부 사전 검증 ──────────────────────────────────────────────
+    const _db = require('../services/db');
+    const _sess = await _db.getPool().query(
+      `SELECT id, status FROM sessions WHERE id = $1`, [req.params.id]
+    ).catch(() => ({ rows: [] }));
+    if (!_sess.rows[0]) {
+      return res.status(404).json({ ok: false, error: `Session not found: ${req.params.id}` });
+    }
+    // ──────────────────────────────────────────────────────────────────────────
+
     const result = await orchestrator.endSessionAndSettle({
       sessionId:    req.params.id,
       channelId:    req.body.channelId,
