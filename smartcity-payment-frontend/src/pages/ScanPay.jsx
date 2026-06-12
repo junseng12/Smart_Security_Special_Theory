@@ -515,15 +515,16 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
   // ── Charge 자동 청구 ──────────────────────────────────────────────────────────
   // sessionDataRef 사용 → 의존성 배열 고정 → interval이 재생성되지 않음
-  // totalCharged — elapsed(초) 기반 연속 계산
-  // 1초마다 elapsed가 갱신되면 자동으로 재계산됨 (useEffect 불필요)
-  // 화면 표시값 = 백엔드 최종 요금과 동일 공식 → 일치 보장
+  // liveCharged — 분 단위 스텝 계산
+  // ProposeUsageUpdate(60초 1회)와 화면 표시를 일치시킴
+  // elapsed가 60초 넘을 때마다 0.01 USDC씩 계단식으로 올라감
+  const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분만 카운트
   const liveCharged = (() => {
     const sd = sessionDataRef.current;
-    if (!sd || elapsed === 0) return totalCharged;
+    if (!sd) return totalCharged;
     const depositUsdc = parseFloat(sd.svc?.depositUsdc || 3.0);
     return Math.min(
-      Math.round((elapsed / 60) * RATE_PER_MIN * 1_000_000) / 1_000_000,
+      Math.round(elapsedMinutes * RATE_PER_MIN * 1_000_000) / 1_000_000,
       depositUsdc
     );
   })();
@@ -574,6 +575,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     setEnding(false);
   };
 
+  // 타이머: MM:SS 형식 유지 (경과 시간 정밀 표시)
   const formatTime = (s) => `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`;
 
   // ══════════════════════════════════════════════════════════════════════════════
@@ -755,17 +757,15 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
                   <div className="text-xs text-blue-200 mt-0.5">경과 시간</div>
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
-                  <div className="text-xl font-bold">{liveCharged.toFixed(4)}</div>
-              {/* 오프체인 서명 누적 횟수 표시 */}
-              {(() => {
-                try {
-                  const n = JSON.parse(localStorage.getItem("active_session") || "{}").chargedNonce || 0;
-                  return n > 0 ? (
-                    <div className="text-xs text-green-600 mt-1">🔏 오프체인 서명 {n}회 누적</div>
-                  ) : null;
-                } catch { return null; }
-              })()}
-                  <div className="text-xs text-blue-200 mt-0.5">USDC 청구</div>
+                  {/* 분 단위로 올라가는 요금 — ProposeUsageUpdate 주기와 일치 */}
+                  <div className="text-xl font-bold">{liveCharged.toFixed(2)}</div>
+                  <div className="text-xs text-blue-200 mt-0.5">
+                    USDC ({elapsedMinutes}분)
+                  </div>
+                  {/* 오프체인 서명 횟수 — 요금 스텝과 동기화 표시 */}
+                  {elapsedMinutes > 0 && (
+                    <div className="text-xs text-green-300 mt-1">🔏 서명 {elapsedMinutes}회</div>
+                  )}
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
                   <div className="text-xl font-bold">{holdCountdown !== null ? (holdCountdown > 0 ? `${holdCountdown}s` : "✅") : "--"}</div>
@@ -786,7 +786,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
               <div className="flex justify-between text-gray-500">
                 <span>예상 환불</span>
                 <span className="font-bold text-green-600">
-                  {(selectedSvc.depositUsdc - liveCharged).toFixed(4)} USDC
+                  {(selectedSvc.depositUsdc - liveCharged).toFixed(2)} USDC
                 </span>
               </div>
             </div>
