@@ -29,7 +29,6 @@ async function apiCall(path, method = "GET", body = null) {
 // ── 환불 사유 목록 ────────────────────────────────────────────────────────────
 const REASONS = [
   { value: "unlock_failure",    label: "🔒 잠금 해제 실패",  hint: "자전거/기기가 잠금 해제되지 않음 (전액 환불)" },
-  { value: "sensor_failure",    label: "📡 센서 장애",       hint: "이용 중 센서 오류로 과다 청구" },
   { value: "double_charge",     label: "🔁 중복 결제",       hint: "동일 세션에 요금이 두 번 청구됨" },
   { value: "service_outage",    label: "🔴 서비스 중단",     hint: "서비스 중단으로 이용 불가 (전액 환불)" },
   { value: "wrong_amount",      label: "💸 금액 오류",       hint: "표시 금액과 실제 청구 금액 불일치" },
@@ -67,7 +66,7 @@ export default function RefundCenter() {
 
   // 환불 신청 폼
   const [form, setForm] = useState({
-    reason: "sensor_failure",
+    reason: "device_malfunction",
     sessionId: "",
     note: "",
   });
@@ -344,7 +343,7 @@ export default function RefundCenter() {
               )}
 
               <div className="flex gap-3">
-                <Button variant="outline" onClick={() => { setSubmitted(null); setForm({ reason:"sensor_failure", sessionId:"", note:"" }); }}
+                <Button variant="outline" onClick={() => { setSubmitted(null); setForm({ reason:"device_malfunction", sessionId:"", note:"" }); }}
                   className="flex-1 rounded-xl">새 신청</Button>
                 <Button onClick={() => setTab("history")} className="flex-1 rounded-xl">
                   내 케이스 보기
@@ -462,5 +461,6 @@ function PayoutButton({ caseId, sessionId, onDone }) {
     </div>
   );
 }
+
 
 
