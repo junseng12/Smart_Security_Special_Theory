@@ -60,20 +60,35 @@ async function main() {
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       CREATE TABLE IF NOT EXISTS channel_states (
-        id SERIAL PRIMARY KEY, channel_id TEXT NOT NULL,
-        nonce BIGINT NOT NULL, balance_user NUMERIC NOT NULL,
-        balance_operator NUMERIC NOT NULL, user_sig TEXT, operator_sig TEXT,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        id SERIAL PRIMARY KEY,
+        channel_id  TEXT    NOT NULL,
+        session_id  TEXT,
+        nonce       BIGINT  NOT NULL,
+        state_hash  TEXT,
+        fare_usdc   NUMERIC,
+        balance_user     NUMERIC,
+        balance_operator NUMERIC,
+        user_sig    TEXT,
+        operator_sig TEXT,
+        recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (channel_id, nonce)
       );
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY, user_address TEXT NOT NULL,
         service_type TEXT NOT NULL, channel_id TEXT,
         status TEXT NOT NULL DEFAULT 'Active', deposit_usdc NUMERIC,
+        charged_usdc NUMERIC DEFAULT 0,
         fare_policy_id TEXT, started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         ended_at TIMESTAMPTZ, settled_at TIMESTAMPTZ,
         meta JSONB DEFAULT '{}', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+      -- charged_usdc 컬럼이 기존 테이블에 없을 경우 추가
+      DO $$ BEGIN
+        ALTER TABLE sessions ADD COLUMN IF NOT EXISTS charged_usdc NUMERIC DEFAULT 0;
+      EXCEPTION WHEN OTHERS THEN NULL;
+      END $$;
       CREATE TABLE IF NOT EXISTS fare_policies (
         id TEXT PRIMARY KEY, service_type TEXT NOT NULL, version TEXT NOT NULL,
         policy JSONB NOT NULL, is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -113,9 +128,11 @@ async function main() {
         id SERIAL PRIMARY KEY, session_id TEXT NOT NULL UNIQUE,
         channel_id TEXT, case_id TEXT, user_address TEXT NOT NULL,
         merchant_address TEXT NOT NULL, amount_usdc NUMERIC NOT NULL,
-        lock_tx TEXT, release_tx TEXT, outcome TEXT DEFAULT 'pending',
+        user_deposit NUMERIC, fare_amount NUMERIC, state TEXT DEFAULT 'pending',
+        lock_tx TEXT, settle_tx TEXT, release_tx TEXT,
+        hold_deadline BIGINT, outcome TEXT DEFAULT 'pending',
         locked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        release_after TIMESTAMPTZ NOT NULL, released_at TIMESTAMPTZ
+        release_after TIMESTAMPTZ NOT NULL DEFAULT NOW(), released_at TIMESTAMPTZ
       );
       CREATE TABLE IF NOT EXISTS refund_transactions (
         id SERIAL PRIMARY KEY, channel_id TEXT NOT NULL,
