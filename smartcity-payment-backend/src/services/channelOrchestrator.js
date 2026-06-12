@@ -9,6 +9,7 @@ const sessionMgr  = require('./sessionManager');
 const perun       = require('./perunClient');
 const settleMgr   = require('./settlementManager');
 const escrowSvc   = require('./escrowPayoutService');
+const fareEngine  = require('./fareEngine');
 
 /**
  * escrowId = keccak256(utf8(sessionId))
