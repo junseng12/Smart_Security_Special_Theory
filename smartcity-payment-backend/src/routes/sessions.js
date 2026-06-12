@@ -151,7 +151,7 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
 // ── POST /sessions/:id/deposit — 프론트 buyerDeposit 완료 후 DB 기록 ────────────
 router.post('/:id/deposit', async (req, res, next) => {
   try {
-    const { channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash } = req.body;
+    const { channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash, serviceStartedAt } = req.body;
 
     // 1) DB에 사용자 예치 기록
     const result = await escrowSvc.recordUserDeposit({
@@ -163,6 +163,15 @@ router.post('/:id/deposit', async (req, res, next) => {
       holdDeadline,
       depositTxHash,
     });
+
+    // 1-b) 실제 서비스 시작 시점(deposit 완료 시각) → DB started_at 업데이트
+    if (serviceStartedAt) {
+      const db = require('../services/db');
+      await db.getPool().query(
+        `UPDATE sessions SET started_at = $1 WHERE id = $2`,
+        [new Date(serviceStartedAt).toISOString(), req.params.id]
+      ).catch(() => {});
+    }
 
     // 2) operator 보증금 자동 예치
     // ★ await로 처리: Railway는 비동기 .then이 요청 완료 후 실행 보장 안 됨
@@ -413,4 +422,5 @@ router.get('/:id/stream', async (req, res) => {
 });
 
 module.exports = router;
+
 
