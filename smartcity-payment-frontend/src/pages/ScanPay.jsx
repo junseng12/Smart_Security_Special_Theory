@@ -775,9 +775,19 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
             </div>
 
             <div className="bg-white rounded-2xl p-4 shadow-sm text-sm space-y-2">
-              <div className="flex justify-between text-gray-500">
+              <div className="flex justify-between items-center text-gray-500">
                 <span>세션 ID</span>
-                <span className="font-mono text-gray-800 text-xs">{sessionData?.sessionId?.slice(0,14)}...</span>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(sessionData?.sessionId || '');
+                    alert('세션 ID가 복사되었습니다!');
+                  }}
+                  className="flex items-center gap-1 text-xs font-mono text-gray-700 hover:text-blue-600 active:text-blue-800 transition-colors"
+                  title="클릭하여 복사"
+                >
+                  <span>{sessionData?.sessionId?.slice(0,14)}...</span>
+                  <span className="text-gray-400 hover:text-blue-500">📋</span>
+                </button>
               </div>
               <div className="flex justify-between text-gray-500">
                 <span>보증금</span>
@@ -825,7 +835,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
                 </svg>
               </div>
               <h2 className="text-xl font-bold text-gray-900 mb-1">결제 완료 ✅</h2>
-              <p className="text-xs text-gray-400">환불은 holdDeadline 이후 지갑으로 자동 전송됩니다</p>
+              <p className="text-xs text-gray-400">환불 신청 시 세션 ID를 복사해 두세요 👆</p>
             </div>
 
             <div className="bg-white rounded-2xl p-5 shadow-sm space-y-3 text-sm">
@@ -837,9 +847,24 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
                 <span className="text-gray-500">환불 예정</span>
                 <span className="font-bold text-green-600">{sessionData.result.refundUsdc} USDC</span>
               </div>
-              <div className="flex justify-between py-2">
+              <div className="flex justify-between py-2 border-b border-gray-50">
                 <span className="text-gray-500">이용 시간</span>
                 <span className="font-mono text-gray-900">{formatTime(elapsed)}</span>
+              </div>
+              {/* 세션 ID — 환불 신청 시 필요 */}
+              <div className="flex justify-between items-center py-2">
+                <span className="text-gray-500">세션 ID</span>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(sessionData?.sessionId || '');
+                    alert('세션 ID가 복사되었습니다!\n환불 신청 시 사용하세요.');
+                  }}
+                  className="flex items-center gap-1.5 bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-300 text-gray-700 hover:text-blue-700 rounded-lg px-2.5 py-1 transition-colors"
+                  title="클릭하여 복사"
+                >
+                  <span className="font-mono text-xs">{sessionData?.sessionId?.slice(0,18)}…</span>
+                  <span className="text-xs">📋</span>
+                </button>
               </div>
             </div>
 
