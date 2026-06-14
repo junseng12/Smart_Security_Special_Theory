@@ -89,7 +89,7 @@ async function processPendingSettles() {
        FROM escrow_locks el
        WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
          AND el.hold_deadline IS NOT NULL
-         AND el.hold_deadline < NOW()
+         AND el.hold_deadline < EXTRACT(EPOCH FROM NOW())::BIGINT
          AND COALESCE(el.retry_count, 0) < 3
        LIMIT 10`
     );
