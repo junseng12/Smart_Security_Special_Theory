@@ -22,7 +22,7 @@ function computeEscrowId(sessionId) {
 
 async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsdc, userWireAddr = '' }) {
   const dbSession = await sessionMgr.startSession({ userAddress, serviceType, depositUsdc });
-  const holdSeconds = parseInt(process.env.PERUN_HOLD_SECONDS || '120');
+  const holdSeconds = parseInt(process.env.PERUN_HOLD_SECONDS || '240'); // [TEST] 4분 — 운영: 86400(24h)
 
   // ★ escrowId는 백엔드에서 직접 계산 (프론트/백엔드 일치 보장)
   const escrowId = computeEscrowId(dbSession.id);
