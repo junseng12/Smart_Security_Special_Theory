@@ -77,12 +77,20 @@ async function processPendingSettles() {
     const db        = require('./db');
     const escrowSvc = require('./escrowPayoutService');
 
+    // retry_count/last_error 컬럼 보장
+    await db.getPool().query(`
+      ALTER TABLE escrow_locks
+        ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS last_error  TEXT
+    `).catch(() => {});
+
     const { rows } = await db.getPool().query(
       `SELECT el.session_id, el.fare_amount
        FROM escrow_locks el
        WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
          AND el.hold_deadline IS NOT NULL
          AND el.hold_deadline < NOW()
+         AND COALESCE(el.retry_count, 0) < 3
        LIMIT 10`
     );
 
@@ -98,6 +106,19 @@ async function processPendingSettles() {
         logger.info('Watchtower: settle OK', { sessionId: row.session_id, result: JSON.stringify(result) });
       } catch (e) {
         logger.error('Watchtower: settle fail', { sessionId: row.session_id, error: e.message });
+        // revert 시 retry_count 증가 — 3회 이상 실패 시 SettleFailed로 마킹 (무한 루프 방지)
+        try {
+          await db.getPool().query(
+            `UPDATE escrow_locks
+             SET retry_count = COALESCE(retry_count, 0) + 1,
+                 state = CASE WHEN COALESCE(retry_count, 0) >= 2 THEN 'SettleFailed' ELSE state END,
+                 last_error = $2
+             WHERE session_id = $1`,
+            [row.session_id, e.message.slice(0, 200)]
+          );
+        } catch (dbErr) {
+          logger.error('Watchtower: DB update fail', { error: dbErr.message });
+        }
       }
     }
   } catch (e) {
