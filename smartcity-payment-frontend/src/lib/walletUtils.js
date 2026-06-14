@@ -110,7 +110,7 @@ export async function approveUsdcForEscrow(fromAddress, spender, amountUsdc) {
   const data = "0x095ea7b3" + spenderHex + amountHex;
   return await window.ethereum.request({
     method: "eth_sendTransaction",
-    params: [{ from: fromAddress, to: USDC_ADDRESS, data }],
+    params: [{ from: fromAddress, to: USDC_ADDRESS, data, gas: "0x0186A0" }], // 100,000
   });
 }
 
@@ -149,7 +149,7 @@ export async function userDeposit(fromAddress, escrowId, operator, amountUsdc, h
   const data = selector + escrowIdHex + operatorHex + amountHex + holdDeadlineHex;
   return await window.ethereum.request({
     method: "eth_sendTransaction",
-    params: [{ from: fromAddress, to: ESCROW_V3_ADDRESS, data }],
+    params: [{ from: fromAddress, to: ESCROW_V3_ADDRESS, data, gas: "0x49910" }], // 300,000
   });
 }
 
