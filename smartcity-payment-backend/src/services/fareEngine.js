@@ -121,7 +121,8 @@ async function calculateFare({ sessionId, serviceType, usage }) {
     const rawMinutes = Math.max(0, usage.durationMinutes || 0);
     // 1분 단위 올림 (Perun ProposeUsageUpdate 주기와 동일)
     // 30초 이상이면 1분으로 올림, 그 미만이면 0 (이용 안 한 것)
-    const minutes = rawMinutes >= 0.5 ? Math.ceil(rawMinutes) : Math.floor(rawMinutes);
+    // 무조건 올림(ceil) + 최소 1분 보장 — 1초라도 이용했으면 0.01 USDC 청구 (Perun 1분 주기 정합)
+    const minutes = Math.max(1, Math.ceil(rawMinutes));
     // freeMinutes = 0이므로 그냥 전체 시간 과금
     baseFare = minutes * policy.ratePerMinute;
 
