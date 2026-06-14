@@ -145,7 +145,21 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
 
     // ② started_at 기준 fareEngine 재계산 (오프체인 서명이 없거나 0인 경우)
     } else if (sess?.started_at && sess?.service_type) {
-      const startMs     = new Date(sess.started_at).getTime();
+      // started_at: PostgreSQL TIMESTAMPTZ → JS Date, 또는 숫자(ms) 그대로
+      let startMs;
+      const rawStart = sess.started_at;
+      if (typeof rawStart === 'number') {
+        // ms 숫자로 저장된 경우 (Legacy)
+        startMs = rawStart > 1e12 ? rawStart : rawStart * 1000;
+      } else {
+        startMs = new Date(rawStart).getTime();
+      }
+      if (isNaN(startMs) || startMs <= 0) {
+        chargedUsdc  = fareUsdc || '0';
+        chargeSource = 'client_fallback_invalid_start';
+        logger.warn('[Orchestrator] invalid started_at, fallback', { sessionId, rawStart });
+        return; // 아래 else 건너뜀
+      }
       const durationMin = (Date.now() - startMs) / 60_000;
 
       const fareResult = await fareEngine.calculateFare({
