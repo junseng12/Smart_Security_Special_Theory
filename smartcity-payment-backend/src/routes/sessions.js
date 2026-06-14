@@ -174,13 +174,30 @@ router.post('/:id/deposit', async (req, res, next) => {
       depositTxHash,
     });
 
-    // 1-b) 실제 서비스 시작 시점(deposit 완료 시각) → DB started_at 업데이트
+    // 1-b) 실제 서비스 시작 시점(deposit 완료 시각) → DB + Redis 캐시 동기화
     if (serviceStartedAt) {
-      const db = require('../services/db');
+      const db      = require('../services/db');
+      const sessMgr = require('../services/sessionManager');
+      // DB 업데이트
       await db.getPool().query(
-        `UPDATE sessions SET started_at = $1 WHERE id = $2`,
-        [new Date(serviceStartedAt).toISOString(), req.params.id]
+        `UPDATE sessions SET started_at = to_timestamp($1 / 1000.0) WHERE id = $2`,
+        [Number(serviceStartedAt), req.params.id]
       ).catch(() => {});
+      // Redis 캐시 갱신 — getSession이 캐시 우선이므로 반드시 동기화
+      try {
+        const redis = require('../services/redisClient').getRedis();
+        if (redis) {
+          const SESSION_KEY = (id) => `session:${id}`;
+          const raw = await redis.get(SESSION_KEY(req.params.id));
+          if (raw) {
+            const cached = JSON.parse(raw);
+            cached.startedAt = Number(serviceStartedAt);
+            await redis.set(SESSION_KEY(req.params.id), JSON.stringify(cached), 'EX', 86400);
+          }
+        }
+      } catch(redisErr) {
+        require('../utils/logger').warn('Redis cache update failed (non-fatal)', { error: redisErr.message });
+      }
     }
 
     // 2) operator 보증금 자동 예치
