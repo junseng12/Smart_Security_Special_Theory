@@ -284,8 +284,9 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   }
 
   // ── holdDeadline 확인 ──
-  // hold_deadline은 BIGINT Unix timestamp(초) — ms로 변환
-  const holdDeadline = row.hold_deadline ? Number(row.hold_deadline) * 1000 : 0;
+  // hold_deadline은 BIGINT — 초 단위(13자리 미만)면 * 1000, 이미 ms면 그대로
+  const _hdRaw = row.hold_deadline ? Number(row.hold_deadline) : 0;
+  const holdDeadline = _hdRaw > 0 ? (_hdRaw < 1e12 ? _hdRaw * 1000 : _hdRaw) : 0;
   const waitMs = holdDeadline - Date.now();
 
   if (waitMs > 0) {
