@@ -177,9 +177,20 @@ export default function TransactionHistory() {
                     {isOpen && (
                       <motion.div initial={{ height: 0 }} animate={{ height: 'auto' }}
                         className="border-t border-gray-50 px-4 pb-4 pt-3 space-y-2 text-xs">
-                        <div className="flex justify-between text-gray-500">
+                        <div className="flex justify-between items-center text-gray-500">
                           <span>세션 ID</span>
-                          <span className="font-mono text-gray-700">{s.id.slice(0, 16)}...</span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigator.clipboard.writeText(s.id || '');
+                              alert('세션 ID 복사 완료!\n환불 신청 시 사용하세요.');
+                            }}
+                            className="flex items-center gap-1 font-mono text-gray-700 hover:text-blue-600 bg-gray-50 hover:bg-blue-50 border border-gray-200 hover:border-blue-300 rounded-lg px-2 py-0.5 transition-colors"
+                            title="클릭하여 전체 ID 복사"
+                          >
+                            <span>{s.id.slice(0, 16)}…</span>
+                            <span className="text-gray-400 text-xs">📋</span>
+                          </button>
                         </div>
                         <div className="flex justify-between text-gray-500">
                           <span>보증금</span>
