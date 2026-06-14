@@ -284,7 +284,8 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   }
 
   // ── holdDeadline 확인 ──
-  const holdDeadline = row.hold_deadline ? new Date(row.hold_deadline).getTime() : 0;
+  // hold_deadline은 BIGINT Unix timestamp(초) — ms로 변환
+  const holdDeadline = row.hold_deadline ? Number(row.hold_deadline) * 1000 : 0;
   const waitMs = holdDeadline - Date.now();
 
   if (waitMs > 0) {
@@ -562,7 +563,7 @@ async function processExpiredHolds() {
     SELECT el.*, rc.id as case_id, rc.status as case_status, rc.approved_usdc
     FROM escrow_locks el
     LEFT JOIN refund_cases rc ON rc.session_id = el.session_id
-    WHERE el.state IN ('UserDeposited','FullyFunded') AND el.hold_deadline < NOW()
+    WHERE el.state IN ('UserDeposited','FullyFunded') AND el.hold_deadline < EXTRACT(EPOCH FROM NOW())::BIGINT
   `);
 
   for (const lock of result.rows) {
