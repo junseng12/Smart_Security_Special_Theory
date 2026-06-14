@@ -377,7 +377,7 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   }
 
   logger.info('Calling settleAndRelease on-chain', { sessionId, fareUsdc });
-  const tx      = await escrow.settleAndRelease(escrowId, fareWei);
+  const tx      = await escrow.settleAndRelease(escrowId, fareWei, { gasLimit: 300000 });
   const receipt = await tx.wait();
 
   const userDep  = parseFloat(row.user_deposit || 0);
@@ -449,7 +449,7 @@ async function refundToBuyer(sessionId, caseId, refundFare = '0') {
   const refundFareWei = ethers.parseUnits(String(parseFloat(refundFare).toFixed(6)), 6);
 
   logger.info('refundToBuyer', { sessionId, caseId, refundFare });
-  const tx      = await escrow.refundToBuyer(escrowId, refundFareWei);
+  const tx      = await escrow.refundToBuyer(escrowId, refundFareWei, { gasLimit: 250000 });
   const receipt = await tx.wait();
 
   await getPool().query(
@@ -483,7 +483,7 @@ async function claimSettlement(sessionId) {
   }
 
   logger.info('claimSettlement: executing on-chain', { sessionId });
-  const tx      = await escrow.claimSettlement(escrowId);
+  const tx      = await escrow.claimSettlement(escrowId, { gasLimit: 250000 });
   const receipt = await tx.wait();
 
   await getPool().query(
