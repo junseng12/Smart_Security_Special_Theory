@@ -360,15 +360,25 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
       logger.info('Already settled on-chain, skip', { sessionId });
       return { skipped: true, reason: 'already_settled', onchainState: STATE_LABELS[onchainStatus.state] };
     }
-    // FullyFunded(2) 또는 UserDeposited(1)만 settleAndRelease 가능
-    // None(0) 또는 기타 → 온체인 call은 revert될 것이므로 스킵
+    // None(0): userDeposit 온체인 미완료 → DB만 처리
     if (onchainStatus.state === 0) {
-      logger.warn('Escrow state=None — userDeposit 온체인 미완료, DB 기록만 처리', { sessionId });
+      logger.warn('Escrow state=None — userDeposit 온체인 미완료, SettleFailed 마킹', { sessionId });
       await getPool().query(
-        `UPDATE escrow_locks SET state='Released', settled_at=NOW(), fare_amount=$2 WHERE session_id=$1`,
+        `UPDATE escrow_locks SET state='SettleFailed', last_error='onchain_state_None', settled_at=NOW(), fare_amount=$2 WHERE session_id=$1`,
         [sessionId, fareUsdc || '0']
       ).catch(() => {});
       return { skipped: false, dbOnly: true, reason: 'no_onchain_deposit_db_recorded', fareUsdc };
+    }
+    // UserDeposited(1): operatorDeposit 없음 → V3.2 컨트랙트 settleAndRelease revert 가능
+    // FullyFunded(2)만 안전하게 settleAndRelease 가능
+    if (onchainStatus.state === 1) {
+      logger.warn('Escrow state=UserDeposited(1) — operatorDeposit 없음, settleAndRelease 시도 (V3.2 허용 시)', { sessionId });
+      // V3.2는 userDeposit만으로 settleAndRelease 허용할 수 있음 — 진행하되 실패 시 SettleFailed
+    }
+    // RefundIssue(3): 환불 케이스 처리 중 — settleAndRelease 스킵
+    if (onchainStatus.state === 3) {
+      logger.warn('Escrow state=RefundIssue — 환불 케이스 처리 중, settle 스킵', { sessionId });
+      return { skipped: true, reason: 'refund_issue_pending' };
     }
   } catch (statusErr) {
     // RPC 오류 or 컨트랙트 미배포 → 그냥 진행 시도
@@ -377,8 +387,22 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   }
 
   logger.info('Calling settleAndRelease on-chain', { sessionId, fareUsdc });
-  const tx      = await escrow.settleAndRelease(escrowId, fareWei, { gasLimit: 300000 });
-  const receipt = await tx.wait();
+  let tx, receipt;
+  try {
+    tx      = await escrow.settleAndRelease(escrowId, fareWei, { gasLimit: 300000 });
+    receipt = await tx.wait();
+  } catch (txErr) {
+    // 온체인 revert → SettleFailed 마킹 (무한 재시도 차단)
+    logger.error('settleAndRelease onchain revert', { sessionId, error: txErr.message.slice(0, 200) });
+    await getPool().query(
+      `UPDATE escrow_locks
+       SET state='SettleFailed', last_error=$2,
+           retry_count = COALESCE(retry_count, 0) + 1
+       WHERE session_id=$1`,
+      [sessionId, txErr.message.slice(0, 200)]
+    ).catch(() => {});
+    throw txErr;
+  }
 
   const userDep  = parseFloat(row.user_deposit || 0);
   const opDep    = parseFloat(row.operator_deposit || 0);
