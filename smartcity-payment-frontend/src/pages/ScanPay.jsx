@@ -496,6 +496,20 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       //   startedAt은 deposit 완료(실제 서비스 시작) 후 기록하므로 여기선 null
       saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "session_created", startedAt: null });
 
+      // ★ USDC 잔액 체크
+      try {
+        const usdcBal = await getUsdcBalance(addr);
+        const required = parseFloat(svc.depositUsdc);
+        if (parseFloat(usdcBal) < required) {
+          addLog(`❌ USDC 잔액 부족: ${usdcBal} USDC (필요: ${required} USDC)`, "error");
+          addLog("Base Sepolia USDC faucet: https://faucet.circle.com", "info");
+          setStep("home");
+          clearProc();
+          return;
+        }
+      } catch (balErr) {
+        console.warn("USDC balance check failed:", balErr.message);
+      }
       addLog("② MetaMask: USDC 승인 서명 요청...", "info");
       await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
       addLog("✅ USDC 승인 완료", "success");
