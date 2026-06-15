@@ -600,6 +600,55 @@ async function processExpiredHolds() {
   logger.info('Expired escrow holds processed', { count: result.rows.length });
 }
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. forceRefund — UserDeposited 상태에서 강제 환불 (operator 미입금 케이스)
+// ─────────────────────────────────────────────────────────────────────────────
+async function forceRefund(sessionId) {
+  await ensureEscrowTable();
+  const wallet   = getOperatorWallet();
+  const escrow   = getEscrowContract(wallet);
+  const escrowId = toEscrowId(sessionId);
+
+  // 온체인 상태 확인
+  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com');
+  const escrowRO = getEscrowContract(roProvider);
+  let onchainState = 0;
+  try {
+    const s = await escrowRO.getEscrowStatus(escrowId);
+    onchainState = Number(s[0]);
+    logger.info('forceRefund: onchain state', { sessionId, state: STATE_LABELS[onchainState] });
+  } catch(e) {
+    logger.warn('forceRefund: getEscrowStatus 실패', { sessionId, error: e.message });
+  }
+
+  if (onchainState === 0) {
+    logger.warn('forceRefund: state=None, 온체인 예치 없음 → DB만 처리', { sessionId });
+    await getPool().query(
+      `UPDATE escrow_locks SET state='Refunded', settled_at=NOW() WHERE session_id=$1`,
+      [sessionId]
+    ).catch(()=>{});
+    return { skipped: true, reason: 'no_onchain_deposit', sessionId };
+  }
+
+  // 이미 Released/Refunded면 스킵
+  if (onchainState >= 4) {
+    return { skipped: true, reason: 'already_settled', state: STATE_LABELS[onchainState] };
+  }
+
+  logger.info('forceRefund: executing on-chain', { sessionId });
+  const tx      = await escrow.forceRefund(escrowId, { gasLimit: 200000 });
+  const receipt = await tx.wait();
+
+  await getPool().query(
+    `UPDATE escrow_locks SET state='Refunded', settle_tx=$2, settled_at=NOW() WHERE session_id=$1`,
+    [sessionId, receipt.hash]
+  ).catch(()=>{});
+
+  logger.info('forceRefund complete ✅', { sessionId, txHash: receipt.hash });
+  return { txHash: receipt.hash, sessionId, mode: 'force_refund' };
+}
+
 module.exports = {
   recordUserDeposit,
   operatorDeposit,
@@ -610,6 +659,7 @@ module.exports = {
   getEscrowStatus,
   processExpiredHolds,
   toEscrowId,
+  forceRefund,
 };
 
 
