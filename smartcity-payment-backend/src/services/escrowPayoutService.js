@@ -29,7 +29,7 @@ const ESCROW_ABI = [
   'function operatorDeposit(bytes32 escrowId, uint256 amount) external',
   'function settleAndRelease(bytes32 escrowId, uint256 fareAmount) external',
   'function registerRefundIssue(bytes32 escrowId, uint8 issueType, string calldata description, bool penalizeOperator) external',
-  'function refundToBuyer(bytes32 escrowId) external',
+  'function refundToBuyer(bytes32 escrowId, uint256 refundFare) external',
   'function forceRefund(bytes32 escrowId) external',
   'function emergencyCancel(bytes32 escrowId) external',
   'function getEscrowStatus(bytes32 escrowId) external view returns (uint8 state, uint256 userDeposit, uint256 operatorDeposit, uint256 fareAmount, address user, address operator, uint256 holdDeadline, bool isFullyFunded, bool isDeadlinePassed)',
@@ -354,7 +354,7 @@ async function registerRefundIssue(sessionId, caseId, issueType, description, pe
 // 4. refundToBuyer
 //    환불 승인 시 호출 — RefundIssue → Refunded
 // ─────────────────────────────────────────────────────────────────
-async function refundToBuyer(sessionId, caseId) {
+async function refundToBuyer(sessionId, caseId, refundFare) {
   await ensureTable();
   const wallet   = getWallet();
   const escrow   = getEscrow(wallet);
@@ -412,7 +412,10 @@ async function refundToBuyer(sessionId, caseId) {
   }
 
   // RefundIssue(3) → refundToBuyer
-  const tx = await escrow.refundToBuyer(escrowId, { gasLimit: 200000 });
+  const refundFareWei = refundFare != null
+    ? ethers.parseUnits(String(parseFloat(refundFare).toFixed(6)), 6)
+    : 0n;
+  const tx = await escrow.refundToBuyer(escrowId, refundFareWei, { gasLimit: 200000 });
   const r  = await tx.wait();
 
   await getPool().query(
