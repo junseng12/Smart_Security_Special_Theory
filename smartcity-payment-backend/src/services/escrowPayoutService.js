@@ -470,11 +470,68 @@ async function getOnchainStatus(sessionId) {
   }
 }
 
+
+// ─────────────────────────────────────────────────────────────────
+// operatorDeposit (standalone) — deposit 라우트에서 직접 호출
+// ─────────────────────────────────────────────────────────────────
+async function operatorDeposit(sessionId, depositUsdc, userDepTxHash) {
+  await ensureTable();
+  const wallet   = getWallet();
+  const escrow   = getEscrow(wallet);
+  const usdc     = getUsdc(wallet);
+  const escrowId = toEscrowId(sessionId);
+  const amtWei   = ethers.parseUnits(String(depositUsdc || '3'), 6);
+
+  // 온체인 상태 확인
+  let state = 0, opDeposit = 0n;
+  try {
+    const s = await escrow.getEscrowStatus(escrowId);
+    state    = Number(s[0]);
+    opDeposit = s[2]; // operatorDeposit amount
+  } catch (e) {
+    logger.warn('operatorDeposit: getEscrowStatus 실패', { sessionId, error: e.message });
+  }
+
+  // 이미 FullyFunded(2) 이상이면 skip
+  if (state >= 2) {
+    logger.info('operatorDeposit: 이미 FullyFunded 이상, skip', { sessionId, state: STATE_LABELS[state] });
+    return { skipped: true, reason: 'already_fully_funded', state: STATE_LABELS[state] };
+  }
+
+  // UserDeposited(1) 상태일 때만 operatorDeposit 실행
+  if (state !== 1) {
+    logger.warn('operatorDeposit: 예상치 못한 상태', { sessionId, state: STATE_LABELS[state] });
+    return { skipped: true, reason: 'unexpected_state', state: STATE_LABELS[state] };
+  }
+
+  try {
+    const al = await usdc.allowance(wallet.address, ESCROW_ADDR);
+    if (al < amtWei) {
+      const atx = await usdc.approve(ESCROW_ADDR, amtWei * 10n, { gasLimit: 80000 });
+      await atx.wait();
+    }
+    const tx = await escrow.operatorDeposit(escrowId, amtWei, { gasLimit: 150000 });
+    const r  = await tx.wait();
+    logger.info('operatorDeposit OK → FullyFunded', { sessionId, tx: r.hash });
+
+    await getPool().query(
+      `UPDATE escrow_locks SET operator_deposit=$2, operator_deposit_tx=$3, state='FullyFunded' WHERE session_id=$1`,
+      [sessionId, depositUsdc, r.hash]
+    ).catch(() => {});
+
+    return { txHash: r.hash, operatorDeposit: depositUsdc };
+  } catch (e) {
+    logger.error('operatorDeposit 실패', { sessionId, error: e.message.slice(0, 200) });
+    throw e;
+  }
+}
+
 module.exports = {
   recordUserDeposit,
   settleAndRelease,
   registerRefundIssue,
   refundToBuyer,
+  operatorDeposit,
   forceRefundOnchain,
   getOnchainStatus,
 };
