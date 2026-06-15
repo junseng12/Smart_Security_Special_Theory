@@ -471,7 +471,7 @@ router.post('/:id/force-refund', async (req, res, next) => {
   try {
     const sessionId = req.params.id;
     const escrowSvc = require('../services/escrowPayoutService');
-    const result = await escrowSvc.forceRefund(sessionId);
+    const result = await escrowSvc.forceRefundOnchain(sessionId);
     res.json({ ok: true, data: result });
   } catch (err) { next(err); }
 });
