@@ -279,8 +279,8 @@ router.post('/:id/deposit', async (req, res, next) => {
               escrowAbi,
               provider
             );
-            const escrowSvcLocal = require('../services/escrowPayoutService');
-            const escrowId = escrowSvcLocal.toEscrowId(req.params.id);
+            const { ethers: ethersInner } = require('ethers');
+            const escrowId = ethersInner.keccak256(ethersInner.toUtf8Bytes(req.params.id));
             const s = await escrow.getEscrowStatus(escrowId);
             const onchainState = Number(s[0]);
             if (onchainState >= 1) {
@@ -306,7 +306,8 @@ router.post('/:id/deposit', async (req, res, next) => {
 
     let operatorDepositResult = null;
     if (canEscrow && isRealTx && userTxSuccess) {
-      const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '3.0';
+      // ★ operatorDeposit 금액 = userDeposit 금액과 동일하게 (1:1 매칭)
+      const opDepositUsdc = depositUsdc || process.env.OPERATOR_DEPOSIT_USDC || '3.0';
       try {
         operatorDepositResult = await escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash);
         const logger = require('../utils/logger');
