@@ -151,7 +151,7 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
           fareUsdc:     req.body.fareUsdc,
           adjustment:   req.body.adjustment,
         }),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('SETTLE_DEFERRED')), 25000)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('SETTLE_DEFERRED')), 8000)),
       ]);
     } catch (raceErr) {
       if (raceErr.message === 'SETTLE_DEFERRED') {
