@@ -10,7 +10,7 @@ import { sendUsdcOnChain, getUsdcBalance, approveUsdc, callUserDeposit, waitForT
 
 const BACKEND = "https://smartcity-payment-backend-production.up.railway.app";
 // 결제 수취 주소 (서비스 운영자 에스크로 주소 — 테스트넷)
-const ESCROW_V3_ADDR = "0x454Dd98f154cC4Af7ACB5390113151E2f0e489a1"; // SmartCityEscrow V3.2
+const ESCROW_V3_ADDR = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"; // SmartCityEscrow V3.2
 const HOLD_DEADLINE_SEC = 4 * 60; // [TEST] 4분 — 운영시 24h(86400) 복원
 
 async function apiCall(path, method = "GET", body = null) {
@@ -206,7 +206,7 @@ export default function ScanPay() {
         channelId: sessionData.channelId,
         userAddress: mmAddress,
         userFinalSig: "0xmock_signature_for_demo",
-        usage: { durationMinutes },
+        fareUsdc: String(settlementAmount.toFixed(6)),
       });
       addLog(`🏁 백엔드 세션 종료 완료`, "success");
     } catch (e) {
