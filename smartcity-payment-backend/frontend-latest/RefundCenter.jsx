@@ -103,25 +103,30 @@ export default function RefundCenter() {
       let caseData = await apiCall("/api/v1/refunds", "POST", body);
       const caseId = caseData.id || caseData.caseId;
 
-      // 2) 자동 심사 (evaluate)
+      // 2) 자동 심사 (evaluate) — 결과 확인
+      let evalDecision = null;
       try {
-        await apiCall(`/api/v1/refunds/${caseId}/evaluate`, "POST", {});
+        const evalResult = await apiCall(`/api/v1/refunds/${caseId}/evaluate`, "POST", {});
+        evalDecision = evalResult?.decision;
       } catch(e) { console.warn("evaluate:", e.message); }
 
-      // 3) 온체인 환불 실행 (payout) — 실제 에스크로 컨트랙트에서 USDC 전송
+      // 3) 온체인 환불 실행 (payout)
+      // auto_approved 또는 sessionId 있을 때만 실행 (manual_required면 관리자 승인 대기)
       let payResult = null;
-      if (form.sessionId) {
+      if (form.sessionId && evalDecision === 'auto_approved') {
         try {
           payResult = await apiCall(`/api/v1/refunds/${caseId}/payout`, "POST", {
             sessionId: form.sessionId,
           });
         } catch(e) {
-          // FullyFunded 아닌 경우 forceRefund 시도
-          console.warn("payout 실패, forceRefund 시도:", e.message);
+          // payout 실패 시 force-refund 폴백
+          console.warn("payout 실패, force-refund 시도:", e.message);
           try {
             payResult = await apiCall(`/api/v1/sessions/${form.sessionId}/force-refund`, "POST", {});
-          } catch(e2) { console.warn("forceRefund도 실패:", e2.message); }
+          } catch(e2) { console.warn("force-refund도 실패:", e2.message); }
         }
+      } else if (evalDecision !== 'auto_approved') {
+        console.info("evaluate 결과 manual_required — 관리자 승인 후 payout 진행");
       }
 
       // 4) DB 트랜잭션 기록 + 실제 온체인 잔액 갱신
