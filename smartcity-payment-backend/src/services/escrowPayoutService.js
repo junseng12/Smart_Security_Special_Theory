@@ -119,23 +119,28 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
 
   let userDepTx = depositTxHash;
 
-  // userDeposit이 아직 안 됐으면 Operator가 대신 호출 (테스트/자동화용)
+  // ★ userDeposit은 반드시 사용자(MetaMask)가 직접 서명
+  // Operator가 대신 실행하는 코드는 제거됨
+  // onchainState === 0 이면 사용자 TX가 아직 안 온 것 → operatorDeposit 스킵
   if (onchainState === 0) {
-    try {
-      const al = await usdc.allowance(wallet.address, ESCROW_ADDR);
-      if (al < amtWei * 2n) {
-        const atx = await usdc.approve(ESCROW_ADDR, amtWei * 20n, { gasLimit: 80000 });
-        await atx.wait();
-        logger.info('USDC approve OK', { sessionId });
-      }
-      const tx = await escrow.userDeposit(escrowId, operator, amtWei, deadline, { gasLimit: 250000 });
-      const r  = await tx.wait();
-      userDepTx = r.hash;
-      onchainState = 1;
-      logger.info('userDeposit OK (operator-side)', { sessionId, tx: r.hash });
-    } catch (e) {
-      logger.error('userDeposit 실패', { sessionId, error: e.message.slice(0, 200) });
-    }
+    logger.warn('recordUserDeposit: 온체인 userDeposit 미확인 — operatorDeposit 스킵', {
+      sessionId, depositTxHash
+    });
+    // DB에만 pending 상태로 기록하고 종료
+    await getPool().query(
+      `INSERT INTO escrow_locks
+         (session_id, escrow_id_bytes, channel_id, user_address, operator_address,
+          user_deposit, operator_deposit, amount_usdc, hold_deadline,
+          user_deposit_tx, operator_deposit_tx, state)
+       VALUES ($1,$2,$3,$4,$5,$6,0,$6,to_timestamp($7),$8,NULL,'UserDeposited')
+       ON CONFLICT (session_id) DO UPDATE SET
+         state = EXCLUDED.state,
+         user_deposit_tx = EXCLUDED.user_deposit_tx,
+         updated_at = NOW()`,
+      [sessionId, escrowId, channelId || null, userAddress, operator,
+       Number(depositUsdc || 3), Number(deadline), userDepTx || null]
+    ).catch(e => logger.warn('escrow_locks insert 실패', { sessionId, error: e.message }));
+    return { escrowId, sessionId, depositUsdc, state: 'UserDeposited', operatorDeposit: null };
   }
 
   // operatorDeposit — FullyFunded 전환
