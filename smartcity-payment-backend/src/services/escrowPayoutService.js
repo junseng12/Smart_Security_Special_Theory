@@ -309,9 +309,21 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
       setTimeout(async () => {
         try {
           await new Promise(r => setTimeout(r, waitMs + 2000));
+          // 온체인 상태 재확인 — None이면 즉시 SettleFailed (불필요한 revert TX 방지)
           const w2 = getOperatorWallet();
           const e2 = getEscrowContract(w2);
           const eid2 = toEscrowId(sessionId);
+          try {
+            const s2 = await e2.getEscrowStatus(eid2);
+            if (Number(s2[0]) === 0) {
+              logger.warn('BG settle: onchain=None → SettleFailed (mock TX)', { sessionId });
+              await getPool().query(
+                `UPDATE escrow_locks SET state='SettleFailed', last_error='bg_onchain_None', retry_count=99 WHERE session_id=$1`,
+                [sessionId]
+              ).catch(()=>{});
+              return;
+            }
+          } catch(checkErr) { logger.warn('BG settle: getEscrowStatus failed', { sessionId }); }
           const fw2 = ethers.parseUnits(String(fareUsdc || '0'), 6);
           const tx2 = await e2.settleAndRelease(eid2, fw2);
           const r2 = await tx2.wait();
