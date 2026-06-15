@@ -88,7 +88,7 @@ async function createCase({ userAddress, sessionId, channelId, reason, requested
   );
 
   logger.info('Refund case created', { caseId, userAddress, reason, requestedUsdc });
-  return { caseId, status: CASE_STATES.RECEIVED };
+  return { id: caseId, caseId, status: CASE_STATES.RECEIVED };
 }
 
 // ── 상태 전이 ─────────────────────────────────────────────────────────────────
