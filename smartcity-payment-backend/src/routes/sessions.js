@@ -156,9 +156,39 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
     } catch (raceErr) {
       if (raceErr.message === 'SETTLE_DEFERRED') {
         // holdDeadline 대기 중 — 백그라운드 정산 진행 중, 즉시 accepted 반환
+        // DB에서 예상 요금/환불금 계산해서 같이 반환
+        let fareUsdc = '0', refundUsdc = '0', depositUsdc = '3';
+        try {
+          const db = require('../services/db');
+          const fareEngine = require('../services/fareEngine');
+          const row = await db.getPool().query(
+            `SELECT s.started_at, s.service_type, s.deposit_usdc, e.user_deposit
+             FROM sessions s LEFT JOIN escrow_locks e ON e.session_id = s.id
+             WHERE s.id = $1 LIMIT 1`, [req.params.id]
+          );
+          if (row.rows[0]) {
+            const r0 = row.rows[0];
+            const dep = parseFloat(r0.user_deposit || r0.deposit_usdc || 3);
+            depositUsdc = String(dep);
+            const endTs = new Date();
+            const startTs = new Date(r0.started_at);
+            const durationMinutes = Math.max(0, (endTs - startTs) / 60_000);
+            const fareResult = await fareEngine.calculateFare({
+              sessionId: req.params.id,
+              serviceType: r0.service_type,
+              usage: { durationMinutes },
+            }).catch(() => ({ fare: 0.01 }));
+            fareUsdc = String((fareResult.fare ?? 0.01).toFixed(6));
+            refundUsdc = String(Math.max(dep - parseFloat(fareUsdc), 0).toFixed(6));
+          }
+        } catch (_) {}
         return res.status(202).json({
           ok: true,
-          data: { deferred: true, status: 'settling', message: 'holdDeadline 대기 중, 자동 정산 예약됨' }
+          data: {
+            deferred: true, status: 'settling',
+            message: 'holdDeadline 대기 중, 자동 정산 예약됨',
+            fareUsdc, refundUsdc, depositUsdc,
+          }
         });
       }
       throw raceErr;
