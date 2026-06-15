@@ -295,7 +295,8 @@ router.get('/:id/escrow-status', async (req, res, next) => {
     const fareUsdc   = parseFloat(row.fare_amount || 0);
     const userDep    = parseFloat(row.user_deposit || 0);
     const refundUsdc = (userDep - fareUsdc).toFixed(6);
-    const settled    = row.state === 'Released' || onchain?.state === 'Released';
+    const FINAL_STATES = new Set(['Released','Refunded']);
+    const settled    = FINAL_STATES.has(row.state) || FINAL_STATES.has(onchain?.state);
 
     res.json({
       ok: true,
