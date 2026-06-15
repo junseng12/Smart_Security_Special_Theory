@@ -252,27 +252,55 @@ router.post('/:id/deposit', async (req, res, next) => {
     const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
     const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock');
 
-    // ★ TX receipt 검증: userDeposit TX가 실제로 성공했는지 확인 후 operatorDeposit 실행
-    let userTxSuccess = true;
+    // ★ 핵심 원칙: 온체인에서 userDeposit(state===1) 확인 후에만 operatorDeposit 실행
+    // 1차: TX receipt status === 1 확인
+    // 2차: 온체인 escrow state === UserDeposited(1) 직접 확인 (이중 검증)
+    let userTxSuccess = false;
     if (isRealTx) {
       try {
         const { ethers } = require('ethers');
         const provider = new ethers.JsonRpcProvider(
           process.env.BASE_RPC_URL || 'https://sepolia.base.org'
         );
+        // 1차: receipt 확인
         const receipt = await provider.getTransactionReceipt(depositTxHash);
         if (!receipt) {
-          require('../utils/logger').warn('/deposit: TX not found (pending?)', { depositTxHash });
-          userTxSuccess = false;
+          require('../utils/logger').warn('/deposit: TX not found on-chain — operatorDeposit skip', { depositTxHash });
         } else if (receipt.status !== 1) {
-          require('../utils/logger').warn('/deposit: userDeposit TX REVERTED — skip operatorDeposit', {
+          require('../utils/logger').warn('/deposit: userDeposit TX REVERTED — operatorDeposit skip', {
             depositTxHash, status: receipt.status
           });
-          userTxSuccess = false;
+        } else {
+          // 2차: 온체인 escrow state 직접 확인
+          try {
+            const escrowAbi = ['function getEscrowStatus(bytes32) view returns (uint8,uint256,uint256,uint256,address,address,uint256,bool,bool)'];
+            const escrow = new ethers.Contract(
+              process.env.ESCROW_CONTRACT_ADDRESS,
+              escrowAbi,
+              provider
+            );
+            const escrowSvcLocal = require('../services/escrowPayoutService');
+            const escrowId = escrowSvcLocal.toEscrowId(req.params.id);
+            const s = await escrow.getEscrowStatus(escrowId);
+            const onchainState = Number(s[0]);
+            if (onchainState >= 1) {
+              userTxSuccess = true;
+              require('../utils/logger').info('/deposit: 온체인 userDeposit 확인 ✅', {
+                sessionId: req.params.id, onchainState
+              });
+            } else {
+              require('../utils/logger').warn('/deposit: TX success but onchain state=Idle — operatorDeposit skip', {
+                depositTxHash, onchainState
+              });
+            }
+          } catch (stateErr) {
+            // state 조회 실패 시 receipt 성공만으로 진행 (낙관적)
+            require('../utils/logger').warn('/deposit: onchain state 조회 실패, receipt 기반으로 진행', { error: stateErr.message });
+            userTxSuccess = true;
+          }
         }
       } catch (rpcErr) {
-        require('../utils/logger').warn('/deposit: receipt 조회 실패 — operatorDeposit 시도는 계속', { error: rpcErr.message });
-        // RPC 오류 시 낙관적으로 진행
+        require('../utils/logger').warn('/deposit: receipt 조회 실패 — operatorDeposit skip', { error: rpcErr.message });
       }
     }
 
