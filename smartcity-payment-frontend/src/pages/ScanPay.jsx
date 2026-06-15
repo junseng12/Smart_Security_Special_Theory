@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   approveUsdcForEscrow,
+  getUsdcBalance,
   userDeposit as escrowUserDeposit,
 } from '@/lib/walletUtils';
 import BottomNav from '@/components/wallet/BottomNav';
@@ -417,6 +418,21 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       //         "approved"        → userDeposit부터 재개
       //         "deposited"       → /deposit API 호출부터 재개
       if (stage === "session_created" || !stage) {
+        // ★ USDC 잔액 체크 — 부족하면 사전 차단
+        try {
+          const usdcBal = await getUsdcBalance(addr);
+          const required = parseFloat(svc.depositUsdc);
+          if (parseFloat(usdcBal) < required) {
+            addLog(`❌ USDC 잔액 부족: ${usdcBal} USDC (필요: ${required} USDC)`, "error");
+            addLog("Base Sepolia 테스트넷 USDC가 필요합니다. 0x036CbD53... 컨트랙트에서 faucet을 받거나 브리지를 이용해주세요.", "info");
+            setStep("home");
+            clearProc();
+            return;
+          }
+        } catch (balErr) {
+          // 잔액 조회 실패 시 계속 진행 (논블로킹)
+          console.warn("USDC balance check failed:", balErr.message);
+        }
         addLog("② MetaMask: USDC 승인 서명 요청...", "info");
         await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
         addLog("✅ USDC 승인 완료", "success");
