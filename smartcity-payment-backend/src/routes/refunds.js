@@ -128,8 +128,8 @@ router.post('/:caseId/payout', validate(payoutSchema), async (req, res, next) =>
         `SELECT s.started_at, s.service_type, s.ended_at,
                 e.user_deposit
          FROM sessions s
-         LEFT JOIN escrow_locks e ON e.session_id = s.session_id
-         WHERE s.session_id = $1 LIMIT 1`,
+         LEFT JOIN escrow_locks e ON e.session_id = s.id
+         WHERE s.id = $1 LIMIT 1`,
         [sessionId]
       );
       if (rows[0]) {
