@@ -100,51 +100,58 @@ export default function RefundCenter() {
       if (form.sessionId) body.sessionId = form.sessionId;
       if (form.channelId) body.channelId = form.channelId;
 
-      let caseData;
+      let caseData = await apiCall("/api/v1/refunds", "POST", body);
+      const caseId = caseData.id || caseData.caseId;
+
+      // 2) 자동 심사 (evaluate)
       try {
-        caseData = await apiCall("/api/v1/refunds", "POST", body);
-      } catch (e) {
-        // 백엔드 오류 시 로컬 케이스 생성
-        caseData = { id: `LOCAL-${Date.now()}`, status: "PENDING", reason: form.reason };
+        await apiCall(`/api/v1/refunds/${caseId}/evaluate`, "POST", {});
+      } catch(e) { console.warn("evaluate:", e.message); }
+
+      // 3) 온체인 환불 실행 (payout) — 실제 에스크로 컨트랙트에서 USDC 전송
+      let payResult = null;
+      if (form.sessionId) {
+        try {
+          payResult = await apiCall(`/api/v1/refunds/${caseId}/payout`, "POST", {
+            sessionId: form.sessionId,
+          });
+        } catch(e) {
+          // FullyFunded 아닌 경우 forceRefund 시도
+          console.warn("payout 실패, forceRefund 시도:", e.message);
+          try {
+            payResult = await apiCall(`/api/v1/sessions/${form.sessionId}/force-refund`, "POST", {});
+          } catch(e2) { console.warn("forceRefund도 실패:", e2.message); }
+        }
       }
 
-      // 2) 무조건 승인 처리 (백엔드 approve API 시도)
-      try {
-        await apiCall(`/api/v1/refunds/${caseData.id}/approve`, "POST", {
-          approvedUsdc: String(refundAmount),
-          decision: "approved",
-          notes: "Auto-approved for demo",
-        });
-      } catch {
-        // approve 엔드포인트 없어도 계속 진행
-      }
-
-      // 3) DB에 환불 트랜잭션 기록 및 잔액 반영
+      // 4) DB 트랜잭션 기록 + 실제 온체인 잔액 갱신
       await base44.entities.Transaction.create({
         type: 'refund',
         amount: refundAmount,
-        status: 'completed',
+        status: payResult ? 'completed' : 'pending',
         to_address: mmAddress,
         from_address: 'escrow',
         merchant_name: `환불 — ${REASONS.find(r => r.value === form.reason)?.label || form.reason}`,
-        tx_hash: caseData.id,
+        tx_hash: payResult?.txHash || caseId,
         wallet_id: wallet?.id,
-        note: `케이스ID: ${caseData.id}`,
+        note: `케이스ID: ${caseId}${payResult?.txHash ? " | 온체인완료" : " | 처리중"}`,
       });
 
-      // 잔액 갱신 (온체인 실제 잔액 기준)
+      // 실제 온체인 잔액 반영
       const newBal = await getUsdcBalance(mmAddress);
       localStorage.setItem("mm_balance", newBal);
       if (wallet) {
-        // 환불은 실제 온체인 전송이 아니므로 DB 잔액에만 반영
-        await base44.entities.Wallet.update(wallet.id, {
-          balance: (wallet.balance || 0) + refundAmount,
-        });
+        await base44.entities.Wallet.update(wallet.id, { balance: newBal });
       }
       queryClient.invalidateQueries({ queryKey: ['transactions-all'] });
       queryClient.invalidateQueries({ queryKey: ['wallets'] });
 
-      setSubmitted({ ...caseData, status: "APPROVED", approvedUsdc: refundAmount });
+      setSubmitted({
+        ...caseData,
+        status: payResult ? "REFUNDED" : "PENDING_ONCHAIN",
+        approvedUsdc: refundAmount,
+        txHash: payResult?.txHash,
+      });
     } catch (e) {
       setError(e.message);
     }
