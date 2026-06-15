@@ -252,8 +252,32 @@ router.post('/:id/deposit', async (req, res, next) => {
     const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
     const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock');
 
+    // ★ TX receipt 검증: userDeposit TX가 실제로 성공했는지 확인 후 operatorDeposit 실행
+    let userTxSuccess = true;
+    if (isRealTx) {
+      try {
+        const { ethers } = require('ethers');
+        const provider = new ethers.JsonRpcProvider(
+          process.env.BASE_RPC_URL || 'https://sepolia.base.org'
+        );
+        const receipt = await provider.getTransactionReceipt(depositTxHash);
+        if (!receipt) {
+          require('../utils/logger').warn('/deposit: TX not found (pending?)', { depositTxHash });
+          userTxSuccess = false;
+        } else if (receipt.status !== 1) {
+          require('../utils/logger').warn('/deposit: userDeposit TX REVERTED — skip operatorDeposit', {
+            depositTxHash, status: receipt.status
+          });
+          userTxSuccess = false;
+        }
+      } catch (rpcErr) {
+        require('../utils/logger').warn('/deposit: receipt 조회 실패 — operatorDeposit 시도는 계속', { error: rpcErr.message });
+        // RPC 오류 시 낙관적으로 진행
+      }
+    }
+
     let operatorDepositResult = null;
-    if (canEscrow && isRealTx) {
+    if (canEscrow && isRealTx && userTxSuccess) {
       const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '3.0';
       try {
         operatorDepositResult = await escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash);
