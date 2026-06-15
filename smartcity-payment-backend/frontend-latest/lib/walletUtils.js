@@ -1,5 +1,5 @@
 export const USDC_ADDRESS   = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
-export const ESCROW_V3      = "0x454Dd98f154cC4Af7ACB5390113151E2f0e489a1"; // SmartCityEscrow V3.2
+export const ESCROW_V3      = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"; // SmartCityEscrow V3.2
 export const OPERATOR_ADDR  = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
 export const BASE_SEPOLIA_RPC      = "https://sepolia.base.org";
 export const BASE_SEPOLIA_CHAIN_ID = "0x14a34"; // 84532
