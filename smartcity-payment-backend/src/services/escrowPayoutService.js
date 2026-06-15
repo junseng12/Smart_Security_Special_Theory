@@ -383,11 +383,15 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
       ).catch(() => {});
       return { skipped: false, dbOnly: true, reason: 'no_onchain_deposit_db_recorded', fareUsdc };
     }
-    // UserDeposited(1): operatorDeposit 없음 → V3.2 컨트랙트 settleAndRelease revert 가능
-    // FullyFunded(2)만 안전하게 settleAndRelease 가능
+    // UserDeposited(1): V3.2 컨트랙트는 FullyFunded(2)만 settleAndRelease 허용
+    // → operatorDeposit 없으면 settleAndRelease revert → forceRefund로 사용자 환불
     if (onchainStatus.state === 1) {
-      logger.warn('Escrow state=UserDeposited(1) — operatorDeposit 없음, settleAndRelease 시도 (V3.2 허용 시)', { sessionId });
-      // V3.2는 userDeposit만으로 settleAndRelease 허용할 수 있음 — 진행하되 실패 시 SettleFailed
+      logger.warn('Escrow state=UserDeposited(1) — V3.2는 FullyFunded만 허용, SettleFailed 마킹', { sessionId });
+      await getPool().query(
+        `UPDATE escrow_locks SET state='SettleFailed', last_error='v32_requires_FullyFunded_state2', settled_at=NOW() WHERE session_id=$1`,
+        [sessionId]
+      ).catch(() => {});
+      return { skipped: true, reason: 'v32_requires_fullyfunded_userdeposit_only', sessionId };
     }
     // RefundIssue(3): 환불 케이스 처리 중 — settleAndRelease 스킵
     if (onchainStatus.state === 3) {
