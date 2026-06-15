@@ -302,8 +302,14 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     finalState = Number(sf[0]);
   } catch (_) {}
 
-  // 실제 환불 금액 = deposit - fare
-  const depositNum = parseFloat('3'); // 기본값, DB에서 가져올 수도 있음
+  // 실제 환불 금액 = userDeposit - fare (온체인 값 기반)
+  let depositNum = 3.0; // 기본값
+  try {
+    const dbRow = await getPool().query(
+      'SELECT user_deposit FROM escrow_locks WHERE session_id=$1', [sessionId]
+    );
+    if (dbRow.rows[0]?.user_deposit) depositNum = parseFloat(dbRow.rows[0].user_deposit);
+  } catch(_) {}
   const fareNum    = parseFloat(fareUsdc || '0.01');
   const refundUsdc = String(Math.max(depositNum - fareNum, 0).toFixed(6));
 
