@@ -532,6 +532,38 @@ async function operatorDeposit(sessionId, depositUsdc, userDepTxHash) {
   }
 }
 
+
+// ─────────────────────────────────────────────────────────────────
+// claimSettlement (V3.2 stub)
+// V3.2는 settleAndRelease 하나로 정산 완료 — 별도 claim 단계 없음
+// watchtower 호환성을 위해 stub으로 유지 (Released 상태 확인 후 skip)
+// ─────────────────────────────────────────────────────────────────
+async function claimSettlement(sessionId) {
+  await ensureTable();
+  const escrow   = getEscrow(getProvider());
+  const escrowId = toEscrowId(sessionId);
+
+  let state = 0;
+  try {
+    const s = await escrow.getEscrowStatus(escrowId);
+    state = Number(s[0]);
+  } catch (_) {}
+
+  // Released(4) 또는 Refunded(5) — 이미 정산 완료
+  if (state === 4 || state === 5) {
+    logger.info('claimSettlement: 이미 정산 완료 (V3.2는 별도 claim 불필요)', {
+      sessionId, state: STATE_LABELS[state]
+    });
+    await getPool().query(
+      `UPDATE escrow_locks SET state=$2 WHERE session_id=$1 AND state='Released'`,
+      [sessionId, STATE_LABELS[state]]
+    ).catch(() => {});
+    return { skipped: true, reason: 'v32_no_claim_needed', state: STATE_LABELS[state] };
+  }
+
+  return { skipped: true, reason: 'not_released', state: STATE_LABELS[state] };
+}
+
 module.exports = {
   recordUserDeposit,
   settleAndRelease,
@@ -540,5 +572,6 @@ module.exports = {
   operatorDeposit,
   forceRefundOnchain,
   getOnchainStatus,
+  claimSettlement,
   toEscrowId,
 };
