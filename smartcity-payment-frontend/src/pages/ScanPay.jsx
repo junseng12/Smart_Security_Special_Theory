@@ -546,11 +546,14 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
         userFinalSig: String(liveCharged.toFixed(6)),
         // fareUsdc는 백엔드가 started_at 기준으로 직접 계산 — 프론트 값 전달 안 함
       });
-      addLog(`✅ 요금: ${res.fareUsdc} USDC`, "success");
-      addLog(`✅ 환불: ${res.refundUsdc} USDC`, "success");
+      const fareUsdc   = res.fareUsdc   ?? res.fare   ?? "계산중...";
+      const refundUsdc  = res.refundUsdc  ?? res.refund  ?? "계산중...";
+      addLog(`✅ 요금: ${fareUsdc} USDC`, "success");
+      addLog(`✅ 환불: ${refundUsdc} USDC`, "success");
+      if (res.deferred) addLog(`⏳ 24시간 분쟁 대기 후 자동 정산됩니다`, "info");
 
       clearSession();
-      setSessionData({ ...sessionData, result: res, status: "ended" });
+      setSessionData({ ...sessionData, result: { ...res, fareUsdc, refundUsdc }, status: "ended" });
       setStep("ended");
       queryClient.invalidateQueries({ queryKey: ['sessions-history'] });
     } catch (err) {
