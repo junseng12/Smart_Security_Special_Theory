@@ -448,6 +448,18 @@ router.get('/:id/stream', async (req, res) => {
   });
 });
 
+
+// ── POST /sessions/:id/force-refund — UserDeposited 상태에서 강제 환불 ──────
+// operatorDeposit 없이 userDeposit만 있는 경우 forceRefund 호출
+router.post('/:id/force-refund', async (req, res, next) => {
+  try {
+    const sessionId = req.params.id;
+    const escrowSvc = require('../services/escrowPayoutService');
+    const result = await escrowSvc.forceRefund(sessionId);
+    res.json({ ok: true, data: result });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
 
 
