@@ -6,11 +6,12 @@ import { motion } from 'framer-motion';
 import { CheckCircle2, AlertCircle, ArrowLeft, Loader2, Lock } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import BottomNav from '@/components/wallet/BottomNav';
-import { sendUsdcOnChain, getUsdcBalance } from '@/lib/walletUtils';
+import { sendUsdcOnChain, getUsdcBalance, approveUsdc, callUserDeposit, waitForTx } from '@/lib/walletUtils';
 
 const BACKEND = "https://smartcity-payment-backend-production.up.railway.app";
 // 결제 수취 주소 (서비스 운영자 에스크로 주소 — 테스트넷)
-const ESCROW_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
+const ESCROW_V3_ADDR = "0x454Dd98f154cC4Af7ACB5390113151E2f0e489a1"; // SmartCityEscrow V3.2
+const HOLD_DEADLINE_SEC = 4 * 60; // [TEST] 4분 — 운영시 24h(86400) 복원
 
 async function apiCall(path, method = "GET", body = null) {
   const res = await fetch(`${BACKEND}${path}`, {
@@ -119,7 +120,18 @@ export default function ScanPay() {
     try {
       // 1) 실제 온체인 USDC 예치 (MetaMask 서명)
       addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC 예치 승인 요청 중...`, "info");
-      const txHash = await sendUsdcOnChain(mmAddress, ESCROW_ADDRESS, service.depositUsdc);
+      // escrowId: 백엔드 세션 ID → keccak256 (백엔드 /escrow-id 에서 받아옴)
+        const holdDeadline = Math.floor(Date.now() / 1000) + HOLD_DEADLINE_SEC;
+        let escrowId = null;
+        try {
+          const eidRes = await apiCall(\`/api/v1/sessions/\${sessionData.sessionId}/escrow-id\`);
+          escrowId = eidRes.escrowId;
+        } catch(e) { console.warn('escrowId 조회 실패, 백엔드 기본값 사용', e); }
+        addLog(\`🔐 Step 1: USDC Approve 요청 (에스크로 컨트랙트에 허가)...\`, "info");
+        const approveTx = await approveUsdc(mmAddress, service.depositUsdc);
+        await waitForTx(approveTx, 90000);
+        addLog(\`✅ Approve 완료! Step 2: 에스크로 컨트랙트 예치...\`, "success");
+        const txHash = await callUserDeposit(mmAddress, escrowId || ("0x"+"00".repeat(32)), service.depositUsdc, holdDeadline);
       setDepositTxHash(txHash);
       addLog(`✅ 온체인 예치 완료 — ${txHash.slice(0, 16)}...`, "success");
 
