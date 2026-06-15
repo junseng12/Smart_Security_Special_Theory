@@ -89,8 +89,8 @@ async function processPendingSettles() {
        FROM escrow_locks el
        WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
          AND el.hold_deadline IS NOT NULL
-         AND el.hold_deadline < EXTRACT(EPOCH FROM NOW())::BIGINT
-         AND COALESCE(el.retry_count, 0) < 3
+         AND el.hold_deadline < NOW()
+         AND COALESCE(el.retry_count, 0) < 5
        LIMIT 10`
     );
 
@@ -106,16 +106,26 @@ async function processPendingSettles() {
         logger.info('Watchtower: settle OK', { sessionId: row.session_id, result: JSON.stringify(result) });
       } catch (e) {
         logger.error('Watchtower: settle fail', { sessionId: row.session_id, error: e.message });
-        // revert 시 retry_count 증가 — 3회 이상 실패 시 SettleFailed로 마킹 (무한 루프 방지)
+        // revert 시 retry_count 증가 — 5회 이상 실패 시 SettleFailed로 마킹 (무한 루프 방지)
         try {
+          // 현재 retry_count 조회 후 판단
+          const countRow = await db.getPool().query(
+            `SELECT COALESCE(retry_count, 0) as cnt FROM escrow_locks WHERE session_id=$1`,
+            [row.session_id]
+          );
+          const currentCount = parseInt(countRow.rows[0]?.cnt || 0);
+          const newState = currentCount >= 4 ? 'SettleFailed' : undefined;
           await db.getPool().query(
             `UPDATE escrow_locks
              SET retry_count = COALESCE(retry_count, 0) + 1,
-                 state = CASE WHEN COALESCE(retry_count, 0) >= 2 THEN 'SettleFailed' ELSE state END,
+                 ${newState ? "state = 'SettleFailed'," : ''}
                  last_error = $2
              WHERE session_id = $1`,
             [row.session_id, e.message.slice(0, 200)]
           );
+          if (newState) {
+            logger.warn('Watchtower: 5회 실패 → SettleFailed 마킹', { sessionId: row.session_id });
+          }
         } catch (dbErr) {
           logger.error('Watchtower: DB update fail', { error: dbErr.message });
         }
@@ -184,5 +194,6 @@ startLoop().catch((err) => {
   logger.error('Watchtower fatal error', { error: err.message });
   process.exit(1);
 });
+
 
 
