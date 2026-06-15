@@ -534,4 +534,5 @@ module.exports = {
   operatorDeposit,
   forceRefundOnchain,
   getOnchainStatus,
+  toEscrowId,
 };
