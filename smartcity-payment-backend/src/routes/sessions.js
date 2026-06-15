@@ -139,14 +139,30 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
     }
     // ──────────────────────────────────────────────────────────────────────────
 
-    const result = await orchestrator.endSessionAndSettle({
-      sessionId:    req.params.id,
-      channelId:    req.body.channelId,
-      userAddress:  req.body.userAddress,
-      userFinalSig: req.body.userFinalSig,
-      fareUsdc:     req.body.fareUsdc,      // ★ charge 요금 직접 전달
-      adjustment:   req.body.adjustment,
-    });
+    // 세션 종료 + 정산 (비동기 처리 — deferred 시 즉시 202 반환)
+    let result;
+    try {
+      result = await Promise.race([
+        orchestrator.endSessionAndSettle({
+          sessionId:    req.params.id,
+          channelId:    req.body.channelId,
+          userAddress:  req.body.userAddress,
+          userFinalSig: req.body.userFinalSig,
+          fareUsdc:     req.body.fareUsdc,
+          adjustment:   req.body.adjustment,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('SETTLE_DEFERRED')), 25000)),
+      ]);
+    } catch (raceErr) {
+      if (raceErr.message === 'SETTLE_DEFERRED') {
+        // holdDeadline 대기 중 — 백그라운드 정산 진행 중, 즉시 accepted 반환
+        return res.status(202).json({
+          ok: true,
+          data: { deferred: true, status: 'settling', message: 'holdDeadline 대기 중, 자동 정산 예약됨' }
+        });
+      }
+      throw raceErr;
+    }
 
     sseClients.broadcast(req.body.userAddress, {
       event: 'settlement_complete',
@@ -204,7 +220,7 @@ router.post('/:id/deposit', async (req, res, next) => {
     // ★ await로 처리: Railway는 비동기 .then이 요청 완료 후 실행 보장 안 됨
     // userDepositTxHash가 실제 TX인 경우만 온체인 operatorDeposit 실행
     const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
-    const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock') && !depositTxHash.startsWith('0xtest');
+    const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock');
 
     let operatorDepositResult = null;
     if (canEscrow && isRealTx) {
