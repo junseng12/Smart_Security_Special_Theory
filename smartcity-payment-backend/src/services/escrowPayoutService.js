@@ -12,7 +12,7 @@
 const { ethers } = require('ethers');
 const logger     = require('../utils/logger');
 
-const ESCROW_ADDR = process.env.ESCROW_CONTRACT_ADDRESS || '0x454Dd98f154cC4Af7ACB5390113151E2f0e489a1';
+const ESCROW_ADDR = process.env.ESCROW_CONTRACT_ADDRESS || '0xa2642876a2Aa9F19D22a6e69379bbcA10556977f';
 const USDC_ADDR   = process.env.USDC_CONTRACT_ADDRESS   || '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
 const BASE_RPC    = process.env.BASE_RPC_URL             || 'https://sepolia.base.org';
 
