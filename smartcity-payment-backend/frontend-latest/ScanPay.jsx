@@ -118,30 +118,39 @@ export default function ScanPay() {
     addLog(`QR 스캔: ${service.serviceId}`, "info");
 
     try {
-      // 1) 실제 온체인 USDC 예치 (MetaMask 서명)
-      addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC 예치 승인 요청 중...`, "info");
-      // escrowId: 백엔드 세션 ID → keccak256 (백엔드 /escrow-id 에서 받아옴)
-        const holdDeadline = Math.floor(Date.now() / 1000) + HOLD_DEADLINE_SEC;
-        let escrowId = null;
-        try {
-          const eidRes = await apiCall(\`/api/v1/sessions/\${sessionData.sessionId}/escrow-id\`);
-          escrowId = eidRes.escrowId;
-        } catch(e) { console.warn('escrowId 조회 실패, 백엔드 기본값 사용', e); }
-        addLog(\`🔐 Step 1: USDC Approve 요청 (에스크로 컨트랙트에 허가)...\`, "info");
-        const approveTx = await approveUsdc(mmAddress, service.depositUsdc);
-        await waitForTx(approveTx, 90000);
-        addLog(\`✅ Approve 완료! Step 2: 에스크로 컨트랙트 예치...\`, "success");
-        const txHash = await callUserDeposit(mmAddress, escrowId || ("0x"+"00".repeat(32)), service.depositUsdc, holdDeadline);
-      setDepositTxHash(txHash);
-      addLog(`✅ 온체인 예치 완료 — ${txHash.slice(0, 16)}...`, "success");
-
-      // 2) 백엔드 세션 시작
+      // 1) 백엔드 세션 먼저 시작 → sessionId 확보
+      addLog(`🚀 세션 시작 중...`, "info");
       const data = await apiCall("/api/v1/sessions/start", "POST", {
         userAddress: mmAddress,
         serviceType: service.id,
         depositUsdc: String(service.depositUsdc),
-        depositTxHash: txHash,
       });
+
+      // 2) 백엔드 세션 ID로 escrowId 조회
+      const holdDeadline = Math.floor(Date.now() / 1000) + HOLD_DEADLINE_SEC;
+      let escrowId = null;
+      try {
+        const eidRes = await apiCall(`/api/v1/sessions/${data.sessionId}/escrow-id`);
+        escrowId = eidRes.escrowId;
+      } catch(e) { console.warn('escrowId 조회 실패, 백엔드 기본값 사용', e); }
+
+      // 3) MetaMask: USDC Approve → userDeposit 온체인 TX
+      addLog(`💳 MetaMask에서 ${service.depositUsdc} USDC 예치 승인 요청 중...`, "info");
+      addLog(`🔐 Step 1: USDC Approve 요청 (에스크로 컨트랙트에 허가)...`, "info");
+      const approveTx = await approveUsdc(mmAddress, service.depositUsdc);
+      await waitForTx(approveTx, 90000);
+      addLog(`✅ Approve 완료! Step 2: 에스크로 컨트랙트 예치...`, "success");
+      const txHash = await callUserDeposit(mmAddress, escrowId || ("0x"+"00".repeat(32)), service.depositUsdc, holdDeadline);
+      setDepositTxHash(txHash);
+      addLog(`✅ 온체인 예치 완료 — ${txHash.slice(0, 16)}...`, "success");
+
+      // 4) 백엔드에 deposit 기록 (operatorDeposit 자동 실행)
+      await apiCall(`/api/v1/sessions/${data.sessionId}/deposit`, "POST", {
+        userAddress: mmAddress,
+        depositUsdc: String(service.depositUsdc),
+        depositTxHash: txHash,
+        serviceStartedAt: Date.now(),
+      }).catch(e => addLog(`⚠️ deposit 기록 오류(무시): ${e.message}`, "error"));
 
       const now = Date.now();
       startedAtRef.current = now;
