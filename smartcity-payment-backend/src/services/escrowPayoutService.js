@@ -319,7 +319,7 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     // holdDeadline 아직 안 됐으면 onchain call은 revert됨
     // holdDeadline이 이제 최소 300초(5분)이므로 항상 deferred(비동기) 처리
     // MAX_SYNC_WAIT: 즉시 응답 후 백그라운드로 처리하는 임계값
-    const MAX_SYNC_WAIT = 10000; // 10초 이내면 동기 대기, 그 이상은 항상 deferred
+    const MAX_SYNC_WAIT = 300000; // 300초(5분) 이내 동기 대기 → Railway deferred 문제 해결 [DEMO]
     if (waitMs <= MAX_SYNC_WAIT) {
       logger.info(`HoldDeadline 대기 ${Math.ceil(waitMs/1000)}s (동기)`, { sessionId });
       await new Promise(r => setTimeout(r, waitMs + 1500));
