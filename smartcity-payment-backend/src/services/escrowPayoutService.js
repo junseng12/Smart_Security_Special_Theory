@@ -443,6 +443,14 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
      WHERE session_id=$1`,
     [sessionId, receipt.hash, fareUsdc, claimableAfter]
   );
+  // ★ sessions 테이블에도 txHash 동기화
+  await getPool().query(
+    `UPDATE sessions
+     SET status='Settled', tx_hash=$2, fare_usdc=$3,
+         refund_usdc=$4, ended_at=NOW(), settled_at=NOW()
+     WHERE id=$1`,
+    [sessionId, receipt.hash, fareUsdc, refundUsdc]
+  ).catch(e => logger.warn('sessions txHash sync failed', { error: e.message }));
 
   logger.info('settleAndRelease reserved ✅ (24h dispute window started)', {
     sessionId, txHash: receipt.hash, fareUsdc, refundUsdc,
