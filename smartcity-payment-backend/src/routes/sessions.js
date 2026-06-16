@@ -209,7 +209,7 @@ router.post('/:id/deposit', async (req, res, next) => {
     let operatorDepositResult = null;
     if (canEscrow && isRealTx) {
       // ★ operatorDeposit = userDeposit 금액과 동일하게
-      const opDepositUsdc = depositUsdc || process.env.OPERATOR_DEPOSIT_USDC || '3.0';
+      const opDepositUsdc = depositUsdc || process.env.OPERATOR_DEPOSIT_USDC || '0.10'; // 사용자 입금액과 동기화
       try {
         operatorDepositResult = await escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash);
         const logger = require('../utils/logger');
@@ -217,7 +217,7 @@ router.post('/:id/deposit', async (req, res, next) => {
       } catch(err) {
         const logger = require('../utils/logger');
         logger.warn('Operator deposit failed (non-fatal)', { sessionId: req.params.id, error: err.message });
-        operatorDepositResult = { skipped: false, error: err.message };
+        // operatorDeposit 실패는 non-fatal — 세션은 계속 진행
       }
     } else if (canEscrow && !isRealTx) {
       const logger = require('../utils/logger');
