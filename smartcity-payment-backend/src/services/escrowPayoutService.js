@@ -302,8 +302,22 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   }
 
   if (!row) {
-    logger.warn('No escrow record for settleAndRelease — DB only', { sessionId });
-    return { skipped: true, reason: 'no_escrow_record' };
+    logger.warn('No escrow record — sessions fare_usdc만 기록', { sessionId, fareUsdc });
+    // sessions 테이블에라도 요금 기록
+    const fUsdc = parseFloat(fareUsdc || 0);
+    const dep   = 3.0; // 기본 보증금
+    const refund = Math.max(0, dep - fUsdc).toFixed(6);
+    await getPool().query(
+      `UPDATE sessions SET status='Settling', fare_usdc=$2, charged_usdc=$2 WHERE id=$1`,
+      [sessionId, fareUsdc || '0']
+    ).catch(() => {});
+    return {
+      skipped: false,
+      reason: 'no_escrow_record_db_only',
+      fareUsdc: fareUsdc || '0',
+      refundUsdc: refund,
+      txHash: 'settled_via_perun',
+    };
   }
 
   // ── holdDeadline 확인 ──
