@@ -16,18 +16,6 @@
  */
 
 const { ethers } = require('ethers');
-
-/**
- * wss:// → https:// 자동 변환
- * ethers v6 JsonRpcProvider는 wss를 지원하지 않음
- * WebSocketProvider를 쓰거나 https로 변환해야 함
- */
-function getSafeRpcUrl() {
-  const raw = process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org';
-  if (raw.startsWith('wss://')) return raw.replace('wss://', 'https://');
-  if (raw.startsWith('ws://'))  return raw.replace('ws://', 'http://');
-  return raw;
-}
 const logger = require('../utils/logger');
 const { getPool } = require('./db');
 
@@ -49,7 +37,7 @@ async function waitForTxOnChain(txHash, timeoutMs = 90000) {
     return { status: '0x1' }; // mock 통과
   }
   const RPC_LIST = [
-    getSafeRpcUrl(),
+    process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org',
     'https://84532.rpc.thirdweb.com',
     'https://sepolia.base.org',
   ];
@@ -113,7 +101,7 @@ function getOperatorWallet() {
   if (!process.env.OPERATOR_PRIVATE_KEY) {
     throw new Error('OPERATOR_PRIVATE_KEY 환경변수가 설정되지 않았습니다. Railway 환경변수를 확인하세요.');
   }
-  const rpc = getSafeRpcUrl();
+  const rpc = process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org';
   const provider = new ethers.JsonRpcProvider(rpc);
   return new ethers.Wallet(process.env.OPERATOR_PRIVATE_KEY, provider);
 }
@@ -223,7 +211,7 @@ async function operatorDeposit(sessionId, operatorDepositUsdc, userDepositTxHash
   }
 
   // ── 2. 컨트랙트 state 확인 ────────────────────────────────────────────────
-  const roProvider = new ethers.JsonRpcProvider(getSafeRpcUrl());
+  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org');
   const escrowRO = getEscrowContract(roProvider);
   let onchainState = 0;
   try {
@@ -302,22 +290,8 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   }
 
   if (!row) {
-    logger.warn('No escrow record — sessions fare_usdc만 기록', { sessionId, fareUsdc });
-    // sessions 테이블에라도 요금 기록
-    const fUsdc = parseFloat(fareUsdc || 0);
-    const dep   = 3.0; // 기본 보증금
-    const refund = Math.max(0, dep - fUsdc).toFixed(6);
-    await getPool().query(
-      `UPDATE sessions SET status='Settling', fare_usdc=$2, charged_usdc=$2 WHERE id=$1`,
-      [sessionId, fareUsdc || '0']
-    ).catch(() => {});
-    return {
-      skipped: false,
-      reason: 'no_escrow_record_db_only',
-      fareUsdc: fareUsdc || '0',
-      refundUsdc: refund,
-      txHash: 'settled_via_perun',
-    };
+    logger.warn('No escrow record for settleAndRelease — DB only', { sessionId });
+    return { skipped: true, reason: 'no_escrow_record' };
   }
 
   // ── holdDeadline 확인 ──
@@ -326,30 +300,58 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   const waitMs = holdDeadline - Date.now();
 
   if (waitMs > 0) {
-    // holdDeadline 아직 안 됐으면 onchain settleAndRelease는 revert됨
-    // → PendingSettle 저장 후 즉시 응답 (크론잡이 처리)
-    logger.info(`HoldDeadline까지 ${Math.ceil(waitMs/1000)}s 남음 — PendingSettle 저장 후 즉시 응답`, { sessionId });
-    await getPool().query(
-      `UPDATE escrow_locks SET state='PendingSettle', fare_amount=$2 WHERE session_id=$1`,
-      [sessionId, fareUsdc || '0']
-    ).catch(() => {});
-    // sessions 테이블에 Settling 상태 + 요금 선기록
-    await getPool().query(
-      `UPDATE sessions SET status='Settling', fare_usdc=$2, charged_usdc=COALESCE(charged_usdc,0)
-       WHERE id=$1`,
-      [sessionId, fareUsdc || '0']
-    ).catch(() => {});
-    const userDep = parseFloat(row?.user_deposit || 0);
-    const expectedRefund = Math.max(0, userDep - parseFloat(fareUsdc || 0)).toFixed(6);
-    return {
-      skipped: false,
-      deferred: true,
-      fareUsdc,
-      refundUsdc: expectedRefund,
-      userDeposit: String(userDep),
-      holdDeadline: new Date(holdDeadline).toISOString(),
-      note: '정산 TX는 holdDeadline 도달 후 크론잡이 자동 처리합니다',
-    };
+    // holdDeadline 아직 안 됐으면 onchain call은 revert됨
+    // holdDeadline이 이제 최소 300초(5분)이므로 항상 deferred(비동기) 처리
+    // MAX_SYNC_WAIT: 즉시 응답 후 백그라운드로 처리하는 임계값
+    const MAX_SYNC_WAIT = 10000; // 10초 이내면 동기 대기, 그 이상은 항상 deferred
+    if (waitMs <= MAX_SYNC_WAIT) {
+      logger.info(`HoldDeadline 대기 ${Math.ceil(waitMs/1000)}s (동기)`, { sessionId });
+      await new Promise(r => setTimeout(r, waitMs + 1500));
+    } else {
+      // 90초 초과: DB에 pending_settle 기록 후 즉시 응답
+      // 백그라운드 크론 또는 재시도 엔드포인트로 처리
+      logger.warn(`HoldDeadline까지 ${Math.ceil(waitMs/1000)}s 남음 — pending_settle 저장`, { sessionId });
+      await getPool().query(
+        `UPDATE escrow_locks SET state='PendingSettle', fare_amount=$2 WHERE session_id=$1`,
+        [sessionId, fareUsdc || '0']
+      ).catch(() => {});
+      // 비동기 백그라운드 재시도
+      setTimeout(async () => {
+        try {
+          await new Promise(r => setTimeout(r, waitMs + 2000));
+          const w2 = getOperatorWallet();
+          const e2 = getEscrowContract(w2);
+          const eid2 = toEscrowId(sessionId);
+          const fw2 = ethers.parseUnits(String(fareUsdc || '0'), 6);
+          const tx2 = await e2.settleAndRelease(eid2, fw2);
+          const r2 = await tx2.wait();
+          const bgClaimableAfter = Math.floor(Date.now() / 1000) + 240; // [TEST] 4분
+          await getPool().query(
+            `UPDATE escrow_locks
+             SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3,
+                 claimable_after=to_timestamp($4)
+             WHERE session_id=$1`,
+            [sessionId, r2.hash, fareUsdc, bgClaimableAfter]
+          );
+          logger.info('Background settleAndRelease reserved ✅ (24h window)', { sessionId, txHash: r2.hash });
+        } catch(e) {
+          logger.error('Background settleAndRelease failed', { sessionId, error: e.message });
+        }
+      }, 0);
+      // DB에서 userDeposit 가져와서 예상 환불액 계산 (즉시 반환용)
+      const userDep = parseFloat(row?.user_deposit || 0);
+      const expectedRefund = (userDep - parseFloat(fareUsdc || 0)).toFixed(6);
+      return {
+        skipped: false,
+        deferred: true,
+        reason: 'pending_settle_scheduled',
+        fareUsdc,
+        refundUsdc: expectedRefund,       // ★ 예상 환불액 (실제 TX는 백그라운드)
+        userDeposit: String(userDep),
+        holdDeadline: new Date(holdDeadline).toISOString(),
+        note: '정산 TX는 holdDeadline 도달 후 자동 처리됩니다',
+      };
+    }
   }
 
   const wallet   = getOperatorWallet();
@@ -422,26 +424,15 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   // CLAIM_PERIOD = 4min (TEST) → claimableAfter = 지금 + 240s
   const claimableAfter = Math.floor(Date.now() / 1000) + 240;
 
-  // ★ state='Reserved' — 돈이 컨트랙트에 잠김 (아직 분배 안 됨)
-  //    claimableAfter 이후 claimSettlement() 호출 시 실제 분배
-  //    그 이전에 환불 요청 → refundToBuyer()로 전액/부분 환불
   await getPool().query(
     `UPDATE escrow_locks
-     SET state='Reserved', settle_tx=$2, settled_at=NOW(), fare_amount=$3,
+     SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3,
          claimable_after=to_timestamp($4)
      WHERE session_id=$1`,
     [sessionId, receipt.hash, fareUsdc, claimableAfter]
   );
-  // sessions 테이블 — Settling 상태 (아직 최종 분배 전)
-  await getPool().query(
-    `UPDATE sessions
-     SET status='Settling', tx_hash=$2, fare_usdc=$3,
-         refund_usdc=$4, ended_at=COALESCE(ended_at, NOW())
-     WHERE id=$1`,
-    [sessionId, receipt.hash, fareUsdc, refundUsdc]
-  ).catch(e => logger.warn('sessions tx_hash sync failed', { error: e.message }));
 
-  logger.info('settleAndRelease Reserved ✅ — 분쟁 창 시작', {
+  logger.info('settleAndRelease reserved ✅ (24h dispute window started)', {
     sessionId, txHash: receipt.hash, fareUsdc, refundUsdc,
     claimableAfter: new Date(claimableAfter * 1000).toISOString(),
   });
@@ -450,8 +441,9 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     escrowId,
     fareUsdc,
     refundUsdc,
+    operatorDepositReturned: String(opDep),
     claimableAfter: new Date(claimableAfter * 1000).toISOString(),
-    mode: 'reserved',   // 잠금 완료 — claimSettlement 대기 중
+    mode: 'settle_reserved_v32',  // 즉시 전송 아님 — 24h 후 claimSettlement
   };
 }
 
@@ -514,7 +506,7 @@ async function claimSettlement(sessionId) {
   const escrowId = toEscrowId(sessionId);
 
   // 온체인 claimable 여부 확인 (isClaimable view)
-  const roProvider = new ethers.JsonRpcProvider(getSafeRpcUrl());
+  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org');
   const escrowRO = new ethers.Contract(
     process.env.ESCROW_CONTRACT_ADDRESS,
     [...ESCROW_ABI_V3, 'function isClaimable(bytes32) view returns (bool)'],
@@ -530,21 +522,14 @@ async function claimSettlement(sessionId) {
   const tx      = await escrow.claimSettlement(escrowId, { gasLimit: 250000 });
   const receipt = await tx.wait();
 
-  // escrow_locks: Claimed (최종 분배 완료)
   await getPool().query(
     `UPDATE escrow_locks SET state='Claimed', settle_tx=$2, settled_at=NOW()
      WHERE session_id=$1`,
     [sessionId, receipt.hash]
   );
-  // sessions: Settled + settledAt 기록
-  await getPool().query(
-    `UPDATE sessions SET status='Settled', settled_at=NOW(), tx_hash=COALESCE(tx_hash,$2)
-     WHERE id=$1`,
-    [sessionId, receipt.hash]
-  ).catch(() => {});
 
-  logger.info('claimSettlement complete ✅ — 최종 분배 완료', { sessionId, txHash: receipt.hash });
-  return { txHash: receipt.hash, mode: 'claimed' };
+  logger.info('claimSettlement complete ✅', { sessionId, txHash: receipt.hash });
+  return { txHash: receipt.hash, mode: 'claim_settlement_v32' };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -558,7 +543,7 @@ async function getEscrowStatus(sessionId) {
 
   let onChain = null;
   try {
-    const rpc    = getSafeRpcUrl();
+    const rpc    = process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org';
     const provider = new ethers.JsonRpcProvider(rpc);
     const escrow   = getEscrowContract(provider);
     const s = await escrow.getEscrowStatus(escrowId);
