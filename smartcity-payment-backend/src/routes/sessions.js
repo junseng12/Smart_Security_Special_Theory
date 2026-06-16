@@ -217,6 +217,7 @@ router.post('/:id/deposit', async (req, res, next) => {
       } catch(err) {
         const logger = require('../utils/logger');
         logger.warn('Operator deposit failed (non-fatal)', { sessionId: req.params.id, error: err.message });
+        operatorDepositResult = { skipped: false, error: err.message };
       }
     } else if (canEscrow && !isRealTx) {
       const logger = require('../utils/logger');
