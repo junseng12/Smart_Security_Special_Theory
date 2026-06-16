@@ -408,23 +408,26 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   // CLAIM_PERIOD = 4min (TEST) → claimableAfter = 지금 + 240s
   const claimableAfter = Math.floor(Date.now() / 1000) + 240;
 
+  // ★ state='Reserved' — 돈이 컨트랙트에 잠김 (아직 분배 안 됨)
+  //    claimableAfter 이후 claimSettlement() 호출 시 실제 분배
+  //    그 이전에 환불 요청 → refundToBuyer()로 전액/부분 환불
   await getPool().query(
     `UPDATE escrow_locks
-     SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3,
+     SET state='Reserved', settle_tx=$2, settled_at=NOW(), fare_amount=$3,
          claimable_after=to_timestamp($4)
      WHERE session_id=$1`,
     [sessionId, receipt.hash, fareUsdc, claimableAfter]
   );
-  // ★ sessions 테이블에도 txHash 동기화
+  // sessions 테이블 — Settling 상태 (아직 최종 분배 전)
   await getPool().query(
     `UPDATE sessions
-     SET status='Settled', tx_hash=$2, fare_usdc=$3,
-         refund_usdc=$4, ended_at=NOW(), settled_at=NOW()
+     SET status='Settling', tx_hash=$2, fare_usdc=$3,
+         refund_usdc=$4, ended_at=COALESCE(ended_at, NOW())
      WHERE id=$1`,
     [sessionId, receipt.hash, fareUsdc, refundUsdc]
-  ).catch(e => logger.warn('sessions txHash sync failed', { error: e.message }));
+  ).catch(e => logger.warn('sessions tx_hash sync failed', { error: e.message }));
 
-  logger.info('settleAndRelease reserved ✅ (24h dispute window started)', {
+  logger.info('settleAndRelease Reserved ✅ — 분쟁 창 시작', {
     sessionId, txHash: receipt.hash, fareUsdc, refundUsdc,
     claimableAfter: new Date(claimableAfter * 1000).toISOString(),
   });
@@ -433,9 +436,8 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     escrowId,
     fareUsdc,
     refundUsdc,
-    operatorDepositReturned: String(opDep),
     claimableAfter: new Date(claimableAfter * 1000).toISOString(),
-    mode: 'settle_reserved_v32',  // 즉시 전송 아님 — 24h 후 claimSettlement
+    mode: 'reserved',   // 잠금 완료 — claimSettlement 대기 중
   };
 }
 
@@ -514,14 +516,21 @@ async function claimSettlement(sessionId) {
   const tx      = await escrow.claimSettlement(escrowId, { gasLimit: 250000 });
   const receipt = await tx.wait();
 
+  // escrow_locks: Claimed (최종 분배 완료)
   await getPool().query(
     `UPDATE escrow_locks SET state='Claimed', settle_tx=$2, settled_at=NOW()
      WHERE session_id=$1`,
     [sessionId, receipt.hash]
   );
+  // sessions: Settled + settledAt 기록
+  await getPool().query(
+    `UPDATE sessions SET status='Settled', settled_at=NOW(), tx_hash=COALESCE(tx_hash,$2)
+     WHERE id=$1`,
+    [sessionId, receipt.hash]
+  ).catch(() => {});
 
-  logger.info('claimSettlement complete ✅', { sessionId, txHash: receipt.hash });
-  return { txHash: receipt.hash, mode: 'claim_settlement_v32' };
+  logger.info('claimSettlement complete ✅ — 최종 분배 완료', { sessionId, txHash: receipt.hash });
+  return { txHash: receipt.hash, mode: 'claimed' };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
