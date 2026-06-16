@@ -122,7 +122,7 @@ router.post('/:id/sign', validate(signSchema), async (req, res, next) => {
 const endSchema = Joi.object({
   channelId:    Joi.string().required(),
   userAddress:  ethAddress().required(),
-  userFinalSig: Joi.string().required(),
+  userFinalSig: Joi.string().optional().default(''), // 오프체인 서명 (없어도 정산 가능)
   fareUsdc:     Joi.string().optional(),   // charge에서 받은 요금 직접 전달
   adjustment:   Joi.object({ creditUsdc: usdcAmount() }).optional(),
 });
