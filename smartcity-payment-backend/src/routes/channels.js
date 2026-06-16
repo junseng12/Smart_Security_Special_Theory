@@ -64,13 +64,9 @@ router.post('/open', validate(openSchema), async (req, res, next) => {
 // ── POST /channels/:id/update ─────────────────────────────────────────────────
 
 const updateSchema = Joi.object({
-  chargeUsdc:      usdcAmount(),
-  userSig:         Joi.string().required(),
-  userAddress:     ethAddress().required(),
-  nonce:           Joi.number().integer().min(0).optional(),
-  cumulativeUsdc:  Joi.string().optional(),
-  stepIndex:       Joi.number().integer().min(0).optional(),
-  signature:       Joi.string().optional(), // userSig alias (호환성)
+  chargeUsdc: usdcAmount(),
+  userSig: Joi.string().required(),
+  userAddress: ethAddress().required(),
 });
 
 router.post('/:id/update', validate(updateSchema), async (req, res, next) => {
