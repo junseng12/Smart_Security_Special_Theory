@@ -23,13 +23,9 @@ const { ethers } = require('ethers');
  * WebSocketProvider를 쓰거나 https로 변환해야 함
  */
 function getSafeRpcUrl() {
-  const raw = getSafeRpcUrl();
-  if (raw.startsWith('wss://')) {
-    return raw.replace('wss://', 'https://');
-  }
-  if (raw.startsWith('ws://')) {
-    return raw.replace('ws://', 'http://');
-  }
+  const raw = process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org';
+  if (raw.startsWith('wss://')) return raw.replace('wss://', 'https://');
+  if (raw.startsWith('ws://'))  return raw.replace('ws://', 'http://');
   return raw;
 }
 const logger = require('../utils/logger');
