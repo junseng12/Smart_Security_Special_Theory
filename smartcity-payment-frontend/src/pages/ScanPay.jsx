@@ -582,17 +582,28 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       const activeSession = JSON.parse(localStorage.getItem("active_session") || "{}");
       const nonces = activeSession.chargedNonce || 0;
       addLog(`① 세션 종료 요청... (오프체인 서명 누적: ${nonces}회)`, "info");
+      const liveChargedStr = liveCharged.toFixed(6);
       const res = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
         channelId:    sessionData.channelId,
         userAddress:  mmAddress || localStorage.getItem("mm_address"),
-        userFinalSig: String(liveCharged.toFixed(6)),
-        fareUsdc:     String(liveCharged.toFixed(6)), // ★ 오프체인 누적 요금 — 백엔드 DB 폴백용
+        userFinalSig: liveChargedStr,
+        fareUsdc:     liveChargedStr, // ★ 오프체인 누적 요금 — 백엔드 DB 폴백용
       });
-      const fareUsdc   = res.fareUsdc   ?? res.fare   ?? "계산중...";
-      const refundUsdc  = res.refundUsdc  ?? res.refund  ?? "계산중...";
+
+      // ★ 백엔드 응답 fareUsdc가 0이거나 없으면 프론트 liveCharged 우선 사용
+      const backendFare   = parseFloat(res.fareUsdc ?? res.fare ?? 0);
+      const depositAmt    = parseFloat(sessionData?.svc?.depositUsdc || 3.0);
+      const fareUsdc      = backendFare > 0
+        ? (res.fareUsdc ?? res.fare)
+        : liveChargedStr;                              // 백엔드 0이면 프론트 값
+      const backendRefund = parseFloat(res.refundUsdc ?? res.refund ?? 0);
+      const refundUsdc    = backendRefund < depositAmt && backendFare > 0
+        ? (res.refundUsdc ?? res.refund)
+        : String((depositAmt - parseFloat(fareUsdc)).toFixed(6));  // 직접 계산
+
       addLog(`✅ 요금: ${fareUsdc} USDC`, "success");
-      addLog(`✅ 환불: ${refundUsdc} USDC`, "success");
-      if (res.deferred) addLog(`⏳ 24시간 분쟁 대기 후 자동 정산됩니다`, "info");
+      addLog(`✅ 환불 예정: ${refundUsdc} USDC`, "success");
+      if (res.deferred) addLog(`⏳ holdDeadline 후 자동 정산됩니다`, "info");
 
       clearSession();
       setSessionData({ ...sessionData, result: { ...res, fareUsdc, refundUsdc }, status: "ended" });
