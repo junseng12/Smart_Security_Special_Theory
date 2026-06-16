@@ -182,7 +182,7 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
         chargedUsdc  = fareUsdc || '0';
         chargeSource = 'client_fallback_invalid_start';
         logger.warn('[Orchestrator] invalid started_at, fallback', { sessionId, rawStart });
-        // return 제거 — fallback 값으로 계속 진행
+        return; // 아래 else 건너뜀
       }
       const durationMin = (Date.now() - startMs) / 60_000;
 
