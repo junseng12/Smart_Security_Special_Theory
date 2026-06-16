@@ -156,6 +156,13 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
          FROM sessions WHERE id = $1`, [sessionId]
     );
     const sess = row.rows[0];
+    // sessions 테이블에 없으면 클라이언트 fareUsdc 즉시 사용
+    if (!sess) {
+      chargedUsdc  = fareUsdc && parseFloat(fareUsdc) > 0 ? fareUsdc : '0';
+      chargeSource = 'no_db_session_use_client';
+      logger.warn('[Orchestrator] sessions 없음 — client fareUsdc 사용', { sessionId, fareUsdc, chargedUsdc });
+      return; // try 블록 조기 탈출
+    }
     const depositUsdc = parseFloat(sess?.deposit_usdc || 3.0);
 
     // ① 오프체인 서명 누적값 (ProposeUsageUpdate가 정상 호출된 경우)
@@ -200,15 +207,15 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
       });
 
     } else {
-      // ③ 최후 폴백 — 클라이언트 전달값
-      chargedUsdc  = fareUsdc || '0';
-      chargeSource = 'client_fallback';
-      logger.warn('[Orchestrator] started_at not found, using fareUsdc from client', { sessionId, fareUsdc });
+      // ③ 클라이언트 전달값 — started_at 없을 때 최우선 사용
+      chargedUsdc  = fareUsdc && parseFloat(fareUsdc) > 0 ? fareUsdc : '0';
+      chargeSource = chargedUsdc !== '0' ? 'client_fareUsdc' : 'client_fallback_zero';
+      logger.warn('[Orchestrator] started_at not found, using fareUsdc from client', { sessionId, fareUsdc, chargedUsdc });
     }
   } catch (e) {
-    chargedUsdc  = fareUsdc || '0';
+    chargedUsdc  = fareUsdc && parseFloat(fareUsdc) > 0 ? fareUsdc : '0';
     chargeSource = 'error_fallback';
-    logger.warn('[Orchestrator] fare recalc failed, fallback to fareUsdc', { sessionId, error: e.message });
+    logger.warn('[Orchestrator] fare recalc failed, fallback to fareUsdc', { sessionId, fareUsdc, chargedUsdc, error: e.message });
   }
   logger.info('[Orchestrator] chargeSource determined', { sessionId, chargeSource, chargedUsdc });
 
