@@ -172,7 +172,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     };
 
     // home/ended 단계 → 모든 타이머 중지
-    if (step === "home" || step === "ended") {
+    if (step === "home") {
       clearInterval(timerRef.current);
       clearInterval(chargeIntervalRef.current);
       setElapsed(0);
@@ -546,11 +546,27 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
         userFinalSig: String(liveCharged.toFixed(6)),
         // fareUsdc는 백엔드가 started_at 기준으로 직접 계산 — 프론트 값 전달 안 함
       });
-      addLog(`✅ 요금: ${res.fareUsdc} USDC`, "success");
-      addLog(`✅ 환불: ${res.refundUsdc} USDC`, "success");
+      // ── 프론트 계산값 우선 적용 ──────────────────────────────────────
+      // 백엔드가 0을 반환하더라도 프론트에서 누적한 liveCharged를 기준으로 표시
+      const depositAmt = parseFloat(sessionData.svc?.depositUsdc || 3.0);
+      const frontFare   = parseFloat(liveCharged.toFixed(6));
+      const backFare    = parseFloat(res.fareUsdc || 0);
+      // 백엔드값이 0이거나 비정상(음수)이면 프론트 계산값 사용
+      const finalFare   = (backFare > 0 && backFare <= depositAmt) ? backFare : frontFare;
+      const finalRefund = parseFloat((depositAmt - finalFare).toFixed(6));
+
+      const finalResult = {
+        ...res,
+        fareUsdc:   finalFare.toFixed(6),
+        refundUsdc: finalRefund.toFixed(6),
+      };
+      addLog(`✅ 요금: ${finalResult.fareUsdc} USDC (${elapsedMinutes}분)`, "success");
+      addLog(`✅ 환불: ${finalResult.refundUsdc} USDC`, "success");
 
       clearSession();
-      setSessionData({ ...sessionData, result: res, status: "ended" });
+      // elapsed를 result에 저장 — ended 화면 진입 후 타이머 리셋되어도 표시 가능
+      const snapshotElapsed = Math.floor((Date.now() - (getStartedAt() || Date.now())) / 1000);
+      setSessionData({ ...sessionData, result: { ...finalResult, elapsedSec: snapshotElapsed }, status: "ended" });
       setStep("ended");
       queryClient.invalidateQueries({ queryKey: ['sessions-history'] });
     } catch (err) {
@@ -849,7 +865,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
               </div>
               <div className="flex justify-between py-2 border-b border-gray-50">
                 <span className="text-gray-500">이용 시간</span>
-                <span className="font-mono text-gray-900">{formatTime(elapsed)}</span>
+                <span className="font-mono text-gray-900">{formatTime(elapsed || sessionData?.result?.elapsedSec || 0)}</span>
               </div>
               {/* 세션 ID — 환불 신청 시 필요 */}
               <div className="flex justify-between items-center py-2">
