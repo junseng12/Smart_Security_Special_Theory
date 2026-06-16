@@ -91,25 +91,13 @@ async function startSession({ userAddress, serviceType, depositUsdc, meta = {} }
   if (redis) await redis.set(SESSION_KEY(sessionId), JSON.stringify(sessionData), 'EX', SESSION_TTL);
 
   // DB 저장
-  // 먼저 테이블 확인
-  await ensureSessionTable();
-
   await getPool().query(
     `INSERT INTO sessions (id, user_address, service_type, deposit_usdc, meta)
      VALUES ($1, $2, $3, $4, $5)`,
-    [sessionId, userAddress.toLowerCase(), serviceType, depositUsdc, JSON.stringify(meta)]
+    [sessionId, userAddress, serviceType, depositUsdc, JSON.stringify(meta)]
   );
 
-  // INSERT 검증
-  const check = await getPool().query(
-    `SELECT id FROM sessions WHERE id = $1`, [sessionId]
-  ).catch(() => ({ rows: [] }));
-  if (!check.rows[0]) {
-    logger.error('Session INSERT 실패 — DB에 저장 안 됨', { sessionId });
-  } else {
-    logger.info('Session started ✅', { sessionId, userAddress: userAddress.toLowerCase(), serviceType });
-  }
-
+  logger.info('Session started', { sessionId, userAddress, serviceType });
   return sessionData;
 }
 
