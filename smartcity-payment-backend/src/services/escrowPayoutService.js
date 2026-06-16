@@ -16,6 +16,22 @@
  */
 
 const { ethers } = require('ethers');
+
+/**
+ * wss:// → https:// 자동 변환
+ * ethers v6 JsonRpcProvider는 wss를 지원하지 않음
+ * WebSocketProvider를 쓰거나 https로 변환해야 함
+ */
+function getSafeRpcUrl() {
+  const raw = getSafeRpcUrl();
+  if (raw.startsWith('wss://')) {
+    return raw.replace('wss://', 'https://');
+  }
+  if (raw.startsWith('ws://')) {
+    return raw.replace('ws://', 'http://');
+  }
+  return raw;
+}
 const logger = require('../utils/logger');
 const { getPool } = require('./db');
 
@@ -37,7 +53,7 @@ async function waitForTxOnChain(txHash, timeoutMs = 90000) {
     return { status: '0x1' }; // mock 통과
   }
   const RPC_LIST = [
-    process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org',
+    getSafeRpcUrl(),
     'https://84532.rpc.thirdweb.com',
     'https://sepolia.base.org',
   ];
@@ -101,7 +117,7 @@ function getOperatorWallet() {
   if (!process.env.OPERATOR_PRIVATE_KEY) {
     throw new Error('OPERATOR_PRIVATE_KEY 환경변수가 설정되지 않았습니다. Railway 환경변수를 확인하세요.');
   }
-  const rpc = process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org';
+  const rpc = getSafeRpcUrl();
   const provider = new ethers.JsonRpcProvider(rpc);
   return new ethers.Wallet(process.env.OPERATOR_PRIVATE_KEY, provider);
 }
@@ -211,7 +227,7 @@ async function operatorDeposit(sessionId, operatorDepositUsdc, userDepositTxHash
   }
 
   // ── 2. 컨트랙트 state 확인 ────────────────────────────────────────────────
-  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org');
+  const roProvider = new ethers.JsonRpcProvider(getSafeRpcUrl());
   const escrowRO = getEscrowContract(roProvider);
   let onchainState = 0;
   try {
@@ -506,7 +522,7 @@ async function claimSettlement(sessionId) {
   const escrowId = toEscrowId(sessionId);
 
   // 온체인 claimable 여부 확인 (isClaimable view)
-  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org');
+  const roProvider = new ethers.JsonRpcProvider(getSafeRpcUrl());
   const escrowRO = new ethers.Contract(
     process.env.ESCROW_CONTRACT_ADDRESS,
     [...ESCROW_ABI_V3, 'function isClaimable(bytes32) view returns (bool)'],
@@ -543,7 +559,7 @@ async function getEscrowStatus(sessionId) {
 
   let onChain = null;
   try {
-    const rpc    = process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org';
+    const rpc    = getSafeRpcUrl();
     const provider = new ethers.JsonRpcProvider(rpc);
     const escrow   = getEscrowContract(provider);
     const s = await escrow.getEscrowStatus(escrowId);
