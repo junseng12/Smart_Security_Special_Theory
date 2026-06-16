@@ -18,7 +18,7 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
-const RATE_PER_MIN = 1.0;  // USDC/분 — 분당 1 USDC (기본요금 0, 완성된 분 단위)
+const RATE_PER_MIN = 0.1;  // USDC/분 — 분당 0.1 USDC (기본요금 0, 완성된 분 단위)
 
 const SERVICE_TYPES = [
   { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
@@ -554,15 +554,19 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
   // ── Charge 자동 청구 ──────────────────────────────────────────────────────────
   // sessionDataRef 사용 → 의존성 배열 고정 → interval이 재생성되지 않음
-  // liveCharged — 완성된 분 단위 계단식 계산 (기본요금 0, 분당 1 USDC)
-  // 1분 미만: 0 USDC / 1분: 1 USDC / 2분: 2 USDC ...
-  const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분만 카운트
+  // liveCharged — 분 단위 스텝 계산
+  // ProposeUsageUpdate(60초 1회)와 화면 표시를 일치시킴
+  // elapsed가 60초 넘을 때마다 0.01 USDC씩 계단식으로 올라감
+  const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분 (서명 횟수 표시용)
+  const elapsedMinutesExact = elapsed / 60;          // 소수점 포함 (실시간 요금 표시용)
   const liveCharged = (() => {
     const sd = sessionDataRef.current;
     if (!sd) return totalCharged;
     const depositUsdc = parseFloat(sd.svc?.depositUsdc || 3.0);
+    // 최소 1분 요금 보장, 그 이후는 초 단위로 연속 증가
+    const billableMin = Math.max(1, elapsedMinutesExact);
     return Math.min(
-      Math.round(elapsedMinutes * RATE_PER_MIN * 1_000_000) / 1_000_000,
+      Math.round(billableMin * RATE_PER_MIN * 1_000_000) / 1_000_000,
       depositUsdc
     );
   })();
@@ -583,20 +587,18 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
         channelId:    sessionData.channelId,
         userAddress:  mmAddress || localStorage.getItem("mm_address"),
         userFinalSig: liveChargedStr,
-        fareUsdc:     liveChargedStr, // ★ 프론트 계산값 백엔드에 전달 (폴백용)
+        fareUsdc:     liveChargedStr, // ★ 백엔드 폴백용 — 백엔드가 0 반환 시 프론트 값 사용
       });
-
-      // ★ 백엔드 응답이 0이거나 없으면 프론트 liveCharged 값 우선 사용
-      const depositAmt    = parseFloat(sessionData?.svc?.depositUsdc || 3.0);
-      const backendFare   = parseFloat(res.fareUsdc ?? res.fare ?? 0);
-      const fareUsdc      = backendFare > 0
+      // ★ 백엔드 fareUsdc=0이면 프론트 liveCharged 우선 사용
+      const depositAmt  = parseFloat(sessionData?.svc?.depositUsdc || 3.0);
+      const backendFare = parseFloat(res.fareUsdc ?? res.fare ?? 0);
+      const fareUsdc    = backendFare > 0
         ? String(backendFare.toFixed(6))
-        : liveChargedStr;                   // 백엔드 0 → 프론트 계산값 사용
-      const refundUsdc    = String(Math.max(0, depositAmt - parseFloat(fareUsdc)).toFixed(6));
-
+        : liveChargedStr;
+      const refundUsdc  = String(Math.max(0, depositAmt - parseFloat(fareUsdc)).toFixed(6));
       addLog(`✅ 요금: ${fareUsdc} USDC`, "success");
-      addLog(`✅ 환불 예정: ${refundUsdc} USDC`, "success");
-      if (res.deferred) addLog(`⏳ holdDeadline 후 자동 정산됩니다`, "info");
+      addLog(`✅ 환불: ${refundUsdc} USDC`, "success");
+      if (res.deferred) addLog(`⏳ 24시간 분쟁 대기 후 자동 정산됩니다`, "info");
 
       clearSession();
       setSessionData({ ...sessionData, result: { ...res, fareUsdc, refundUsdc }, status: "ended" });
