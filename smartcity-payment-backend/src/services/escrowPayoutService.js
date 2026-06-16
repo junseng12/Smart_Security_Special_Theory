@@ -165,13 +165,13 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
     `INSERT INTO escrow_locks
        (session_id, escrow_id_bytes, channel_id, user_address, operator_address,
         user_deposit, hold_deadline, user_deposit_tx, state)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'UserDeposited')
+     VALUES ($1,$2,$3,$4,$5,$6,to_timestamp($7),$8,'UserDeposited')
      ON CONFLICT (session_id) DO UPDATE
-       SET escrow_id_bytes=$2, user_deposit=$6, hold_deadline=$7,
+       SET escrow_id_bytes=$2, user_deposit=$6, hold_deadline=to_timestamp($7),
            user_deposit_tx=$8, operator_address=$5,
            state='UserDeposited', locked_at=NOW()`,
     [sessionId, escrowId, channelId, userAddress, opAddr,
-     depositUsdc, Number(finalHoldDeadline), depositTxHash]  // BIGINT unix초 직접 저장
+     depositUsdc, Number(finalHoldDeadline), depositTxHash]
   );
 
   logger.info('User deposit recorded in DB', { sessionId, depositUsdc, depositTxHash });
