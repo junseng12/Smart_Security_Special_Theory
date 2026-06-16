@@ -141,7 +141,7 @@ async function toBytes32Hex(str) {
  */
 export async function userDeposit(fromAddress, escrowId, operator, amountUsdc, holdDeadline) {
   if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
-  const selector        = "0x6ec5bc17"; // keccak256("userDeposit(bytes32,address,uint256,uint256)")
+  const selector        = "0xa5790150"; // keccak256("userDeposit(bytes32,address,uint256,uint256)") ✅ 검증완료
   const escrowIdHex     = await toBytes32Hex(escrowId);
   const operatorHex     = operator.replace("0x", "").toLowerCase().padStart(64, "0");
   const amountHex       = BigInt(Math.round(amountUsdc * 1e6)).toString(16).padStart(64, "0");
