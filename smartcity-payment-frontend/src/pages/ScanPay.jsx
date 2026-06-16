@@ -557,16 +557,14 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
   // liveCharged — 분 단위 스텝 계산
   // ProposeUsageUpdate(60초 1회)와 화면 표시를 일치시킴
   // elapsed가 60초 넘을 때마다 0.1 USDC씩 계단식으로 올라감
-  const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분 (서명 횟수 표시용)
-  const elapsedMinutesExact = elapsed / 60;          // 소수점 포함 (실시간 요금 표시용)
+  const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분만 카운트 (기본요금 0)
   const liveCharged = (() => {
     const sd = sessionDataRef.current;
     if (!sd) return totalCharged;
     const depositUsdc = parseFloat(sd.svc?.depositUsdc || 3.0);
-    // 최소 1분 요금 보장, 그 이후는 초 단위로 연속 증가
-    const billableMin = Math.max(1, elapsedMinutesExact);
+    // 기본요금 0: 1분 미만=0, 1분=0.1, 2분=0.2 ... 30분=3.0 (보증금 소진)
     return Math.min(
-      Math.round(billableMin * RATE_PER_MIN * 1_000_000) / 1_000_000,
+      Math.round(elapsedMinutes * RATE_PER_MIN * 1_000_000) / 1_000_000,
       depositUsdc
     );
   })();
