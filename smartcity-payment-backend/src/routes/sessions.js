@@ -209,7 +209,7 @@ router.post('/:id/deposit', async (req, res, next) => {
     let operatorDepositResult = null;
     if (canEscrow && isRealTx) {
       // ★ operatorDeposit = userDeposit 금액과 동일하게
-      const opDepositUsdc = depositUsdc || process.env.OPERATOR_DEPOSIT_USDC || '0.10'; // 사용자 입금액과 동기화
+      const opDepositUsdc = depositUsdc || process.env.OPERATOR_DEPOSIT_USDC || '3.0';
       try {
         operatorDepositResult = await escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash);
         const logger = require('../utils/logger');
