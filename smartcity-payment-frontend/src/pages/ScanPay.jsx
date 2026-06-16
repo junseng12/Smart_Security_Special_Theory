@@ -10,7 +10,7 @@ import BottomNav from '@/components/wallet/BottomNav';
 
 const BACKEND          = "https://payment-backend-production.up.railway.app";
 const OPERATOR_ADDRESS  = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
-const ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"; // V3.2
+const ESCROW_V3_ADDRESS = "0x1aa35D4088A53Bc39a8D0688E061abac6fd77907"; // V3.2
 
 const SERVICE_META = {
   bicycle:     { label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0 },
