@@ -219,16 +219,16 @@ export default function TransactionHistory() {
                           <span>보증금</span>
                           <span className="text-gray-700">{parseFloat(s.depositUsdc || 0).toFixed(2)} USDC</span>
                         </div>
-                        {s.fareUsdc && (
+                        {s.status !== 'Active' && calcFare(s) > 0 && (
                           <div className="flex justify-between text-gray-500">
                             <span>이용 요금</span>
-                            <span className="text-gray-700">{parseFloat(s.fareUsdc).toFixed(6)} USDC</span>
+                            <span className="text-gray-700">{calcFare(s).toFixed(4)} USDC</span>
                           </div>
                         )}
-                        {s.refundUsdc && (
+                        {s.status !== 'Active' && calcRefund(s) > 0 && (
                           <div className="flex justify-between text-gray-500">
                             <span>환불 금액</span>
-                            <span className="text-green-600 font-medium">{parseFloat(s.refundUsdc).toFixed(6)} USDC</span>
+                            <span className="text-green-600 font-medium">{calcRefund(s).toFixed(4)} USDC</span>
                           </div>
                         )}
                         <div className="flex justify-between text-gray-500">
