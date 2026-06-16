@@ -7,6 +7,7 @@ import BottomNav from '@/components/wallet/BottomNav';
 import BalanceCard from '@/components/wallet/BalanceCard';
 import QuickActions from '@/components/wallet/QuickActions';
 import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage, getConnectedMetaMaskAddress } from '@/lib/walletUtils';
+import { calcFare, calcRefund } from '@/lib/fareUtils';
 
 const BACKEND     = "https://payment-backend-production.up.railway.app";
 const SESSION_KEY = "active_session";
@@ -246,13 +247,13 @@ export default function Dashboard() {
                     </div>
                     <div className="text-right flex-shrink-0">
                       <div className={`text-sm font-bold ${STATUS_COLOR[s.status] || 'text-gray-700'}`}>
-                        {s.fareUsdc
-                          ? `-${parseFloat(s.fareUsdc).toFixed(4)} USDC`
-                          : `${parseFloat(s.depositUsdc||0).toFixed(2)} USDC`
+                        {s.status === 'Active'
+                          ? `${parseFloat(s.depositUsdc||0).toFixed(2)} USDC`
+                          : `-${calcFare(s).toFixed(4)} USDC`
                         }
                       </div>
-                      {s.refundUsdc && parseFloat(s.refundUsdc) > 0 && (
-                        <div className="text-xs text-green-600">+{parseFloat(s.refundUsdc).toFixed(4)} 환불</div>
+                      {s.status !== 'Active' && calcRefund(s) > 0 && (
+                        <div className="text-xs text-green-600">+{calcRefund(s).toFixed(4)} 환불</div>
                       )}
                     </div>
                   </motion.div>
