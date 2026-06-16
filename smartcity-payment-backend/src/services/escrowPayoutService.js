@@ -312,58 +312,30 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   const waitMs = holdDeadline - Date.now();
 
   if (waitMs > 0) {
-    // holdDeadline 아직 안 됐으면 onchain call은 revert됨
-    // holdDeadline이 이제 최소 300초(5분)이므로 항상 deferred(비동기) 처리
-    // MAX_SYNC_WAIT: 즉시 응답 후 백그라운드로 처리하는 임계값
-    const MAX_SYNC_WAIT = 300000; // 300초(5분) 이내 동기 대기 → Railway deferred 문제 해결 [DEMO]
-    if (waitMs <= MAX_SYNC_WAIT) {
-      logger.info(`HoldDeadline 대기 ${Math.ceil(waitMs/1000)}s (동기)`, { sessionId });
-      await new Promise(r => setTimeout(r, waitMs + 1500));
-    } else {
-      // 90초 초과: DB에 pending_settle 기록 후 즉시 응답
-      // 백그라운드 크론 또는 재시도 엔드포인트로 처리
-      logger.warn(`HoldDeadline까지 ${Math.ceil(waitMs/1000)}s 남음 — pending_settle 저장`, { sessionId });
-      await getPool().query(
-        `UPDATE escrow_locks SET state='PendingSettle', fare_amount=$2 WHERE session_id=$1`,
-        [sessionId, fareUsdc || '0']
-      ).catch(() => {});
-      // 비동기 백그라운드 재시도
-      setTimeout(async () => {
-        try {
-          await new Promise(r => setTimeout(r, waitMs + 2000));
-          const w2 = getOperatorWallet();
-          const e2 = getEscrowContract(w2);
-          const eid2 = toEscrowId(sessionId);
-          const fw2 = ethers.parseUnits(String(fareUsdc || '0'), 6);
-          const tx2 = await e2.settleAndRelease(eid2, fw2);
-          const r2 = await tx2.wait();
-          const bgClaimableAfter = Math.floor(Date.now() / 1000) + 240; // [TEST] 4분
-          await getPool().query(
-            `UPDATE escrow_locks
-             SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3,
-                 claimable_after=to_timestamp($4)
-             WHERE session_id=$1`,
-            [sessionId, r2.hash, fareUsdc, bgClaimableAfter]
-          );
-          logger.info('Background settleAndRelease reserved ✅ (24h window)', { sessionId, txHash: r2.hash });
-        } catch(e) {
-          logger.error('Background settleAndRelease failed', { sessionId, error: e.message });
-        }
-      }, 0);
-      // DB에서 userDeposit 가져와서 예상 환불액 계산 (즉시 반환용)
-      const userDep = parseFloat(row?.user_deposit || 0);
-      const expectedRefund = (userDep - parseFloat(fareUsdc || 0)).toFixed(6);
-      return {
-        skipped: false,
-        deferred: true,
-        reason: 'pending_settle_scheduled',
-        fareUsdc,
-        refundUsdc: expectedRefund,       // ★ 예상 환불액 (실제 TX는 백그라운드)
-        userDeposit: String(userDep),
-        holdDeadline: new Date(holdDeadline).toISOString(),
-        note: '정산 TX는 holdDeadline 도달 후 자동 처리됩니다',
-      };
-    }
+    // holdDeadline 아직 안 됐으면 onchain settleAndRelease는 revert됨
+    // → PendingSettle 저장 후 즉시 응답 (크론잡이 처리)
+    logger.info(`HoldDeadline까지 ${Math.ceil(waitMs/1000)}s 남음 — PendingSettle 저장 후 즉시 응답`, { sessionId });
+    await getPool().query(
+      `UPDATE escrow_locks SET state='PendingSettle', fare_amount=$2 WHERE session_id=$1`,
+      [sessionId, fareUsdc || '0']
+    ).catch(() => {});
+    // sessions 테이블에 Settling 상태 + 요금 선기록
+    await getPool().query(
+      `UPDATE sessions SET status='Settling', fare_usdc=$2, charged_usdc=COALESCE(charged_usdc,0)
+       WHERE id=$1`,
+      [sessionId, fareUsdc || '0']
+    ).catch(() => {});
+    const userDep = parseFloat(row?.user_deposit || 0);
+    const expectedRefund = Math.max(0, userDep - parseFloat(fareUsdc || 0)).toFixed(6);
+    return {
+      skipped: false,
+      deferred: true,
+      fareUsdc,
+      refundUsdc: expectedRefund,
+      userDeposit: String(userDep),
+      holdDeadline: new Date(holdDeadline).toISOString(),
+      note: '정산 TX는 holdDeadline 도달 후 크론잡이 자동 처리합니다',
+    };
   }
 
   const wallet   = getOperatorWallet();
