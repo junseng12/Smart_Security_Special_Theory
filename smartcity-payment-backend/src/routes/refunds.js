@@ -41,8 +41,7 @@ const createSchema = Joi.object({
   channelId:      Joi.string().optional().allow(''),
   reason:         Joi.string().valid(
     'unlock_failure', 'sensor_failure', 'double_charge', 'service_outage',
-    'wrong_amount', 'device_malfunction', 'device_fault', 'wrong_charge', 'manual_request',
-    'test'
+    'wrong_amount', 'device_malfunction', 'device_fault', 'wrong_charge', 'manual_request'
   ).required(),
   requestedUsdc:  Joi.string().pattern(/^\d+(\.\d{1,6})?$/).optional(),
   evidence:       Joi.array().items(Joi.object()).optional(),
