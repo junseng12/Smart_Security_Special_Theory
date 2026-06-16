@@ -122,7 +122,7 @@ router.post('/:id/sign', validate(signSchema), async (req, res, next) => {
 const endSchema = Joi.object({
   channelId:    Joi.string().required(),
   userAddress:  ethAddress().required(),
-  userFinalSig: Joi.string().optional().default(''), // 오프체인 서명 (없어도 정산 가능)
+  userFinalSig: Joi.string().required(),
   fareUsdc:     Joi.string().optional(),   // charge에서 받은 요금 직접 전달
   adjustment:   Joi.object({ creditUsdc: usdcAmount() }).optional(),
 });
@@ -208,16 +208,14 @@ router.post('/:id/deposit', async (req, res, next) => {
 
     let operatorDepositResult = null;
     if (canEscrow && isRealTx) {
-      // ★ operatorDeposit = userDeposit 금액과 동일하게
-      const opDepositUsdc = depositUsdc || process.env.OPERATOR_DEPOSIT_USDC || '3.0';
+      const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '3.0';
       try {
         operatorDepositResult = await escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash);
         const logger = require('../utils/logger');
         logger.info('Operator deposit complete', { sessionId: req.params.id, result: JSON.stringify(operatorDepositResult) });
       } catch(err) {
         const logger = require('../utils/logger');
-        logger.error('Operator deposit failed', { sessionId: req.params.id, error: err.message });
-        return next(err);
+        logger.warn('Operator deposit failed (non-fatal)', { sessionId: req.params.id, error: err.message });
       }
     } else if (canEscrow && !isRealTx) {
       const logger = require('../utils/logger');
@@ -259,7 +257,7 @@ router.get('/:id/escrow-status', async (req, res, next) => {
 
     // 온체인 상태 (환경변수 있을 때만)
     let onchain = null;
-    if (process.env.ESCROW_CONTRACT_ADDRESS && (process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC)) {
+    if (process.env.ESCROW_CONTRACT_ADDRESS && process.env.BASE_RPC_URL) {
       try {
         const { ethers } = require('ethers');
         const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://sepolia.base.org');
