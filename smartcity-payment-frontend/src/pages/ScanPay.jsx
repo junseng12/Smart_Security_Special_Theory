@@ -563,9 +563,9 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       addLog(`✅ 요금: ${finalResult.fareUsdc} USDC (${elapsedMinutes}분)`, "success");
       addLog(`✅ 환불: ${finalResult.refundUsdc} USDC`, "success");
 
+      // elapsed 스냅샷 — clearSession() 전에 먼저 찍어야 localStorage가 살아있음
+      const snapshotElapsed = elapsed > 0 ? elapsed : Math.floor((Date.now() - (getStartedAt() || Date.now())) / 1000);
       clearSession();
-      // elapsed를 result에 저장 — ended 화면 진입 후 타이머 리셋되어도 표시 가능
-      const snapshotElapsed = Math.floor((Date.now() - (getStartedAt() || Date.now())) / 1000);
       setSessionData({ ...sessionData, result: { ...finalResult, elapsedSec: snapshotElapsed }, status: "ended" });
       setStep("ended");
       queryClient.invalidateQueries({ queryKey: ['sessions-history'] });
@@ -865,7 +865,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
               </div>
               <div className="flex justify-between py-2 border-b border-gray-50">
                 <span className="text-gray-500">이용 시간</span>
-                <span className="font-mono text-gray-900">{formatTime(elapsed || sessionData?.result?.elapsedSec || 0)}</span>
+                <span className="font-mono text-gray-900">{formatTime(sessionData?.result?.elapsedSec || elapsed || 0)}</span>
               </div>
               {/* 세션 ID — 환불 신청 시 필요 */}
               <div className="flex justify-between items-center py-2">
