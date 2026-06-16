@@ -171,7 +171,7 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
            user_deposit_tx=$8, operator_address=$5,
            state='UserDeposited', locked_at=NOW()`,
     [sessionId, escrowId, channelId, userAddress, opAddr,
-     depositUsdc, new Date(Number(finalHoldDeadline) * 1000), depositTxHash]
+     depositUsdc, Number(finalHoldDeadline), depositTxHash]  // BIGINT unix초 직접 저장
   );
 
   logger.info('User deposit recorded in DB', { sessionId, depositUsdc, depositTxHash });
