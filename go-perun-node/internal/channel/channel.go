@@ -135,9 +135,11 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 		[]wallet.BackendID{ethwallet.BackendID},
 		m.node.USDCAsset,
 	)
+	// ★ SmartCityEscrow가 자금 보관/정산 전담 → AssetHolder 예치 불필요
+	// Perun 채널은 오프체인 요금 계산 및 서명 추적 역할만 수행
 	initAlloc.SetAssetBalances(m.node.USDCAsset, []channel.Bal{
-		depositWei,    // operator 측에서 예치 (custodial)
-		big.NewInt(0), // user (custodial, 별도 예치 불필요)
+		big.NewInt(0), // operator: SmartCityEscrow에 예치 (AssetHolder 이중 예치 제거)
+		big.NewInt(0), // user:     SmartCityEscrow에 예치 (MetaMask 직접)
 	})
 
 	// ── Step 4: 채널 제안 ─────────────────────────────────────────────
