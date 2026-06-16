@@ -29,7 +29,7 @@ let usdcContract;
 function init() {
   if (provider) return;
 
-  provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL);
+  provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org');
   operatorWallet = new ethers.Wallet(process.env.OPERATOR_PRIVATE_KEY, provider);
   // TREASURY_PRIVATE_KEY는 선택적 — 없으면 operatorWallet 재사용
   const treasuryKey = process.env.TREASURY_PRIVATE_KEY || process.env.OPERATOR_PRIVATE_KEY;
