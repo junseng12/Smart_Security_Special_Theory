@@ -9,7 +9,7 @@
 ## 📌 TL;DR (핵심 3줄)
 
 1. **Base Sepolia 테스트넷**에서 QR→결제→환불 전 과정이 블록체인 기반으로 동작하는 스마트시티 결제 시스템
-2. **모든 결제/정산은 신규 컨트랙트 `0xa2642876a2Aa9F19D22a6e69379bbcA10556977f` 만 사용** (구버전 `0x454D...` 절대 금지)
+2. **모든 결제/정산은 신규 컨트랙트 `0x1aa35D4088A53Bc39a8D0688E061abac6fd77907` 만 사용** (구버전 `0x454D...` 절대 금지)
 3. **E2E 12/13 PASS** — TC10(settleAndRelease 타이밍)만 미통과 (코드 버그 아님, 테스트 대기시간 부족)
 
 ---
@@ -56,7 +56,7 @@ Branch : go-sdk   ← 실제 개발 브랜치 (main 아님)
 
 ```
 # 신규 컨트랙트 V3.2 (BaseScan Verified, 현재 사용)
-ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"
+ESCROW_V3_ADDRESS = "0x1aa35D4088A53Bc39a8D0688E061abac6fd77907"
 
 # 구버전 (refundToBuyer 없음, Unverified — 절대 사용 금지)
 OLD_ADDRESS       = "0x454Dd98f154cC4Af7ACB5390113151E2f0e489a1"
@@ -103,7 +103,7 @@ DATABASE_URL=postgresql://...
 REDIS_URL=redis://...
 BASE_SEPOLIA_RPC=https://sepolia.base.org
 OPERATOR_PRIVATE_KEY=0x...          ← Operator 지갑 프라이빗키 (보안 핵심)
-ESCROW_CONTRACT_ADDRESS=0xa2642876a2Aa9F19D22a6e69379bbcA10556977f
+ESCROW_CONTRACT_ADDRESS=0x1aa35D4088A53Bc39a8D0688E061abac6fd77907
 USDC_CONTRACT_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e
 OPERATOR_ADDRESS=0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7
 GRPC_PORT=50051
@@ -152,7 +152,7 @@ V3.2 컨트랙트: 7521 bytes  배포됨 ✅
                                            │ (온체인 분쟁시)
 ┌──────────────────────────────────────────▼───────────────┐
 │         SmartCityEscrow V3.2 (Base Sepolia)               │
-│    0xa2642876a2Aa9F19D22a6e69379bbcA10556977f            │
+│    0x1aa35D4088A53Bc39a8D0688E061abac6fd77907            │
 │    BaseScan Verified ✅                                   │
 │    USDC ERC-20 보관 / 정산 / 환불                         │
 └──────────────────────────────────────────────────────────┘
@@ -438,7 +438,7 @@ Profile.jsx            → 지갑 주소, 잔액 표시
 ```javascript
 // 주소 상수 (하드코딩, 변경 시 walletUtils.js만 수정하면 됨)
 USDC_ADDRESS      = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
-ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"
+ESCROW_V3_ADDRESS = "0x1aa35D4088A53Bc39a8D0688E061abac6fd77907"
 OPERATOR_ADDRESS  = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"
 
 // 함수
@@ -562,7 +562,7 @@ POST /api/v1/refunds
 ## 15. 절대 규칙 (위반 금지)
 
 ```
-1. 모든 결제/정산 → 0xa2642876a2Aa9F19D22a6e69379bbcA10556977f 만 사용
+1. 모든 결제/정산 → 0x1aa35D4088A53Bc39a8D0688E061abac6fd77907 만 사용
 2. 백엔드가 사용자 userDeposit TX를 대신 실행하지 말 것 (MetaMask 직접 서명)
 3. 정산 금액은 DB의 serviceStartedAt 기준 (클라이언트 전달값 신뢰 금지)
 4. 컨트랙트 주소 변경 시 → Railway 환경변수 + walletUtils.js 동시 업데이트
