@@ -13,6 +13,7 @@ const channelRoutes  = require('./routes/channels');
 const sessionRoutes  = require('./routes/sessions');
 const refundRoutes   = require('./routes/refunds');
 const healthRoutes   = require('./routes/health');
+const cronRoutes     = require('./routes/cron');
 const errorHandler   = require('./middleware/errorHandler');
 const requestValidator = require('./middleware/requestValidator');
 
@@ -49,6 +50,7 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 app.use('/health',                    healthRoutes);
+app.use('/internal/cron',             cronRoutes);   // 인증 불필요 — Railway 내부 ping
 app.use('/api/v1/channels', requestValidator, channelRoutes);
 app.use('/api/v1/sessions', requestValidator, sessionRoutes);
 app.use('/api/v1/refunds',  requestValidator, refundRoutes);
