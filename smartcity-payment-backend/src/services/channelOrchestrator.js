@@ -120,9 +120,11 @@ async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usa
  */
 async function endSessionAndSettle({ sessionId, channelId, userAddress, userFinalSig = '', fareUsdc, adjustment }) {
   // ── 1. chargedUsdc 확정 ──────────────────────────────────────────────────────
-  // 우선순위: ① DB charged_usdc 누적값 (ProposeUsageUpdate 오프체인 서명 결과)
-  //          ② DB started_at 기준 fareEngine 재계산 (폴백)
-  //          ③ 클라이언트 전달값 (최후 폴백)
+  // 우선순위:
+  //   ① DB charged_usdc 누적값 (ProposeUsageUpdate 오프체인 서명 결과) — 가장 신뢰
+  //   ② 프론트 전달값 userFinalSig (프론트 liveCharged 계산값) — DB 0일 때 즉시 사용
+  //   ③ DB started_at 기준 fareEngine 재계산 — ①②가 모두 없을 때
+  //   ④ 최후 fallback = '0'
   let chargedUsdc = '0';
   let chargeSource = 'unknown';
   try {
@@ -134,57 +136,73 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
     const sess = row.rows[0];
     const depositUsdc = parseFloat(sess?.deposit_usdc || 3.0);
 
-    // ① 오프체인 서명 누적값 (ProposeUsageUpdate가 정상 호출된 경우)
+    // 프론트 전달값 파싱 (userFinalSig에 liveCharged 값이 들어옴)
+    const clientFare = parseFloat(userFinalSig || fareUsdc || 0);
+
+    // ① DB 오프체인 서명 누적값
     const dbCharged = parseFloat(sess?.charged_usdc || 0);
     if (dbCharged > 0) {
       chargedUsdc = String(Math.min(dbCharged, depositUsdc).toFixed(6));
       chargeSource = 'db_accumulated';
-      logger.info('[Orchestrator] chargedUsdc from DB accumulation (ProposeUsageUpdate)', {
+      logger.info('[Orchestrator] ① chargedUsdc from DB accumulation', {
         sessionId, dbCharged, chargedUsdc,
       });
 
-    // ② started_at 기준 fareEngine 재계산 (오프체인 서명이 없거나 0인 경우)
+    // ② 프론트 전달값 (DB가 0일 때 — liveCharged는 elapsed 기반으로 항상 정확)
+    } else if (clientFare > 0) {
+      chargedUsdc = String(Math.min(clientFare, depositUsdc).toFixed(6));
+      chargeSource = 'client_livecharged';
+      logger.info('[Orchestrator] ② chargedUsdc from frontend liveCharged', {
+        sessionId, clientFare, chargedUsdc,
+      });
+
+    // ③ started_at 기준 fareEngine 재계산
     } else if (sess?.started_at && sess?.service_type) {
-      // started_at: PostgreSQL TIMESTAMPTZ → JS Date, 또는 숫자(ms) 그대로
       let startMs;
       const rawStart = sess.started_at;
       if (typeof rawStart === 'number') {
-        // ms 숫자로 저장된 경우 (Legacy)
         startMs = rawStart > 1e12 ? rawStart : rawStart * 1000;
       } else {
         startMs = new Date(rawStart).getTime();
       }
-      if (isNaN(startMs) || startMs <= 0) {
-        chargedUsdc  = fareUsdc || '0';
-        chargeSource = 'client_fallback_invalid_start';
-        logger.warn('[Orchestrator] invalid started_at, fallback', { sessionId, rawStart });
-        return; // 아래 else 건너뜀
-      }
-      const durationMin = (Date.now() - startMs) / 60_000;
 
-      const fareResult = await fareEngine.calculateFare({
-        sessionId,
-        serviceType: sess.service_type,
-        usage: { durationMinutes: durationMin },
-      });
-      const raw = parseFloat(fareResult.fareUsdc);
-      chargedUsdc  = String(Math.min(raw, depositUsdc).toFixed(6));
-      chargeSource = 'fareengine_recalc';
-      logger.info('[Orchestrator] chargedUsdc recalculated from started_at (fallback)', {
-        sessionId, durationMin: durationMin.toFixed(2),
-        fareResult: fareResult.fareUsdc, chargedUsdc,
-      });
+      if (!isNaN(startMs) && startMs > 0) {
+        const durationMin = (Date.now() - startMs) / 60_000;
+        try {
+          const fareResult = await fareEngine.calculateFare({
+            sessionId,
+            serviceType: sess.service_type,
+            usage: { durationMinutes: durationMin },
+          });
+          const raw = parseFloat(fareResult.fareUsdc);
+          chargedUsdc  = String(Math.min(raw, depositUsdc).toFixed(6));
+          chargeSource = 'fareengine_recalc';
+          logger.info('[Orchestrator] ③ chargedUsdc from fareEngine (started_at)', {
+            sessionId, durationMin: durationMin.toFixed(2), chargedUsdc,
+          });
+        } catch (feErr) {
+          logger.warn('[Orchestrator] fareEngine failed', { sessionId, error: feErr.message });
+          chargedUsdc  = '0';
+          chargeSource = 'fareengine_error';
+        }
+      } else {
+        logger.warn('[Orchestrator] invalid started_at', { sessionId, rawStart });
+        chargedUsdc  = '0';
+        chargeSource = 'invalid_started_at';
+      }
 
     } else {
-      // ③ 최후 폴백 — 클라이언트 전달값
-      chargedUsdc  = fareUsdc || '0';
-      chargeSource = 'client_fallback';
-      logger.warn('[Orchestrator] started_at not found, using fareUsdc from client', { sessionId, fareUsdc });
+      // ④ 최후 fallback
+      chargedUsdc  = '0';
+      chargeSource = 'no_data_fallback';
+      logger.warn('[Orchestrator] no charge data available', { sessionId });
     }
   } catch (e) {
-    chargedUsdc  = fareUsdc || '0';
+    chargedUsdc  = String(parseFloat(userFinalSig || fareUsdc || 0).toFixed(6));
     chargeSource = 'error_fallback';
-    logger.warn('[Orchestrator] fare recalc failed, fallback to fareUsdc', { sessionId, error: e.message });
+    logger.warn('[Orchestrator] fare recalc error, fallback to client value', {
+      sessionId, error: e.message, chargedUsdc,
+    });
   }
   logger.info('[Orchestrator] chargeSource determined', { sessionId, chargeSource, chargedUsdc });
 
