@@ -1,5 +1,5 @@
 export const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
-export const ESCROW_V3_ADDRESS = "0x1aa35D4088A53Bc39a8D0688E061abac6fd77907"; // SmartCityEscrow V3.2 (Base Sepolia 배포 확정)
+export const ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"; // SmartCityEscrow V3.2 (Base Sepolia 배포 확정)
 export const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"; // 컨트랙트 OPERATOR_ROLE
 export const SERVICE_PROVIDER_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"; // 요금 수취 = operator 동일
 const RPC_LIST = [
@@ -141,7 +141,7 @@ async function toBytes32Hex(str) {
  */
 export async function userDeposit(fromAddress, escrowId, operator, amountUsdc, holdDeadline) {
   if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
-  const selector        = "0xa5790150"; // keccak256("userDeposit(bytes32,address,uint256,uint256)") ✅ 검증완료
+  const selector        = "0x6ec5bc17"; // keccak256("userDeposit(bytes32,address,uint256,uint256)")
   const escrowIdHex     = await toBytes32Hex(escrowId);
   const operatorHex     = operator.replace("0x", "").toLowerCase().padStart(64, "0");
   const amountHex       = BigInt(Math.round(amountUsdc * 1e6)).toString(16).padStart(64, "0");
