@@ -100,24 +100,46 @@ async function bootstrap() {
     async function runPendingSettles() {
       try {
         const db = require('./services/db');
-        const { rows } = await db.getPool().query(
+
+        // ① holdDeadline 지난 PendingSettle → settleAndRelease (돈 잠금)
+        const { rows: pendingRows } = await db.getPool().query(
           `SELECT el.session_id, el.fare_amount
            FROM escrow_locks el
            WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
              AND el.hold_deadline IS NOT NULL
              AND el.hold_deadline < NOW()
-           LIMIT 10`
+           LIMIT 5`
         ).catch(() => ({ rows: [] }));
-        for (const row of rows) {
+
+        for (const row of pendingRows) {
+          logger.info('[Scheduler] settleAndRelease 실행', { sessionId: row.session_id });
           await escrowSvc.settleAndRelease({
             sessionId: row.session_id,
             fareUsdc:  String(row.fare_amount || '0'),
           }).catch(e => logger.error('Scheduler: settle fail', { sessionId: row.session_id, error: e.message }));
         }
+
+        // ② claimableAfter 지난 Reserved → claimSettlement (실제 분배)
+        //    환불 요청(RefundIssue)이 없을 때만
+        const { rows: reservedRows } = await db.getPool().query(
+          `SELECT el.session_id
+           FROM escrow_locks el
+           WHERE el.state = 'Reserved'
+             AND el.claimable_after IS NOT NULL
+             AND el.claimable_after < NOW()
+           LIMIT 5`
+        ).catch(() => ({ rows: [] }));
+
+        for (const row of reservedRows) {
+          logger.info('[Scheduler] claimSettlement 실행', { sessionId: row.session_id });
+          await escrowSvc.claimSettlement(row.session_id)
+            .catch(e => logger.error('Scheduler: claim fail', { sessionId: row.session_id, error: e.message }));
+        }
+
       } catch (e) { logger.error('Scheduler error', { error: e.message }); }
     }
-    setInterval(runPendingSettles, 30_000);
-    setTimeout(runPendingSettles, 5_000);
+    setInterval(runPendingSettles, 30_000);  // 30초마다 실행
+    setTimeout(runPendingSettles, 5_000);    // 서버 시작 5초 후 첫 실행
   } catch (schedulerErr) {
     logger.warn('스케줄러 초기화 실패 — 계속 진행', {
       error: schedulerErr?.message || String(schedulerErr),
