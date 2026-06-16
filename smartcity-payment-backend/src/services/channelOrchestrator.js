@@ -75,31 +75,10 @@ async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsd
 async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usage = {} }) {
   const durationMinutes = usage.durationMinutes ?? 1;
   const energyKwh       = usage.energyKwh       ?? 0;
-  const fareEngine      = require('./fareEngine');
 
-  let res = null;
-  let usedFallback = false;
-
-  // go-perun 오프체인 요금 계산 시도
-  try {
-    res = await perun.proposeUsageUpdate({
-      sessionId, channelId, serviceType, durationMinutes, energyKwh,
-    });
-  } catch (perunErr) {
-    // channel not found 등 → fareEngine 폴백으로 요금 계산
-    logger.warn('chargeUsage: perun 오류 → fareEngine 폴백', {
-      sessionId, channelId, error: perunErr.message
-    });
-    usedFallback = true;
-    const fareResult = await fareEngine.calculateFare({
-      sessionId, serviceType, usage: { durationMinutes, energyKwh },
-    }).catch(() => ({ fare: 0.01, breakdown: {} }));
-
-    const fare_usdc = String(fareResult.fare ?? 0.01);
-    const nonce = Date.now(); // 폴백 nonce
-    const state_hash = '0x' + Buffer.from(`${sessionId}:${nonce}`).toString('hex').slice(0, 64).padEnd(64, '0');
-    res = { fare_usdc, policy_hash: 'fallback', new_nonce: nonce, state_hash, balance_user: '0' };
-  }
+  const res = await perun.proposeUsageUpdate({
+    sessionId, channelId, serviceType, durationMinutes, energyKwh,
+  });
 
   try {
     const db = require('./db');
@@ -108,17 +87,15 @@ async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usa
       `UPDATE sessions SET charged_usdc = COALESCE(charged_usdc, 0) + $1::NUMERIC WHERE id = $2`,
       [res.fare_usdc, sessionId]
     );
-    if (!usedFallback) {
-      // ② channel_states에 오프체인 서명 상태 기록 (분쟁 증거)
-      await db.getPool().query(
-        `INSERT INTO channel_states
-           (channel_id, session_id, nonce, state_hash, fare_usdc, recorded_at)
-         VALUES ($1, $2, $3, $4, $5, NOW())
-         ON CONFLICT (channel_id, nonce) DO NOTHING`,
-        [channelId, sessionId,
-         Number(res.new_nonce), res.state_hash, res.fare_usdc]
-      ).catch(() => {});
-    }
+    // ② channel_states에 오프체인 서명 상태 기록 (분쟁 증거)
+    await db.getPool().query(
+      `INSERT INTO channel_states
+         (channel_id, session_id, nonce, state_hash, fare_usdc, recorded_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (channel_id, nonce) DO NOTHING`,
+      [channelId, sessionId,
+       Number(res.new_nonce), res.state_hash, res.fare_usdc]
+    ).catch(() => {}); // 테이블 없어도 무시
   } catch { /* DB 없어도 go-perun 상태에 영향 없음 */ }
 
   return {
@@ -129,7 +106,6 @@ async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usa
       balances:  { user: res.balance_user },
     },
     signatureRequest: { stateHash: res.state_hash, nonce: Number(res.new_nonce) },
-    fallback: usedFallback,
   };
 }
 
@@ -182,7 +158,7 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
         chargedUsdc  = fareUsdc || '0';
         chargeSource = 'client_fallback_invalid_start';
         logger.warn('[Orchestrator] invalid started_at, fallback', { sessionId, rawStart });
-        // return 제거 — fallback 값으로 계속 진행
+        return; // 아래 else 건너뜀
       }
       const durationMin = (Date.now() - startMs) / 60_000;
 
