@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   approveUsdcForEscrow,
+  getUsdcBalance,
   userDeposit as escrowUserDeposit,
 } from '@/lib/walletUtils';
 import BottomNav from '@/components/wallet/BottomNav';
@@ -17,7 +18,7 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
-const RATE_PER_MIN = 0.1;  // USDC/분 — 분당 0.1 USDC (기본요금 0)
+const RATE_PER_MIN = 0.1;  // USDC/분 — 분당 0.1 USDC (기본요금 0, 완성된 분)
 
 const SERVICE_TYPES = [
   { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
@@ -171,11 +172,20 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       } catch { return null; }
     };
 
-    // home/ended 단계 → 모든 타이머 중지
-    if (step === "home" || step === "ended") {
+    // home 단계 → 타이머 중지 + elapsed 리셋
+    // ended 단계 → 타이머만 중지, elapsed는 유지 (종료 시점 경과시간 표시용)
+    if (step === "home") {
       clearInterval(timerRef.current);
       clearInterval(chargeIntervalRef.current);
       setElapsed(0);
+      return () => {
+        clearInterval(timerRef.current);
+        clearInterval(chargeIntervalRef.current);
+      };
+    }
+    if (step === "ended") {
+      clearInterval(timerRef.current);
+      clearInterval(chargeIntervalRef.current);
       return () => {
         clearInterval(timerRef.current);
         clearInterval(chargeIntervalRef.current);
@@ -417,6 +427,21 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       //         "approved"        → userDeposit부터 재개
       //         "deposited"       → /deposit API 호출부터 재개
       if (stage === "session_created" || !stage) {
+        // ★ USDC 잔액 체크 — 부족하면 사전 차단
+        try {
+          const usdcBal = await getUsdcBalance(addr);
+          const required = parseFloat(svc.depositUsdc);
+          if (parseFloat(usdcBal) < required) {
+            addLog(`❌ USDC 잔액 부족: ${usdcBal} USDC (필요: ${required} USDC)`, "error");
+            addLog("Base Sepolia 테스트넷 USDC가 필요합니다. 0x036CbD53... 컨트랙트에서 faucet을 받거나 브리지를 이용해주세요.", "info");
+            setStep("home");
+            clearProc();
+            return;
+          }
+        } catch (balErr) {
+          // 잔액 조회 실패 시 계속 진행 (논블로킹)
+          console.warn("USDC balance check failed:", balErr.message);
+        }
         addLog("② MetaMask: USDC 승인 서명 요청...", "info");
         await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
         addLog("✅ USDC 승인 완료", "success");
@@ -480,6 +505,20 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       //   startedAt은 deposit 완료(실제 서비스 시작) 후 기록하므로 여기선 null
       saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "session_created", startedAt: null });
 
+      // ★ USDC 잔액 체크
+      try {
+        const usdcBal = await getUsdcBalance(addr);
+        const required = parseFloat(svc.depositUsdc);
+        if (parseFloat(usdcBal) < required) {
+          addLog(`❌ USDC 잔액 부족: ${usdcBal} USDC (필요: ${required} USDC)`, "error");
+          addLog("Base Sepolia USDC faucet: https://faucet.circle.com", "info");
+          setStep("home");
+          clearProc();
+          return;
+        }
+      } catch (balErr) {
+        console.warn("USDC balance check failed:", balErr.message);
+      }
       addLog("② MetaMask: USDC 승인 서명 요청...", "info");
       await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
       addLog("✅ USDC 승인 완료", "success");
@@ -518,13 +557,16 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
   // liveCharged — 분 단위 스텝 계산
   // ProposeUsageUpdate(60초 1회)와 화면 표시를 일치시킴
   // elapsed가 60초 넘을 때마다 0.1 USDC씩 계단식으로 올라감
-  const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분만 카운트
+  const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분 (서명 횟수 표시용)
+  const elapsedMinutesExact = elapsed / 60;          // 소수점 포함 (실시간 요금 표시용)
   const liveCharged = (() => {
     const sd = sessionDataRef.current;
     if (!sd) return totalCharged;
     const depositUsdc = parseFloat(sd.svc?.depositUsdc || 3.0);
+    // 최소 1분 요금 보장, 그 이후는 초 단위로 연속 증가
+    const billableMin = Math.max(1, elapsedMinutesExact);
     return Math.min(
-      Math.round(elapsedMinutes * RATE_PER_MIN * 1_000_000) / 1_000_000,
+      Math.round(billableMin * RATE_PER_MIN * 1_000_000) / 1_000_000,
       depositUsdc
     );
   })();
@@ -552,7 +594,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       const backendFare = parseFloat(res.fareUsdc ?? res.fare ?? 0);
       const fareUsdc    = backendFare > 0
         ? String(backendFare.toFixed(6))
-        : liveChargedStr;  // 백엔드 0 → 프론트 계산값
+        : liveChargedStr;
       const refundUsdc  = String(Math.max(0, depositAmt - parseFloat(fareUsdc)).toFixed(6));
       addLog(`✅ 요금: ${fareUsdc} USDC`, "success");
       addLog(`✅ 환불 예정: ${refundUsdc} USDC`, "success");
