@@ -249,8 +249,23 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
   }
 
   // ── 4. DB 정산 기록 ───────────────────────────────────────────────────────
-  const refundUsdc = escrowResult?.refundUsdc || perunRes.refund_usdc || '0';
-  const txHash     = escrowResult?.txHash     || perunRes.tx_hash     || 'settled_via_perun';
+  // refundUsdc: escrow가 정확히 계산한 값 우선, 없으면 deposit - fare로 직접 계산
+  let refundUsdc = escrowResult?.refundUsdc || perunRes.refund_usdc || null;
+  if (!refundUsdc || parseFloat(refundUsdc) < 0) {
+    // deposit 기준 직접 계산 (escrow가 skipped/deferred인 경우)
+    try {
+      const db = require('./db');
+      const depRow = await db.getPool().query(
+        `SELECT deposit_usdc FROM sessions WHERE id = $1`, [sessionId]
+      );
+      const depositUsdc = parseFloat(depRow.rows[0]?.deposit_usdc || 3.0);
+      const fareNum     = parseFloat(finalFareUsdc || 0);
+      refundUsdc = String(Math.max(0, depositUsdc - fareNum).toFixed(6));
+    } catch (_) {
+      refundUsdc = '0';
+    }
+  }
+  const txHash = escrowResult?.txHash || perunRes.tx_hash || 'settled_via_perun';
 
   await settleMgr.recordSettlement({
     sessionId, channelId,
@@ -261,13 +276,14 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
   }).catch(() => {});
 
   logger.info('[Orchestrator] endSessionAndSettle complete', {
-    sessionId, finalFareUsdc, refundUsdc, txHash,
+    sessionId, finalFareUsdc, refundUsdc, txHash, chargeSource,
   });
 
   return {
     txHash,
     fareUsdc:   finalFareUsdc,
     refundUsdc,
+    chargeSource,
     escrow:     escrowResult,
   };
 }
