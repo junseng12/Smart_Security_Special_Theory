@@ -216,8 +216,8 @@ router.post('/:id/deposit', async (req, res, next) => {
         logger.info('Operator deposit complete', { sessionId: req.params.id, result: JSON.stringify(operatorDepositResult) });
       } catch(err) {
         const logger = require('../utils/logger');
-        logger.warn('Operator deposit failed (non-fatal)', { sessionId: req.params.id, error: err.message });
-        // operatorDeposit 실패는 non-fatal — 세션은 계속 진행
+        logger.error('Operator deposit failed', { sessionId: req.params.id, error: err.message });
+        return next(err);
       }
     } else if (canEscrow && !isRealTx) {
       const logger = require('../utils/logger');
@@ -259,7 +259,7 @@ router.get('/:id/escrow-status', async (req, res, next) => {
 
     // 온체인 상태 (환경변수 있을 때만)
     let onchain = null;
-    if (process.env.ESCROW_CONTRACT_ADDRESS && process.env.BASE_RPC_URL) {
+    if (process.env.ESCROW_CONTRACT_ADDRESS && (process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC)) {
       try {
         const { ethers } = require('ethers');
         const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://sepolia.base.org');
