@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ArrowLeft, RefreshCw, Search, ExternalLink, ChevronDown } from 'lucide-react';
 import BottomNav from '@/components/wallet/BottomNav';
+import { calcFare, calcRefund } from '@/lib/fareUtils';
 
 const BACKEND = "https://payment-backend-production.up.railway.app";
 
@@ -45,29 +46,6 @@ export default function TransactionHistory() {
     enabled:  !!mmAddress,
     staleTime: 30_000,
   });
-
-  // fareUsdc가 0이면 started_at~ended_at 기준으로 프론트에서 재계산
-  const RATE_PER_MIN = 0.1; // 0.1 USDC/분
-  function calcFare(s) {
-    const deposit = parseFloat(s.depositUsdc || 3.0);
-    const fare    = parseFloat(s.fareUsdc || 0);
-    if (fare > 0) return fare; // DB에 정상값 있으면 그대로
-    // DB값이 0이면 시간 기반 재계산
-    if (s.startedAt && s.endedAt) {
-      const mins = (new Date(s.endedAt) - new Date(s.startedAt)) / 60000;
-      const calc = Math.min(Math.round(mins * RATE_PER_MIN * 1_000_000) / 1_000_000, deposit);
-      return calc;
-    }
-    return 0;
-  }
-  function calcRefund(s) {
-    const deposit  = parseFloat(s.depositUsdc || 3.0);
-    const refund   = parseFloat(s.refundUsdc || 0);
-    if (refund > 0 && refund < deposit) return refund; // 정상값
-    // 0이거나 deposit 전체 환불이면 fare 기반 재계산
-    const fare = calcFare(s);
-    return Math.max(0, deposit - fare);
-  }
 
   const sessions = (data?.data || []).filter(s =>
     !search ||
