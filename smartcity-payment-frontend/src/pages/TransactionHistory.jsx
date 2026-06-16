@@ -46,6 +46,29 @@ export default function TransactionHistory() {
     staleTime: 30_000,
   });
 
+  // fareUsdc가 0이면 started_at~ended_at 기준으로 프론트에서 재계산
+  const RATE_PER_MIN = 0.1; // 0.1 USDC/분
+  function calcFare(s) {
+    const deposit = parseFloat(s.depositUsdc || 3.0);
+    const fare    = parseFloat(s.fareUsdc || 0);
+    if (fare > 0) return fare; // DB에 정상값 있으면 그대로
+    // DB값이 0이면 시간 기반 재계산
+    if (s.startedAt && s.endedAt) {
+      const mins = (new Date(s.endedAt) - new Date(s.startedAt)) / 60000;
+      const calc = Math.min(Math.round(mins * RATE_PER_MIN * 1_000_000) / 1_000_000, deposit);
+      return calc;
+    }
+    return 0;
+  }
+  function calcRefund(s) {
+    const deposit  = parseFloat(s.depositUsdc || 3.0);
+    const refund   = parseFloat(s.refundUsdc || 0);
+    if (refund > 0 && refund < deposit) return refund; // 정상값
+    // 0이거나 deposit 전체 환불이면 fare 기반 재계산
+    const fare = calcFare(s);
+    return Math.max(0, deposit - fare);
+  }
+
   const sessions = (data?.data || []).filter(s =>
     !search ||
     s.serviceLabel?.includes(search) ||
@@ -53,8 +76,8 @@ export default function TransactionHistory() {
     s.txHash?.toLowerCase().includes(search.toLowerCase())
   );
 
-  const totalPaid   = sessions.filter(s => s.fareUsdc).reduce((a, s) => a + parseFloat(s.fareUsdc || 0), 0);
-  const totalRefund = sessions.filter(s => s.refundUsdc).reduce((a, s) => a + parseFloat(s.refundUsdc || 0), 0);
+  const totalPaid   = sessions.reduce((a, s) => a + calcFare(s), 0);
+  const totalRefund = sessions.reduce((a, s) => a + calcRefund(s), 0);
 
   const formatDate = (iso) => {
     if (!iso) return '-';
@@ -161,12 +184,12 @@ export default function TransactionHistory() {
                       </div>
                       <div className="text-right flex-shrink-0">
                         <div className="font-bold text-gray-900 text-sm">
-                          {s.fareUsdc ? `-${parseFloat(s.fareUsdc).toFixed(4)}` : `-${parseFloat(s.depositUsdc || 0).toFixed(2)}`}
+                          {(s.status === 'Active') ? `-${parseFloat(s.depositUsdc || 0).toFixed(2)}` : `-${calcFare(s).toFixed(4)}`}
                           <span className="text-xs text-gray-400 ml-0.5">USDC</span>
                         </div>
-                        {s.refundUsdc && parseFloat(s.refundUsdc) > 0 && (
+                        {s.status !== 'Active' && calcRefund(s) > 0 && (
                           <div className="text-xs text-green-600 font-medium">
-                            +{parseFloat(s.refundUsdc).toFixed(4)} 환불
+                            +{calcRefund(s).toFixed(4)} 환불
                           </div>
                         )}
                       </div>
