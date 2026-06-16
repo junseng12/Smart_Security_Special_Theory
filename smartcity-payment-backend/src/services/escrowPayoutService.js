@@ -20,13 +20,24 @@ const logger = require('../utils/logger');
 const { getPool } = require('./db');
 
 // ── TX 온체인 확정 대기 ────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// hold_deadline 변환 유틸 — TIMESTAMPTZ(Date) / unix-ms / unix-sec 모두 처리
+// ─────────────────────────────────────────────────────────────────────────────
+function toDeadlineMs(value) {
+  if (!value) return 0;
+  if (value instanceof Date) return value.getTime();       // pg TIMESTAMPTZ → Date
+  const n = Number(value);
+  if (!Number.isFinite(n)) return new Date(value).getTime(); // ISO string
+  return n > 1e12 ? n : n * 1000;                          // unix-ms vs unix-sec
+}
+
 async function waitForTxOnChain(txHash, timeoutMs = 90000) {
   if (!txHash || txHash.startsWith('0xmock') || txHash.startsWith('0xtest')) {
     logger.info('Mock TX hash — skip onchain wait', { txHash });
     return { status: '0x1' }; // mock 통과
   }
   const RPC_LIST = [
-    process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com',
+    process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org',
     'https://84532.rpc.thirdweb.com',
     'https://sepolia.base.org',
   ];
@@ -90,7 +101,7 @@ function getOperatorWallet() {
   if (!process.env.OPERATOR_PRIVATE_KEY) {
     throw new Error('OPERATOR_PRIVATE_KEY 환경변수가 설정되지 않았습니다. Railway 환경변수를 확인하세요.');
   }
-  const rpc = process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com';
+  const rpc = process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org';
   const provider = new ethers.JsonRpcProvider(rpc);
   return new ethers.Wallet(process.env.OPERATOR_PRIVATE_KEY, provider);
 }
@@ -200,7 +211,7 @@ async function operatorDeposit(sessionId, operatorDepositUsdc, userDepositTxHash
   }
 
   // ── 2. 컨트랙트 state 확인 ────────────────────────────────────────────────
-  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com');
+  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org');
   const escrowRO = getEscrowContract(roProvider);
   let onchainState = 0;
   try {
@@ -284,8 +295,8 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   }
 
   // ── holdDeadline 확인 ──
-  // hold_deadline은 BIGINT Unix timestamp(초) — ms로 변환
-  const holdDeadline = row.hold_deadline ? Number(row.hold_deadline) * 1000 : 0;
+  // hold_deadline: TIMESTAMPTZ(Date객체) 또는 BIGINT(unix초) 모두 처리
+  const holdDeadline = toDeadlineMs(row.hold_deadline);
   const waitMs = holdDeadline - Date.now();
 
   if (waitMs > 0) {
@@ -495,7 +506,7 @@ async function claimSettlement(sessionId) {
   const escrowId = toEscrowId(sessionId);
 
   // 온체인 claimable 여부 확인 (isClaimable view)
-  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com');
+  const roProvider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org');
   const escrowRO = new ethers.Contract(
     process.env.ESCROW_CONTRACT_ADDRESS,
     [...ESCROW_ABI_V3, 'function isClaimable(bytes32) view returns (bool)'],
@@ -532,7 +543,7 @@ async function getEscrowStatus(sessionId) {
 
   let onChain = null;
   try {
-    const rpc    = process.env.BASE_RPC_URL || 'https://base-sepolia-rpc.publicnode.com';
+    const rpc    = process.env.BASE_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org';
     const provider = new ethers.JsonRpcProvider(rpc);
     const escrow   = getEscrowContract(provider);
     const s = await escrow.getEscrowStatus(escrowId);
@@ -563,7 +574,7 @@ async function processExpiredHolds() {
     SELECT el.*, rc.id as case_id, rc.status as case_status, rc.approved_usdc
     FROM escrow_locks el
     LEFT JOIN refund_cases rc ON rc.session_id = el.session_id
-    WHERE el.state IN ('UserDeposited','FullyFunded') AND el.hold_deadline < EXTRACT(EPOCH FROM NOW())::BIGINT
+    WHERE el.state IN ('UserDeposited','FullyFunded') AND el.hold_deadline < NOW()
   `);
 
   for (const lock of result.rows) {
