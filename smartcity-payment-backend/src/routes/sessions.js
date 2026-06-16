@@ -450,6 +450,39 @@ router.get('/:id/stream', async (req, res) => {
   });
 });
 
+// ── GET /sessions/:id — 개별 세션 조회 ──────────────────────────────────────
+router.get('/:id', async (req, res, next) => {
+  try {
+    const db = require('../services/db');
+    const { rows } = await db.getPool().query(
+      `SELECT s.*, el.state as escrow_state, el.fare_amount as fare_usdc,
+              el.user_deposit, el.settle_tx as tx_hash, el.hold_deadline,
+              CASE WHEN el.user_deposit IS NOT NULL AND el.fare_amount IS NOT NULL
+                   THEN (el.user_deposit - el.fare_amount) ELSE 0 END as refund_usdc
+       FROM sessions s
+       LEFT JOIN escrow_locks el ON el.session_id = s.id
+       WHERE s.id = $1`,
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ ok: false, error: 'Session not found' });
+    res.json({ ok: true, data: rows[0] });
+  } catch (err) { next(err); }
+});
+
+// ── GET /sessions/debug/count — DB 직접 카운트 (배포 진단용) ─────────────────
+router.get('/debug/count', async (req, res, next) => {
+  try {
+    const db = require('../services/db');
+    const { rows } = await db.getPool().query(
+      `SELECT COUNT(*) as total, MAX(created_at) as latest FROM sessions`
+    );
+    const recent = await db.getPool().query(
+      `SELECT id, user_address, status, started_at, created_at FROM sessions ORDER BY created_at DESC LIMIT 5`
+    );
+    res.json({ ok: true, total: rows[0].total, latest: rows[0].latest, recent: recent.rows });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
 
 
