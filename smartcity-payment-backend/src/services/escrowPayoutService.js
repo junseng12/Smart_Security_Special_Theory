@@ -184,31 +184,6 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
 async function operatorDeposit(sessionId, operatorDepositUsdc, userDepositTxHash) {
   await ensureEscrowTable();
 
-  // ── 0. operatorDepositUsdc 동기화 — sessions DB의 실제 사용자 입금액으로 보정 ─────
-  // '3.0' 또는 기본값이 넘어온 경우 DB에서 실제 금액을 가져와 override
-  try {
-    const sessRow = await getPool().query(
-      `SELECT meta FROM sessions WHERE id = $1`, [sessionId]
-    );
-    const meta = sessRow.rows[0]?.meta || {};
-    if (meta.depositUsdc && (!operatorDepositUsdc || operatorDepositUsdc === '3.0')) {
-      operatorDepositUsdc = meta.depositUsdc;
-      logger.info('operatorDeposit: 금액을 sessions.meta에서 보정', { sessionId, operatorDepositUsdc });
-    }
-    // escrow_locks에도 확인
-    if (!operatorDepositUsdc || operatorDepositUsdc === '3.0') {
-      const lockRow = await getPool().query(
-        `SELECT user_deposit FROM escrow_locks WHERE session_id = $1`, [sessionId]
-      ).catch(() => ({ rows: [] }));
-      if (lockRow.rows[0]?.user_deposit) {
-        operatorDepositUsdc = String(lockRow.rows[0].user_deposit);
-        logger.info('operatorDeposit: 금액을 escrow_locks.user_deposit에서 보정', { sessionId, operatorDepositUsdc });
-      }
-    }
-  } catch (e) {
-    logger.warn('operatorDeposit: 금액 동기화 실패 (계속 진행)', { sessionId, error: e.message });
-  }
-
   const escrowId = toEscrowId(sessionId);
 
   // ── 1. userDeposit TX 온체인 확정 대기 ────────────────────────────────────
