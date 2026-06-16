@@ -102,50 +102,16 @@ export async function sendUsdcOnChain(fromAddress, toAddress, amountUsdc) {
 /**
  * USDC approve — 에스크로 컨트랙트에 지출 허가
  */
-/**
- * TX가 체인에서 컨펌될 때까지 폴링 대기 (최대 90초)
- * approve 완료 전에 deposit이 실행되는 allowance 에러 방지
- */
-export async function waitForTx(txHash, { intervalMs = 2000, maxWaitMs = 90000 } = {}) {
-  const rpcUrl = "https://sepolia.base.org";
-  const start = Date.now();
-  while (Date.now() - start < maxWaitMs) {
-    try {
-      const res = await fetch(rpcUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0", id: 1,
-          method: "eth_getTransactionReceipt",
-          params: [txHash],
-        }),
-      });
-      const { result } = await res.json();
-      if (result && result.status) {
-        if (result.status === "0x1") return result;   // 성공
-        throw new Error(`TX reverted: ${txHash}`);    // 실패
-      }
-    } catch (e) {
-      if (e.message.startsWith("TX reverted")) throw e;
-    }
-    await new Promise(r => setTimeout(r, intervalMs));
-  }
-  throw new Error(`TX 컨펌 타임아웃 (90s): ${txHash}`);
-}
-
 export async function approveUsdcForEscrow(fromAddress, spender, amountUsdc) {
   if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
   const amountMicro = BigInt(Math.round(amountUsdc * 1e6));
   const spenderHex = spender.replace("0x", "").toLowerCase().padStart(64, "0");
   const amountHex = amountMicro.toString(16).padStart(64, "0");
   const data = "0x095ea7b3" + spenderHex + amountHex;
-  const txHash = await window.ethereum.request({
+  return await window.ethereum.request({
     method: "eth_sendTransaction",
     params: [{ from: fromAddress, to: USDC_ADDRESS, data, gas: "0x0186A0" }], // 100,000
   });
-  // ★ approve TX가 체인에 반영될 때까지 대기 — 이후 userDeposit 호출 시 allowance 보장
-  await waitForTx(txHash);
-  return txHash;
 }
 
 /**
@@ -181,13 +147,10 @@ export async function userDeposit(fromAddress, escrowId, operator, amountUsdc, h
   const amountHex       = BigInt(Math.round(amountUsdc * 1e6)).toString(16).padStart(64, "0");
   const holdDeadlineHex = BigInt(holdDeadline).toString(16).padStart(64, "0");
   const data = selector + escrowIdHex + operatorHex + amountHex + holdDeadlineHex;
-  const txHash = await window.ethereum.request({
+  return await window.ethereum.request({
     method: "eth_sendTransaction",
     params: [{ from: fromAddress, to: ESCROW_V3_ADDRESS, data, gas: "0x49910" }], // 300,000
   });
-  // ★ userDeposit TX 컨펌 대기 — 백엔드 /deposit 기록 전 온체인 반영 보장
-  await waitForTx(txHash);
-  return txHash;
 }
 
 /**
