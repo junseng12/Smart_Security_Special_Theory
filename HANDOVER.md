@@ -1,88 +1,120 @@
 # SmartCity 에스크로 결제 시스템 — AI Agent 인수인계 문서
 
-> 작성일: 2026-06-16  
-> 대상: 이 프로젝트를 처음 받는 AI Agent (컨텍스트 없이도 즉시 이어받을 수 있도록 작성)
+> **작성일**: 2026-06-16  
+> **대상**: 이 프로젝트를 처음 인수받는 AI Agent  
+> **목적**: 컨텍스트 없이도 즉시 이어받을 수 있도록 모든 정보를 한 곳에 정리
+
+---
+
+## 📌 TL;DR (핵심 3줄)
+
+1. **Base Sepolia 테스트넷**에서 QR→결제→환불 전 과정이 블록체인 기반으로 동작하는 스마트시티 결제 시스템
+2. **모든 결제/정산은 신규 컨트랙트 `0xa2642876a2Aa9F19D22a6e69379bbcA10556977f` 만 사용** (구버전 `0x454D...` 절대 금지)
+3. **E2E 12/13 PASS** — TC10(settleAndRelease 타이밍)만 미통과 (코드 버그 아님, 테스트 대기시간 부족)
 
 ---
 
 ## 1. 프로젝트 목적
 
-스마트시티 환경(자전거, 전동킥보드, 주차장 등 공유 서비스)에서  
-**QR 스캔 → 에스크로 예치 → 실시간 오프체인 요금 청구 → 온체인 정산 → 환불**  
-전체 흐름을 블록체인 기반으로 구현하는 결제 시스템이다.
+스마트시티 공유 서비스(자전거, 킥보드, 주차장 등)에서  
+**사용자 ↔ 운영자 간 신뢰 없이도** 안전한 결제가 가능한 블록체인 기반 에스크로 시스템.
 
-핵심 설계 철학:
-- **Trust-minimization**: 스마트컨트랙트가 자금을 보관 → 운영자 먹튀 물리적 방지
-- **Gas-free UX**: 1분 단위 오프체인 서명(Perun 상태 채널)으로 MetaMask 팝업 없이 실시간 청구
-- **투명성**: BaseScan Verified 컨트랙트, 모든 정산 기록 온체인
+### 핵심 설계 원칙
+| 원칙 | 구현 방식 |
+|------|----------|
+| Trust-minimization | 스마트컨트랙트가 자금 보관 → 운영자 먹튀 물리적 불가 |
+| Gas-free UX | 1분 단위 오프체인 서명(Perun) → MetaMask 팝업 없이 실시간 청구 |
+| 투명성 | BaseScan Verified 컨트랙트, 모든 정산 온체인 기록 |
+| 분쟁 무결성 | channel_states 테이블에 nonce+stateHash로 모든 오프체인 기록 |
 
 ---
 
-## 2. 저장소 정보
+## 2. 저장소 & 브랜치
 
 ```
-GitHub Repo : junseng12/Smart_Security_Special_Theory
-Branch      : go-sdk
+GitHub : https://github.com/junseng12/Smart_Security_Special_Theory
+Branch : go-sdk   ← 실제 개발 브랜치 (main 아님)
 ```
 
 ### 폴더 구조
-
 ```
 /
-├── smartcity-payment-backend/   ← 백엔드 (Node.js, Railway 배포)
-├── smartcity-payment-frontend/  ← 프론트엔드 (React/Vite, Railway 배포)
-├── smartcontract/               ← 컨트랙트 소스 (참고용, 이미 배포 완료)
-├── go-perun-node/               ← Go-Perun 오프체인 채널 노드 (Railway)
-└── functions/                   ← Base44 serverless 함수 (보조용)
+├── smartcity-payment-backend/    ← 백엔드 (Node.js) — Railway 배포
+├── smartcity-payment-frontend/   ← 프론트 (React/Vite) — Railway 배포
+├── smartcontract/                ← 컨트랙트 소스 참고용 (이미 배포 완료)
+├── go-perun-node/                ← Go-Perun 오프체인 채널 노드 — Railway
+├── functions/                    ← Base44 serverless 보조 함수
+└── HANDOVER.md                   ← 이 문서
 ```
 
-**⚠️ 절대 수정 금지 폴더**: `backend/`, `frontend-latest/` (구버전, 삭제됨)  
-**실제 서비스 소스**: `smartcity-payment-backend/`, `smartcity-payment-frontend/` 만 사용
+> ⚠️ **주의**: `backend/`, `frontend-latest/` 폴더는 구버전으로 삭제됨. 절대 참조 금지.  
+> 실제 서비스 소스는 `smartcity-payment-backend/`, `smartcity-payment-frontend/` 만 사용.
 
 ---
 
-## 3. 인프라 & 배포
-
-| 서비스 | 플랫폼 | URL |
-|--------|--------|-----|
-| 백엔드 API | Railway | `https://payment-backend-production.up.railway.app` |
-| 프론트엔드 | Railway | (별도 Railway 서비스) |
-| Go-Perun 노드 | Railway | `go-perun.railway.internal` (gRPC) |
-| DB | Railway PostgreSQL | `DATABASE_URL` 환경변수 |
-| Redis | Railway Redis | `REDIS_URL` 환경변수 |
-| 블록체인 | Base Sepolia (testnet, chainId 84532) | `https://sepolia.base.org` |
-
-### Railway 환경변수 (백엔드 필수)
+## 3. 핵심 주소 (변경 금지)
 
 ```
+# 신규 컨트랙트 V3.2 (BaseScan Verified, 현재 사용)
+ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"
+
+# 구버전 (refundToBuyer 없음, Unverified — 절대 사용 금지)
+OLD_ADDRESS       = "0x454Dd98f154cC4Af7ACB5390113151E2f0e489a1"
+
+# USDC (Base Sepolia testnet)
+USDC_ADDRESS      = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+# Operator 지갑
+OPERATOR_ADDRESS  = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"
+
+# 네트워크
+CHAIN_ID   = 84532
+RPC        = "https://sepolia.base.org"
+EXPLORER   = "https://sepolia.basescan.org"
+```
+
+### 왜 구버전으로 돌아가면 안 되는가
+| 항목 | 구버전 0x454D | 신규 0xa264 |
+|------|:---:|:---:|
+| BaseScan Verified | ❌ | ✅ |
+| `refundToBuyer()` | ❌ **없음** | ✅ |
+| `registerRefundIssue()` | ❌ **없음** | ✅ |
+| OpenZeppelin AccessControl | ❓ | ✅ |
+| 바이트코드 크기 | 9326B | 7521B (경량) |
+
+---
+
+## 4. 인프라 구성
+
+| 서비스 | 플랫폼 | 주소 |
+|--------|--------|------|
+| 백엔드 API | Railway | `https://payment-backend-production.up.railway.app` |
+| 프론트엔드 | Railway | (별도 Railway 서비스) |
+| Go-Perun 노드 | Railway | `go-perun.railway.internal:50051` (gRPC, 내부망) |
+| PostgreSQL | Railway | `DATABASE_URL` 환경변수 |
+| Redis | Railway | `REDIS_URL` 환경변수 |
+| 블록체인 | Base Sepolia | chainId 84532 |
+
+### Railway 백엔드 환경변수 (전체)
+```env
 PORT=3000
 NODE_ENV=production
 DATABASE_URL=postgresql://...
 REDIS_URL=redis://...
 BASE_SEPOLIA_RPC=https://sepolia.base.org
-OPERATOR_PRIVATE_KEY=0x...          ← Operator 지갑 프라이빗키
-ESCROW_CONTRACT_ADDRESS=0xa2642876a2Aa9F19D22a6e69379bbcA10556977f   ← ★ V3.2 신규 주소
+OPERATOR_PRIVATE_KEY=0x...          ← Operator 지갑 프라이빗키 (보안 핵심)
+ESCROW_CONTRACT_ADDRESS=0xa2642876a2Aa9F19D22a6e69379bbcA10556977f
 USDC_CONTRACT_ADDRESS=0x036CbD53842c5426634e7929541eC2318f3dCF7e
 OPERATOR_ADDRESS=0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7
 GRPC_PORT=50051
 ```
 
----
-
-## 4. 핵심 주소 (절대 변경 금지)
-
+### 운영 리소스 현황 (2026-06-16 기준)
 ```
-스마트컨트랙트 (V3.2, 신규, Verified):
-  0xa2642876a2Aa9F19D22a6e69379bbcA10556977f  ← 모든 결제/정산은 이 주소만
-
-구버전 (절대 사용 금지):
-  0x454Dd98f154cC4Af7ACB5390113151E2f0e489a1  ← refundToBuyer 없음, Unverified
-
-USDC (Base Sepolia):
-  0x036CbD53842c5426634e7929541eC2318f3dCF7e
-
-Operator 지갑:
-  0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7
+Operator ETH:  0.3556 ETH  (가스비용)
+Operator USDC: 7.64 USDC   (operatorDeposit 재원)
+V3.2 컨트랙트: 7521 bytes  배포됨 ✅
+백엔드:        healthy (redis:ok, db:ok, perun:connected)
 ```
 
 ---
@@ -90,119 +122,150 @@ Operator 지갑:
 ## 5. 시스템 아키텍처
 
 ```
-[User - MetaMask 모바일]
-        │
-        │ QR 스캔
-        ▼
-[Frontend - React/Vite]
-        │
-        │ REST API
-        ▼
-[Backend - Node.js/Express] ──────────── [PostgreSQL DB]
-        │                                     │
-        │ ethers.js (Operator 지갑)            │ sessions, escrow_locks,
-        │                                     │ channel_states, refund_cases
-        │ gRPC                                │
-        ▼                                     │
-[Go-Perun Node]                              │
-  (오프체인 채널 관리)                         │
-        │
-        │ (온체인 분쟁 시)
-        ▼
-[SmartCityEscrow V3.2 - Base Sepolia]
-  0xa2642876a2Aa9F19D22a6e69379bbcA10556977f
-        │
-        │ ERC-20
-        ▼
-[USDC Contract - Base Sepolia]
-  0x036CbD53842c5426634e7929541eC2318f3dCF7e
+┌─────────────────────────────────────────────────────────┐
+│                    사용자 (모바일)                         │
+│                  MetaMask 내장 브라우저                    │
+└──────────────────────┬──────────────────────────────────┘
+                       │ HTTPS
+┌──────────────────────▼──────────────────────────────────┐
+│               Frontend (React/Vite)                      │
+│  ScanPay.jsx  Dashboard.jsx  RefundCenter.jsx  ...       │
+│  lib/walletUtils.js ← MetaMask 연동 / ABI 인코딩          │
+└──────────────┬───────────────────────────────────────────┘
+               │ REST API
+┌──────────────▼───────────────────────────────────────────┐
+│              Backend (Node.js/Express)                    │
+│  routes/ : sessions, channels, refunds, health           │
+│  services/: escrowPayoutService (핵심)                   │
+│             channelOrchestrator, fareEngine               │
+│             refundCaseManager, watchtower                 │
+├──────────────┬────────────────────┬──────────────────────┤
+│  PostgreSQL  │      Redis         │  ethers.js (Operator) │
+│  (세션/정산)  │  (채널 상태 캐시)   │  ← 온체인 TX 자동 실행  │
+└──────────────┴────────────────────┴──────┬───────────────┘
+                                           │ gRPC
+┌──────────────────────────────────────────▼───────────────┐
+│              Go-Perun Node                                │
+│  오프체인 상태 채널 관리                                     │
+│  1분 단위 ProposeUsageUpdate 처리                          │
+└──────────────────────────────────────────────────────────┘
+                                           │ (온체인 분쟁시)
+┌──────────────────────────────────────────▼───────────────┐
+│         SmartCityEscrow V3.2 (Base Sepolia)               │
+│    0xa2642876a2Aa9F19D22a6e69379bbcA10556977f            │
+│    BaseScan Verified ✅                                   │
+│    USDC ERC-20 보관 / 정산 / 환불                         │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 6. 정산 흐름 (표준 5단계)
-
-**이 순서를 절대 바꾸지 말 것**
+## 6. 결제 정산 표준 흐름 (절대 변경 금지)
 
 ```
-Step 1. userDeposit
-  - 사용자가 MetaMask로 직접 서명
-  - USDC.approve(V3.2, amount) → Contract.userDeposit(escrowId, operator, amount, holdDeadline)
-  - 컨트랙트 state: None → UserDeposited
-  - 이벤트: UserDeposited
+[Phase 1] 에스크로 설정
+  1. POST /api/v1/sessions/start
+     → DB: sessions INSERT
+     → escrowId = keccak256(sessionId), holdDeadline = now + 240초 반환
 
-Step 2. operatorDeposit
-  - 백엔드가 Operator 지갑으로 자동 실행 (사용자 /deposit API 호출 시 트리거)
-  - Contract.operatorDeposit(escrowId, amount)
-  - 컨트랙트 state: UserDeposited → FullyFunded
-  - 이벤트: OperatorDeposited
+  2. 프론트: USDC.approve(ESCROW_V3_ADDRESS, amount)  [MetaMask 팝업 ①]
 
-Step 3. 오프체인 사용 (Go-Perun)
-  - 1분마다 ProposeUsageUpdate (MetaMask 팝업 없음)
-  - 누적 요금을 channel_states 테이블에 nonce+stateHash로 기록 (분쟁 증거)
-  - POST /api/v1/channels/:id/update
+  3. 프론트: Contract.userDeposit(escrowId, operatorAddr, amount, holdDeadline)
+             [MetaMask 팝업 ②]
+     → 온체인 state: None → UserDeposited
+     → 이벤트: UserDeposited(escrowId, user, operator, amount, holdDeadline)
 
-Step 4. settleAndRelease
-  - 사용자가 /end API 호출 → 백엔드가 Operator 지갑으로 자동 실행
-  - Contract.settleAndRelease(escrowId, fareAmount)
-  - holdDeadline 이후에만 실행 가능 (컨트랙트 강제)
-  - 컨트랙트 state: FullyFunded → Released
-  - 이벤트: SettledAndReleased
-  - fare → Operator, refund → User (컨트랙트 자동 전송)
+  4. POST /api/v1/sessions/:id/deposit  {depositTxHash, serviceStartedAt}
+     → DB: escrow_locks INSERT (state=UserDeposited, hold_deadline=to_timestamp(unix))
+     → 백엔드 자동: Contract.operatorDeposit(escrowId, amount) [Operator 지갑]
+     → 온체인 state: UserDeposited → FullyFunded
+     → 이벤트: OperatorDeposited, (내부적으로 FullyFunded 체크)
 
-Step 5. (선택) 환불
-  - 사용자 환불 신청 → POST /api/v1/refunds (body: {userAddress, sessionId, reason, refundType})
-  - 백엔드 자동 심사 → forceRefund 또는 refundToBuyer
-  - 컨트랙트 state: → Refunded
+[Phase 2] 서비스 이용 (오프체인)
+  5. 매 1분: POST /api/v1/channels/:id/update
+             {chargeUsdc, userSig, userAddress, nonce, cumulativeUsdc}
+     → DB: channel_states INSERT (분쟁 증거 audit trail)
+     → MetaMask 팝업 없음 (오프체인 서명만)
+
+[Phase 3] 정산
+  6. POST /api/v1/sessions/:id/end  {channelId, userAddress, fareUsdc}
+     → DB: fare 계산 (serviceStartedAt 기준, 클라이언트 값 아님)
+     → 백엔드 자동: Contract.settleAndRelease(escrowId, fareAmount)
+        ※ holdDeadline 경과 후에만 실행 가능 (컨트랙트 강제)
+     → 온체인 state: FullyFunded → Released
+     → fare → Operator 지갑, refund → User 지갑 (컨트랙트 자동 전송)
+     → 이벤트: SettledAndReleased
+
+[Phase 4] 환불 (선택)
+  7. POST /api/v1/refunds  {userAddress, sessionId, reason, refundType}
+     → DB: refund_cases INSERT
+     → 자동 심사 → forceRefund 또는 refundToBuyer
+     → 온체인 state: Released → Refunded
+     → 이벤트: ForceRefunded 또는 RefundedToBuyer
 ```
 
 ---
 
-## 7. 스마트컨트랙트 인터페이스 (V3.2)
+## 7. 스마트컨트랙트 인터페이스 (V3.2 전체)
 
-### EscrowState enum
+### EscrowState
 ```
-0: None
-1: UserDeposited
-2: FullyFunded
-3: RefundIssue
-4: Released
-5: Refunded
+0: None          → 미생성
+1: UserDeposited → 사용자만 예치
+2: FullyFunded   → 양측 예치 완료 (서비스 이용 가능)
+3: RefundIssue   → 분쟁 등록됨
+4: Released      → 정산 완료 (24시간 이의기간)
+5: Refunded      → 환불 완료
 ```
 
-### 핵심 함수
-
+### 함수 목록
 ```solidity
-// 사용자가 직접 호출 (MetaMask 서명)
+// ── 사용자가 직접 호출 (MetaMask 서명 필수) ──────────────────
 userDeposit(bytes32 escrowId, address operator, uint256 amount, uint256 holdDeadline)
 
-// Operator만 호출 가능 (OPERATOR_ROLE)
+// ── Operator만 호출 가능 (OPERATOR_ROLE 필요) ─────────────────
 operatorDeposit(bytes32 escrowId, uint256 amount)
-settleAndRelease(bytes32 escrowId, uint256 fareAmount)
-forceRefund(bytes32 escrowId)
-refundToBuyer(bytes32 escrowId)
+settleAndRelease(bytes32 escrowId, uint256 fareAmount)   // holdDeadline 이후만 가능
+forceRefund(bytes32 escrowId)                            // 즉시 환불 (UserDeposited 상태)
+refundToBuyer(bytes32 escrowId)                          // Released 후 환불
 registerRefundIssue(bytes32 escrowId, uint8 issueType, string description, bool penalizeOperator)
+emergencyCancel(bytes32 escrowId)
 
-// 조회
-getEscrowStatus(bytes32 escrowId) returns (state, userDeposit, operatorDeposit, fareAmount, user, operator, holdDeadline, isFullyFunded, isDeadlinePassed)
+// ── 조회 ─────────────────────────────────────────────────────
+getEscrowStatus(bytes32 escrowId) returns (
+  uint8 state, uint256 userDeposit, uint256 operatorDeposit,
+  uint256 fareAmount, address user, address operator,
+  uint256 holdDeadline, bool isFullyFunded, bool isDeadlinePassed
+)
+hasRole(bytes32 role, address account)
 ```
 
-### escrowId 계산 방식 (백엔드/프론트 통일)
+### 이벤트
+```
+UserDeposited(bytes32 escrowId, address user, address operator, uint256 amount, uint256 holdDeadline)
+OperatorDeposited(bytes32 escrowId, address operator, uint256 amount)
+SettledAndReleased(bytes32 escrowId, address operator, uint256 fare, address user, uint256 refund, uint256 operatorRefund)
+ForceRefunded(bytes32 escrowId, address user, uint256 amount)
+RefundedToBuyer(bytes32 escrowId, address user, uint256 amount, uint256 penalty)
+RefundIssueRegistered(bytes32 escrowId, uint8 issueType, string description)
+```
+
+### escrowId 계산 방식
 ```javascript
-// Node.js (백엔드)
+// 백엔드 (ethers.js v6)
 const { keccak256, toUtf8Bytes } = require('ethers');
-const escrowId = keccak256(toUtf8Bytes(sessionId));
+const escrowId = keccak256(toUtf8Bytes(sessionId));  // bytes32 hex
 
-// Frontend (walletUtils.js)
-async function toBytes32Hex(sessionId) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(sessionId);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data); // ← SHA-256 사용!
-  return Array.from(new Uint8Array(hashBuffer))
-    .map(b => b.toString(16).padStart(2, '0')).join('');
-}
+// 컨트랙트 호출 시 bytes 변환
+const eid_bytes = Buffer.from(escrowId.slice(2), 'hex');  // 0x 제거
+
+// 프론트 (walletUtils.js) — SHA-256 방식 (현재 불일치 있음, 우회 중)
+const hashBuffer = await crypto.subtle.digest('SHA-256', encoder.encode(sessionId));
 ```
-**⚠️ 주의**: 백엔드는 keccak256, 프론트는 SHA-256. 현재 이 불일치가 있으나 백엔드가 holdDeadline을 세션 생성 시 저장하고 프론트에 내려주는 방식으로 우회 중.
+
+> ⚠️ **알려진 이슈**: 백엔드(keccak256) ↔ 프론트(SHA-256) 불일치.  
+> 현재는 백엔드가 escrowId를 생성해서 프론트에 내려주는 방식으로 우회 중.  
+> 장기적으로 통일 필요.
 
 ---
 
@@ -210,87 +273,124 @@ async function toBytes32Hex(sessionId) {
 
 ### Health
 ```
-GET  /health                              → 시스템 상태 확인
-GET  /health/escrow-env                   → ESCROW_CONTRACT_ADDRESS 환경변수 확인
+GET  /health
+     → { status, checks: { redis, db, perun_detail: { connected } } }
+
+GET  /health/escrow-env
+     → ESCROW_CONTRACT_ADDRESS 환경변수 확인
 ```
 
-### Sessions (/api/v1/sessions)
+### Sessions  `/api/v1/sessions`
 ```
-POST /start                               → 세션 생성
-  body: { userAddress, serviceType, depositUsdc }
-  response: { sessionId, escrowId, holdDeadline, channelId }
+POST /start
+     body : { userAddress, serviceType, depositUsdc }
+     resp : { sessionId, escrowId, holdDeadline, channelId }
 
-POST /:id/deposit                         → userDeposit TX 기록 + operatorDeposit 자동 실행
-  body: { channelId, userAddress, depositUsdc, depositTxHash, serviceStartedAt }
-  response: { ok, data: { operatorDeposit: { txHash } } }
+POST /:id/deposit
+     body : { channelId, userAddress, depositUsdc, depositTxHash, serviceStartedAt }
+     resp : { ok, data: { operatorDeposit: { txHash, escrowId, operatorDepositUsdc } } }
 
-POST /:id/end                             → 세션 종료 + 정산
-  body: { channelId, userAddress, fareUsdc }
-  response: { ok, data: { fareUsdc, refundUsdc, escrow: { settleTx, deferred } } }
+POST /:id/end
+     body : { channelId, userAddress, fareUsdc }
+     resp : { ok, data: { fareUsdc, refundUsdc, escrow: { settleTx, deferred } } }
 
-GET  /:id/escrow-status                   → DB+온체인 상태 조회
-  response: { data: { dbState, onchain: { state, isFullyFunded }, settled, settleTx } }
+GET  /:id/escrow-status
+     resp : { data: { dbState, onchain: { state, isFullyFunded }, settled, settleTx, found } }
 
-GET  /:id/status                          → 세션 상태 조회
-GET  /                                    → 세션 목록
-GET  /:id/stream                          → SSE 실시간 스트림
-POST /:id/charge                          → 요금 청구
-POST /:id/sign                            → 서명 요청
-```
-
-### Channels (/api/v1/channels)
-```
-POST /open                                → 채널 열기
-POST /:id/update                          → 오프체인 ProposeUsageUpdate
-  body: { chargeUsdc, userSig, userAddress, nonce?, cumulativeUsdc?, stepIndex? }
-POST /:id/close                           → 채널 닫기
-POST /:id/refund                          → 채널 환불
-GET  /:id                                 → 채널 조회
+GET  /:id/status      → 세션 상태
+GET  /                → 세션 목록
+GET  /:id/stream      → SSE 실시간 스트림
+POST /:id/charge      → 요금 청구
+POST /:id/sign        → 서명 요청
 ```
 
-### Refunds (/api/v1/refunds)
+### Channels  `/api/v1/channels`
 ```
-POST /                                    → 환불 신청
-  body: { userAddress, sessionId, reason, refundType, requestedUsdc? }
-  reason enum: unlock_failure | sensor_failure | double_charge | service_outage |
-               wrong_amount | device_malfunction | device_fault | wrong_charge |
-               manual_request | test
+POST /open            body: { sessionId, userAddress, ... }
+POST /:id/update      body: { chargeUsdc, userSig, userAddress, nonce?, cumulativeUsdc?, stepIndex? }
+POST /:id/close
+POST /:id/refund
+GET  /:id
+```
 
-POST /:caseId/evaluate                    → 자동 심사
-POST /:caseId/approve                     → 승인 (관리자)
-POST /:caseId/reject                      → 거절 (관리자)
-POST /:caseId/payout                      → 온체인 환불 실행
-GET  /:caseId                             → 케이스 조회
-GET  /                                    → 환불 목록
+### Refunds  `/api/v1/refunds`
+```
+POST /
+     body : { userAddress, sessionId, reason, refundType, requestedUsdc? }
+     reason 허용값 : unlock_failure | sensor_failure | double_charge | service_outage |
+                    wrong_amount | device_malfunction | device_fault | wrong_charge |
+                    manual_request | test
+     refundType   : FULL | PARTIAL
+
+POST /:caseId/evaluate   → 자동 심사 트리거
+POST /:caseId/approve    body: { approvedUsdc }
+POST /:caseId/reject     body: { reason }
+POST /:caseId/payout     → 온체인 환불 실행 (forceRefund or refundToBuyer)
+GET  /:caseId
+GET  /
 ```
 
 ---
 
-## 9. DB 스키마 (주요 테이블)
+## 9. 주요 서비스 파일 역할 (백엔드)
+
+```
+src/services/
+├── escrowPayoutService.js   ★ 핵심
+│   ├── getEscrowContract()   → process.env.ESCROW_CONTRACT_ADDRESS (env변수)
+│   ├── recordUserDeposit()   → escrow_locks INSERT, hold_deadline=to_timestamp(unix)
+│   ├── operatorDeposit()     → Operator 지갑으로 온체인 예치
+│   │                           금액 자동 동기화: sessions.meta > escrow_locks.user_deposit
+│   └── settleAndPayout()     → settleAndRelease 호출
+│
+├── channelOrchestrator.js   세션 생명주기 총괄
+│   ├── startSession()        → holdDeadline = Math.floor(Date.now()/1000) + 240
+│   └── endSessionAndSettle() → DB 기준 fare 계산 + 정산
+│
+├── fareEngine.js            요금 계산 (DB의 serviceStartedAt 기준, 클라이언트 값 무시)
+├── watchtower.js            온체인 모니터링 (Released 상태 자동 감지 + DB 동기화)
+├── refundCaseManager.js     환불 케이스 CRUD
+├── refundDecisionEngine.js  자동 심사 (approve/reject 판단)
+├── channelManager.js        Go-Perun gRPC 채널 관리
+├── walletService.js         ethers.js Operator 지갑 래퍼
+├── db.js                    PostgreSQL pool (getPool())
+└── redisClient.js           Redis 연결
+```
+
+---
+
+## 10. DB 스키마 (주요 테이블)
 
 ```sql
 -- 결제 세션
-sessions (id UUID, user_address, service_type, status, meta JSONB, created_at)
+sessions (
+  id UUID PRIMARY KEY,
+  user_address TEXT,
+  service_type TEXT,
+  status TEXT,
+  meta JSONB,             -- { depositUsdc, holdDeadline, channelId, ... }
+  created_at TIMESTAMPTZ
+)
 
 -- 에스크로 온체인 상태 기록
 escrow_locks (
   session_id UUID,
-  escrow_id_bytes TEXT,      -- 0x... hex
+  escrow_id_bytes TEXT,        -- "0x..." hex 문자열
   channel_id TEXT,
   user_address TEXT,
   operator_address TEXT,
   user_deposit NUMERIC,
   operator_deposit NUMERIC,
   fare_amount NUMERIC,
-  user_deposit_tx TEXT,      -- TX hash
+  user_deposit_tx TEXT,
   operator_deposit_tx TEXT,
   settle_tx TEXT,
-  hold_deadline TIMESTAMPTZ, -- to_timestamp(unix_sec) 으로 저장
-  state TEXT,                -- UserDeposited | FullyFunded | Released | Refunded
+  hold_deadline TIMESTAMPTZ,   -- to_timestamp(unix_seconds) 형식으로 저장
+  state TEXT,                  -- UserDeposited | FullyFunded | Released | Refunded
   settled_at TIMESTAMPTZ
 )
 
--- 오프체인 채널 상태 (분쟁 증거)
+-- 오프체인 채널 상태 (분쟁 증거 audit trail)
 channel_states (
   channel_id TEXT,
   session_id UUID,
@@ -298,140 +398,122 @@ channel_states (
   state_hash TEXT,
   cumulative_usdc NUMERIC,
   user_sig TEXT,
-  created_at
+  created_at TIMESTAMPTZ
 )
 
 -- 환불 케이스
 refund_cases (
-  id UUID,
+  id UUID PRIMARY KEY,
   session_id UUID,
   user_address TEXT,
   reason TEXT,
-  refund_type TEXT,
+  refund_type TEXT,         -- FULL | PARTIAL
   requested_usdc NUMERIC,
-  status TEXT,               -- pending | approved | rejected | paid
-  created_at
+  approved_usdc NUMERIC,
+  status TEXT,              -- pending | approved | rejected | paid
+  payout_tx TEXT,
+  created_at TIMESTAMPTZ
 )
 
--- Perun 채널
+-- Perun 오프체인 채널
 channels (id TEXT, session_id UUID, state TEXT, balance NUMERIC, ...)
 ```
 
 ---
 
-## 10. 프론트엔드 구성
+## 11. 프론트엔드 구성
 
-### 페이지 목록
+### 페이지
 ```
-Dashboard.jsx         → 메인 대시보드 (잔액, 최근 내역)
-ScanPay.jsx           → QR 스캔 결제 메인 화면 (가장 복잡한 파일, 934L)
-TransactionHistory.jsx→ 거래 내역 + 세션ID 복사 기능
-RefundCenter.jsx      → 환불 신청 화면
-Deposit.jsx           → USDC 입금
-Send.jsx              → 전송
-Profile.jsx           → 지갑 주소, 잔액 조회
-```
-
-### 핵심 유틸 파일
-```
-src/lib/walletUtils.js   → MetaMask 연동, USDC approve, userDeposit ABI 인코딩
-src/components/wallet/   → 공통 컴포넌트
+Dashboard.jsx          → 잔액, 최근 거래 내역
+ScanPay.jsx            → QR 스캔 결제 메인 (934L, 가장 핵심)
+TransactionHistory.jsx → 거래 내역 + 세션ID 복사
+RefundCenter.jsx       → 환불 신청
+Deposit.jsx            → USDC 입금
+Send.jsx               → 전송
+Profile.jsx            → 지갑 주소, 잔액 표시
 ```
 
-### walletUtils.js 핵심 상수
+### walletUtils.js 핵심 상수 & 함수
 ```javascript
-USDC_ADDRESS    = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+// 주소 상수 (하드코딩, 변경 시 walletUtils.js만 수정하면 됨)
+USDC_ADDRESS      = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"
-OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"
-BACKEND = "https://payment-backend-production.up.railway.app"
+OPERATOR_ADDRESS  = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"
+
+// 함수
+approveUsdcForEscrow(fromAddress, escrowAddress, amountUsdc)  // USDC approve
+userDeposit(fromAddress, escrowId, operator, amountUsdc, holdDeadline)  // ABI 인코딩
+getUsdcBalance(address)
 ```
 
-### ScanPay.jsx 결제 플로우 (상태 머신)
+### ScanPay.jsx 결제 상태 머신
 ```
-stage: "idle"
-  → QR 스캔 or 수동 입력
-stage: "session_created"
-  → POST /sessions/start → escrowId, holdDeadline 수신
-stage: "approved"
-  → USDC.approve(ESCROW_V3_ADDRESS, amount)  [MetaMask 팝업 1]
-stage: "deposited"
-  → Contract.userDeposit(escrowId, operator, amount, holdDeadline) [MetaMask 팝업 2]
-  → POST /sessions/:id/deposit → operatorDeposit 자동 실행
-stage: "active"
-  → 1분마다 ProposeUsageUpdate (자동, MetaMask 팝업 없음)
-  → 요금 카운터 표시
-stage: "ended"
-  → POST /sessions/:id/end → settleTx 수신
-  → 정산 결과 표시 (fare, refund)
-```
-
----
-
-## 11. 서비스 파일 역할 (백엔드)
-
-```
-src/services/
-  escrowPayoutService.js  ← 에스크로 핵심 로직
-    - recordUserDeposit()    : userDeposit TX 기록
-    - operatorDeposit()      : Operator 지갑으로 온체인 예치
-    - settleAndPayout()      : settleAndRelease 호출
-    - getEscrowContract()    : process.env.ESCROW_CONTRACT_ADDRESS 사용 (env변수)
-
-  channelOrchestrator.js  ← 세션 생명주기 총괄
-    - startSession()         : 세션 생성 + holdDeadline 계산
-    - endSessionAndSettle()  : 세션 종료 + 정산
-
-  channelManager.js       ← Perun 채널 관리 (gRPC)
-  sessionManager.js       ← DB sessions 테이블 CRUD
-  settlementManager.js    ← 정산 로직
-  refundCaseManager.js    ← 환불 케이스 관리
-  refundDecisionEngine.js ← 환불 자동 심사
-  watchtower.js           ← 온체인 모니터링 (Released 상태 자동 감지)
-  walletService.js        ← Operator 지갑 ethers.js 래퍼
-  fareEngine.js           ← 요금 계산 (DB serviceStartedAt 기준)
-  db.js                   ← PostgreSQL pool
-  redisClient.js          ← Redis 연결
+"idle"
+  ↓ QR 스캔
+"session_created"   ← POST /sessions/start
+  ↓
+"approved"          ← USDC.approve() [MetaMask ①]
+  ↓
+"deposited"         ← userDeposit() [MetaMask ②] + POST /deposit
+  ↓
+"active"            ← 1분마다 ProposeUsageUpdate (자동)
+  ↓ 서비스 종료
+"ended"             ← POST /end → fare/refund 표시
 ```
 
 ---
 
-## 12. 현재 진행 상태 (2026-06-16 기준)
+## 12. 현재 상태 & 미해결 과제
 
-### ✅ 완료된 것
+### ✅ 완료
 - 신규 컨트랙트 V3.2 배포 + BaseScan Verified
-- Railway ESCROW_CONTRACT_ADDRESS = 신규(0xa264) 설정 완료
-- userDeposit → operatorDeposit → FullyFunded 온체인 플로우 정상 동작
-- settleAndRelease → Released 플로우 정상 동작
-- 프론트엔드 walletUtils.js / ScanPay.jsx 신규 주소 동기화 완료
-- 백엔드 operatorDeposit 금액 자동 동기화 (DB에서 보정)
-- channels.js updateSchema에 nonce/cumulativeUsdc/stepIndex 추가
-- refunds.js reason enum에 'test' 추가
-- opDepositUsdc 기본값 '3.0' → '0.10' 수정
+- Railway 환경변수 전체 동기화 (`ESCROW_CONTRACT_ADDRESS=0xa264...`)
+- 전체 결제 플로우 온체인 동작 확인 (UserDeposited → FullyFunded → Released)
+- 프론트 walletUtils.js / ScanPay.jsx 주소 동기화
+- operatorDeposit 금액 DB 자동 동기화 (3.0 기본값 방어)
+- channels.js updateSchema 확장 (nonce, cumulativeUsdc, stepIndex)
+- refunds.js reason enum 'test' 추가
 
-### ❌ E2E 테스트 미통과 항목
-- **TC10: settleAndRelease → Released 온체인 확정**  
-  원인: holdDeadline이 아직 안 지난 시점에 Released 체크 → 25초 대기로도 부족  
-  해결책: Watchtower가 자동 처리하므로 실제 운영에선 정상 (테스트 타이밍 문제)  
-  → Watchtower 확인 로직에 더 긴 대기(60초) 또는 폴링 방식 추가 필요
+### ❌ E2E TC10 미통과 (코드 버그 아님)
+```
+원인: E2E 테스트에서 holdDeadline 경과 후 25초 대기 → Released 확인 불충분
+      (holdDeadline이 240초 = 4분이라 테스트 중 경과 시점과 Settlement 실행 시점이 타이트함)
 
-### 🔧 추가로 개선 가능한 것
-1. **holdDeadline 단축 테스트**: 현재 4분(240초) → E2E 테스트용 환경변수로 조절 가능하게
-2. **0 USDC API레벨 거부**: 현재 세션 생성 후 컨트랙트에서 revert → API 레벨에서 사전 차단 가능
-3. **escrowId 계산 통일**: 백엔드(keccak256) ↔ 프론트(SHA-256) 불일치 → 장기적으로 통일 필요
-4. **Watchtower claimSettlement**: Released 후 24시간 대기 → 자동 claimSettlement 구현 필요
+실제 운영: Watchtower가 holdDeadline 경과 감지 → settleAndRelease 자동 실행 → 정상
+다음 Agent 할 일: E2E 테스트 TC10에 폴링 방식 추가
+```
+```python
+# TC10 수정 방법 예시
+for i in range(20):          # 최대 60초 폴링
+    s = escrow_c.functions.getEscrowStatus(eid_b).call()
+    if s[0] == 4:            # Released
+        break
+    if s[8]:                 # dlPassed → 직접 settleAndRelease 실행
+        stx(escrow_c.functions.settleAndRelease(eid_b, fare), nonce)
+    time.sleep(3)
+```
+
+### 🔧 장기 개선 과제
+1. **escrowId 계산 통일**: 백엔드(keccak256) ↔ 프론트(SHA-256) → 둘 중 하나로 통일
+2. **0 USDC API 레벨 거부**: 현재 컨트랙트 ZeroAmount revert로 방어 → API 사전 검증 추가
+3. **holdDeadline 환경변수화**: 현재 하드코딩 240초 → `HOLD_DEADLINE_SECONDS` env로
+4. **Watchtower claimSettlement**: Released 후 24시간 자동 처리 미구현
+5. **모바일 E2E 최종 검증**: 실제 MetaMask 앱에서 전체 플로우 실사용 테스트
 
 ---
 
-## 13. 최근 커밋 내역 (go-sdk)
+## 13. 최근 커밋 이력 (go-sdk)
 
 ```
-b1f463d8  2026-06-16  fix: operatorDeposit 금액 DB에서 자동 동기화
+a501fb27  2026-06-16  docs: AI Agent 인수인계 문서 (HANDOVER.md) 추가
+b1f463d8  2026-06-16  fix: operatorDeposit 금액 DB 자동 동기화
 fd3b125f  2026-06-16  fix: refunds reason enum 'test' 추가
 e5fa8ca6  2026-06-16  fix: channels updateSchema nonce/cumulativeUsdc 추가
-0bf6fdb0  2026-06-16  fix: opDepositUsdc '3.0' → '0.10' 동기화
+0bf6fdb0  2026-06-16  fix: opDepositUsdc '3.0' 기본값 → '0.10' + 에러 노출 제거
 4f20f425  2026-06-16  fix: operatorDeposit 에러 메시지 응답 포함 (디버그)
 49d48565  2026-06-16  fix: hold_deadline to_timestamp SQL 복원
-f72a12245  2026-06-16  fix: hold_deadline unix초 정수로 저장
+f72a1224  2026-06-16  fix: hold_deadline unix초 정수로 저장
 d9e60c74  2026-06-16  fix: endSchema userFinalSig optional
 efe321da  2026-06-16  revert: sessions.js b8b23fd 기준 롤백
 1f19f1d8  2026-06-16  revert: escrowPayoutService V3.2 적용
@@ -439,40 +521,53 @@ efe321da  2026-06-16  revert: sessions.js b8b23fd 기준 롤백
 
 ---
 
-## 14. E2E 테스트 재실행 방법
+## 14. E2E 테스트 재실행 체크리스트
 
-백엔드 Railway Redeploy 후 아래 스크립트로 전체 13케이스 검증:
+Railway Redeploy 후 아래 순서로 확인:
 
-```python
-# 환경변수 필요:
-# OPERATOR_PRIVATE_KEY=0x...
-# BASESCAN_API_KEY=...
-# GITHUB_TOKEN=...
+```bash
+# 1. 헬스 확인
+GET /health
+# → { status: "healthy", checks: { redis: "ok", db: "ok" } }
 
-# 주요 케이스:
-# TC01: GET /health → redis+db ok
-# TC02: POST /sessions/start → escrowId=keccak(sessionId), holdDeadline 유효
-# TC03: USDC.approve + Contract.userDeposit → TX Success
-# TC04: 온체인 getEscrowStatus → state=1 (UserDeposited)
-# TC05: POST /sessions/:id/deposit → operatorDeposit txHash 반환
-# TC06: 온체인 getEscrowStatus → state=2 (FullyFunded)
-# TC07: POST /channels/:id/update {chargeUsdc, userSig, userAddress, nonce} → ok
-# TC08: GET /sessions/:id/escrow-status → dbState, onchain.state 확인
-# TC09: POST /sessions/:id/end → fareUsdc, refundUsdc 반환
-# TC10: holdDeadline 경과 후 온체인 state=4 (Released) 확인 (60초 대기 필요)
-# TC11: 0 USDC 세션 → 컨트랙트 ZeroAmount revert 보장
-# TC12: POST /refunds {reason: 'test'} → caseId 반환
-# TC13: GET /sessions/없는ID/escrow-status → found=false
+# 2. 세션 생성
+POST /api/v1/sessions/start
+{ "userAddress": "0x...", "serviceType": "bicycle", "depositUsdc": "0.10" }
+# → { sessionId, escrowId, holdDeadline, channelId }
+
+# 3. 온체인 userDeposit (MetaMask or ethers.js)
+Contract.userDeposit(escrowId_bytes, operator, 100000, holdDeadline)
+# → TX Success, 온체인 state=1 (UserDeposited)
+
+# 4. 백엔드 deposit API
+POST /api/v1/sessions/:id/deposit
+{ channelId, userAddress, depositUsdc:"0.10", depositTxHash, serviceStartedAt }
+# → { ok: true, data: { operatorDeposit: { txHash: "0x..." } } }
+# → 20초 대기 후 온체인 state=2 (FullyFunded)
+
+# 5. 정산
+POST /api/v1/sessions/:id/end
+{ channelId, userAddress, fareUsdc: "0.04" }
+# → { ok: true, data: { fareUsdc: "0.04", refundUsdc: "0.06" } }
+# → holdDeadline 경과 후 온체인 state=4 (Released) [폴링 60초]
+
+# 6. 환불 신청
+POST /api/v1/refunds
+{ userAddress, sessionId, reason: "test", refundType: "PARTIAL" }
+# → { ok: true, data: { caseId: "..." } }
 ```
 
 ---
 
-## 15. 중요 지침 (절대 위반 금지)
+## 15. 절대 규칙 (위반 금지)
 
-1. **모든 결제/정산은 0xa2642876a2Aa9F19D22a6e69379bbcA10556977f 만 사용**
-2. **사용자의 userDeposit TX를 백엔드가 대신 실행하지 말 것** (MetaMask 직접 서명 필수)
-3. **정산 계산은 클라이언트 값 아닌 DB의 serviceStartedAt 기준**
-4. **컨트랙트 주소 변경 시 환경변수(.env) 및 walletUtils.js 동시 업데이트**
-5. **operatorDeposit 금액 = userDeposit 금액 (동일해야 FullyFunded)**
-6. **hold_deadline DB 저장: to_timestamp(unix_seconds) 형식 사용**
-7. **escrowId 인코딩: bytes.fromhex(eid_hex[2:]) — 0x 제거 후 hex 디코딩**
+```
+1. 모든 결제/정산 → 0xa2642876a2Aa9F19D22a6e69379bbcA10556977f 만 사용
+2. 백엔드가 사용자 userDeposit TX를 대신 실행하지 말 것 (MetaMask 직접 서명)
+3. 정산 금액은 DB의 serviceStartedAt 기준 (클라이언트 전달값 신뢰 금지)
+4. 컨트랙트 주소 변경 시 → Railway 환경변수 + walletUtils.js 동시 업데이트
+5. operatorDeposit 금액 = userDeposit 금액 (다르면 FullyFunded 불가)
+6. hold_deadline DB 저장: to_timestamp(unix_seconds) 형식
+7. escrowId 인코딩: bytes.fromhex(hex_string.replace("0x",""))
+8. 실제 서비스 소스: smartcity-payment-backend/, smartcity-payment-frontend/ 만 수정
+```
