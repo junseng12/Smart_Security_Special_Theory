@@ -586,7 +586,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
         channelId:    sessionData.channelId,
         userAddress:  mmAddress || localStorage.getItem("mm_address"),
         userFinalSig: String(liveCharged.toFixed(6)),
-        // fareUsdc는 백엔드가 started_at 기준으로 직접 계산 — 프론트 값 전달 안 함
+        fareUsdc:     String(liveCharged.toFixed(6)), // ★ 오프체인 누적 요금 — 백엔드 DB 폴백용
       });
       const fareUsdc   = res.fareUsdc   ?? res.fare   ?? "계산중...";
       const refundUsdc  = res.refundUsdc  ?? res.refund  ?? "계산중...";
