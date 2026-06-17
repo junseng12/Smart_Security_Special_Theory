@@ -17,7 +17,7 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
-const RATE_PER_MIN = 0.01; // USDC/분 — 화면 표시용 (백엔드와 동일)
+const RATE_PER_MIN = 0.1; // USDC/분 — 분당 0.1 USDC 고정 (rebuild 1781678476)
 
 const SERVICE_TYPES = [
   { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
@@ -517,9 +517,8 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
   // ── Charge 자동 청구 ──────────────────────────────────────────────────────────
   // sessionDataRef 사용 → 의존성 배열 고정 → interval이 재생성되지 않음
-  // liveCharged — 분 단위 스텝 계산
-  // ProposeUsageUpdate(60초 1회)와 화면 표시를 일치시킴
-  // elapsed가 60초 넘을 때마다 0.01 USDC씩 계단식으로 올라감
+  // liveCharged — 분 단위 스텝 계산 (분당 0.1 USDC 고정)
+  // 완성된 분(elapsedMinutes)마다 0.1 USDC씩 계단식으로 올라감
   const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분만 카운트
   const liveCharged = (() => {
     const sd = sessionDataRef.current;
@@ -776,7 +775,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
                   {/* 분 단위로 올라가는 요금 — ProposeUsageUpdate 주기와 일치 */}
-                  <div className="text-xl font-bold">{liveCharged.toFixed(2)}</div>
+                  <div className="text-xl font-bold">{liveCharged.toFixed(2)} USDC</div>
                   <div className="text-xs text-blue-200 mt-0.5">
                     USDC ({elapsedMinutes}분)
                   </div>
