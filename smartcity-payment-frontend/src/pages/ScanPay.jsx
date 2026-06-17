@@ -17,7 +17,7 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
-const RATE_PER_MIN = 0.1; // USDC/분 — 분당 0.1 USDC 고정 [1781684073]
+const RATE_PER_MIN = 0.01; // USDC/분 — 분당 0.01 USDC (완성된 분 단위)
 
 const SERVICE_TYPES = [
   { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
