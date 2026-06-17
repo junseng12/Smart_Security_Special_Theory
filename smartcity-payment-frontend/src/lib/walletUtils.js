@@ -124,32 +124,15 @@ async function waitForReceipt(txHash, ms = 90000) {
 
 export async function approveUsdcForEscrow(fromAddress, spender, amountUsdc) {
   if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
-
-  // ① 현재 allowance 체크 — 이미 충분하면 approve 스킵 (MetaMask 팝업 없음)
-  const needed = BigInt(Math.round(amountUsdc * 1e6));
-  const spenderHex = spender.replace("0x", "").toLowerCase().padStart(64, "0");
-  const ownerHex  = fromAddress.replace("0x", "").toLowerCase().padStart(64, "0");
-  try {
-    const res = await fetch(RPC_LIST[1], {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc:"2.0", id:1, method:"eth_call",
-        params:[{ to: USDC_ADDRESS, data: "0xdd62ed3e" + ownerHex + spenderHex }, "latest"] }),
-    });
-    const { result } = await res.json();
-    if (result && BigInt(result) >= needed) {
-      console.log("[approve] allowance 충분 — approve 스킵");
-      return null; // approve TX 없음
-    }
-  } catch(e) { /* allowance 조회 실패 시 그냥 approve 진행 */ }
-
-  // ② allowance 부족 → MAX_UINT256 approve
+  // MAX_UINT256 approve — MetaMask 팝업 → 서명 → 컨펌 대기 → userDeposit 진행
   const MAX = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+  const spenderHex = spender.replace("0x", "").toLowerCase().padStart(64, "0");
   const data = "0x095ea7b3" + spenderHex + MAX;
   const txHash = await window.ethereum.request({
     method: "eth_sendTransaction",
     params: [{ from: fromAddress, to: USDC_ADDRESS, data, gas: "0x0186A0" }],
   });
-  // approve TX 체인 컨펌 대기 — userDeposit 타이밍 에러 방지
+  // approve TX 체인 컨펌 대기 — userDeposit allowance 타이밍 에러 방지
   await waitForReceipt(txHash);
   return txHash;
 }
