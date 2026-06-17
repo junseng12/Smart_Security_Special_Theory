@@ -17,7 +17,7 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
-const RATE_PER_MIN = 0.01; // USDC/분 — 분당 0.01 USDC (완성된 분 단위)
+const RATE_PER_MIN = 0.01; // USDC/분 — 분당 0.01 USDC, 완성된 분 단위(floor)
 
 const SERVICE_TYPES = [
   { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
@@ -524,7 +524,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     if (!sd) return totalCharged;
     const depositUsdc = parseFloat(sd.svc?.depositUsdc || 3.0);
     return Math.min(
-      Math.round(elapsedMinutes * RATE_PER_MIN * 1_000_000) / 1_000_000,
+      Math.floor(elapsedSec / 60) * RATE_PER_MIN, // 완성된 분 단위: 0.01, 0.02, 0.03...
       depositUsdc
     );
   })();
