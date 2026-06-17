@@ -448,17 +448,9 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       setSessionData(sd);
       setStep("active");
     } catch (err) {
-      const cancelled = err.code === 4001 || err.message?.includes('rejected') || err.message?.includes('denied');
-      if (cancelled) {
-        addLog("⚠️ 서명이 취소됐습니다. 아래 버튼으로 다시 시도하세요.", "warn");
-        const cur = loadProc();
-        if (cur?.sessionId) saveProc({ ...cur, stage: "session_created" });
-        setStep("processing");
-      } else {
-        addLog(`❌ 재개 실패: ${err.message}`, "error");
-        addLog("처음부터 다시 시도해주세요.", "info");
-        setTimeout(() => { clearProc(); setStep("home"); }, 6000);
-      }
+      addLog(`❌ 재개 실패: ${err.message}`, "error");
+      addLog("처음부터 다시 시도해주세요.", "info");
+      setTimeout(() => { clearProc(); setStep("home"); }, 6000);
     }
   };
 
@@ -516,18 +508,8 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       setStep("active");
 
     } catch (err) {
-      // MetaMask 취소(4001) — proc 유지해서 재시도 가능하게
-      const cancelled = err.code === 4001 || err.message?.includes('rejected') || err.message?.includes('denied');
-      if (cancelled) {
-        addLog("⚠️ 서명이 취소됐습니다. 아래 버튼으로 다시 시도하세요.", "warn");
-        // stage를 session_created로 되돌려 approve부터 재개
-        const cur = loadProc();
-        if (cur?.sessionId) saveProc({ ...cur, stage: "session_created" });
-        setStep("processing"); // 처리 화면 유지 (홈 안 가고 재시도 버튼 노출)
-      } else {
-        addLog(`❌ 오류: ${err.message}`, "error");
-        setTimeout(() => { clearProc(); setStep("home"); }, 6000);
-      }
+      addLog(`❌ 오류: ${err.message}`, "error");
+      setTimeout(() => { clearProc(); setStep("home"); }, 6000);
     }
   };
 
@@ -746,12 +728,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
                 </div>
               ))}
             </div>
-            {log.some(l => l.type === "warn") && !log.some(l => l.type === "error") ? (
-              <button onClick={() => { const p = loadProc(); if (p) resumePaymentRef.current?.(p); else startPayment(selectedSvc); }}
-                className="w-full py-3 bg-blue-50 text-blue-600 rounded-xl text-sm font-medium border border-blue-100">
-                🔄 다시 서명하기
-              </button>
-            ) : log.some(l => l.type === "error") ? (
+            {log.some(l => l.type === "error") ? (
               <button onClick={() => { clearProc(); setStep("home"); setLog([]); }}
                 className="w-full py-3 bg-red-50 text-red-600 rounded-xl text-sm font-medium border border-red-100">
                 ← 홈으로 돌아가기
