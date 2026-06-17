@@ -3,7 +3,7 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
-RUN echo 'cache bust: 1781589850'
+RUN echo 'cache bust: 1781680961'
 COPY . .
 RUN npm run build
 
