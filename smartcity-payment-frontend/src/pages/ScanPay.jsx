@@ -32,14 +32,12 @@ const loadSession  = ()  => {
   try {
     const d = JSON.parse(localStorage.getItem(SESSION_KEY));
     if (!d) return null;
-    // 필수 필드 없는 깨진 데이터 → 자동 클리어 (검은 화면 방지)
-    if (!d.sessionId || !d.svc || !d.status) { clearSession(); return null; }
     // holdDeadline + 여유 30초 지났으면 만료된 세션 — 자동 정리
     if (d.holdDeadline && Math.floor(Date.now() / 1000) > d.holdDeadline + 30) {
       clearSession(); return null;
     }
     return d;
-  } catch { clearSession(); return null; }
+  } catch { return null; }
 };
 
 // processing 단계별 저장 — MetaMask 서명 후 페이지 리마운트 시 재개를 위해
