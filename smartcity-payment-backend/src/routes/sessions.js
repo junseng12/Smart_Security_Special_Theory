@@ -139,14 +139,60 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
     }
     // ──────────────────────────────────────────────────────────────────────────
 
-    const result = await orchestrator.endSessionAndSettle({
-      sessionId:    req.params.id,
-      channelId:    req.body.channelId,
-      userAddress:  req.body.userAddress,
-      userFinalSig: req.body.userFinalSig,
-      fareUsdc:     req.body.fareUsdc,      // ★ charge 요금 직접 전달
-      adjustment:   req.body.adjustment,
-    });
+    // 세션 종료 + 정산 (비동기 처리 — deferred 시 즉시 202 반환)
+    let result;
+    try {
+      result = await Promise.race([
+        orchestrator.endSessionAndSettle({
+          sessionId:    req.params.id,
+          channelId:    req.body.channelId,
+          userAddress:  req.body.userAddress,
+          userFinalSig: req.body.userFinalSig,
+          fareUsdc:     req.body.fareUsdc,
+          adjustment:   req.body.adjustment,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('SETTLE_DEFERRED')), 8000)),
+      ]);
+    } catch (raceErr) {
+      if (raceErr.message === 'SETTLE_DEFERRED') {
+        // holdDeadline 대기 중 — 백그라운드 정산 진행 중, 즉시 accepted 반환
+        // DB에서 예상 요금/환불금 계산해서 같이 반환
+        let fareUsdc = '0', refundUsdc = '0', depositUsdc = '3';
+        try {
+          const db = require('../services/db');
+          const fareEngine = require('../services/fareEngine');
+          const row = await db.getPool().query(
+            `SELECT s.started_at, s.service_type, s.deposit_usdc, e.user_deposit
+             FROM sessions s LEFT JOIN escrow_locks e ON e.session_id = s.id
+             WHERE s.id = $1 LIMIT 1`, [req.params.id]
+          );
+          if (row.rows[0]) {
+            const r0 = row.rows[0];
+            const dep = parseFloat(r0.user_deposit || r0.deposit_usdc || 3);
+            depositUsdc = String(dep);
+            const endTs = new Date();
+            const startTs = new Date(r0.started_at);
+            const durationMinutes = Math.max(0, (endTs - startTs) / 60_000);
+            const fareResult = await fareEngine.calculateFare({
+              sessionId: req.params.id,
+              serviceType: r0.service_type,
+              usage: { durationMinutes },
+            }).catch(() => ({ fare: 0.01 }));
+            fareUsdc = String((fareResult.fare ?? 0.01).toFixed(6));
+            refundUsdc = String(Math.max(dep - parseFloat(fareUsdc), 0).toFixed(6));
+          }
+        } catch (_) {}
+        return res.status(202).json({
+          ok: true,
+          data: {
+            deferred: true, status: 'settling',
+            message: 'holdDeadline 대기 중, 자동 정산 예약됨',
+            fareUsdc, refundUsdc, depositUsdc,
+          }
+        });
+      }
+      throw raceErr;
+    }
 
     sseClients.broadcast(req.body.userAddress, {
       event: 'settlement_complete',
@@ -204,10 +250,34 @@ router.post('/:id/deposit', async (req, res, next) => {
     // ★ await로 처리: Railway는 비동기 .then이 요청 완료 후 실행 보장 안 됨
     // userDepositTxHash가 실제 TX인 경우만 온체인 operatorDeposit 실행
     const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
-    const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock') && !depositTxHash.startsWith('0xtest');
+    const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock');
+
+    // ★ TX receipt 검증: userDeposit TX가 실제로 성공했는지 확인 후 operatorDeposit 실행
+    let userTxSuccess = true;
+    if (isRealTx) {
+      try {
+        const { ethers } = require('ethers');
+        const provider = new ethers.JsonRpcProvider(
+          process.env.BASE_RPC_URL || 'https://sepolia.base.org'
+        );
+        const receipt = await provider.getTransactionReceipt(depositTxHash);
+        if (!receipt) {
+          require('../utils/logger').warn('/deposit: TX not found (pending?)', { depositTxHash });
+          userTxSuccess = false;
+        } else if (receipt.status !== 1) {
+          require('../utils/logger').warn('/deposit: userDeposit TX REVERTED — skip operatorDeposit', {
+            depositTxHash, status: receipt.status
+          });
+          userTxSuccess = false;
+        }
+      } catch (rpcErr) {
+        require('../utils/logger').warn('/deposit: receipt 조회 실패 — operatorDeposit 시도는 계속', { error: rpcErr.message });
+        // RPC 오류 시 낙관적으로 진행
+      }
+    }
 
     let operatorDepositResult = null;
-    if (canEscrow && isRealTx) {
+    if (canEscrow && isRealTx && userTxSuccess) {
       const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '3.0';
       try {
         operatorDepositResult = await escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash);
@@ -279,7 +349,8 @@ router.get('/:id/escrow-status', async (req, res, next) => {
     const fareUsdc   = parseFloat(row.fare_amount || 0);
     const userDep    = parseFloat(row.user_deposit || 0);
     const refundUsdc = (userDep - fareUsdc).toFixed(6);
-    const settled    = row.state === 'Released' || onchain?.state === 'Released';
+    const FINAL_STATES = new Set(['Released','Refunded']);
+    const settled    = FINAL_STATES.has(row.state) || FINAL_STATES.has(onchain?.state);
 
     res.json({
       ok: true,
@@ -446,6 +517,18 @@ router.get('/:id/stream', async (req, res) => {
     sseClients.remove(clientId);
     logger.info('SSE client disconnected', { userAddress, clientId });
   });
+});
+
+
+// ── POST /sessions/:id/force-refund — UserDeposited 상태에서 강제 환불 ──────
+// operatorDeposit 없이 userDeposit만 있는 경우 forceRefund 호출
+router.post('/:id/force-refund', async (req, res, next) => {
+  try {
+    const sessionId = req.params.id;
+    const escrowSvc = require('../services/escrowPayoutService');
+    const result = await escrowSvc.forceRefundOnchain(sessionId);
+    res.json({ ok: true, data: result });
+  } catch (err) { next(err); }
 });
 
 module.exports = router;
