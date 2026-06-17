@@ -133,40 +133,23 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
   // 로컬 세션 복구 (active + processing 단계 모두)
   useEffect(() => {
     // 1) 이미 완전히 active 상태인 세션 복구
-    let saved = null;
-    try { saved = loadSession(); } catch { clearSession(); }
+    const saved = loadSession();
     if (saved?.sessionId && saved?.status === "active") {
       setSessionData(saved);
       setSelectedSvc(saved.svc);
+      // totalCharged 초기화 — 화면 표시는 liveCharged(elapsed 기반 연속계산)가 담당
       setTotalCharged(0);
       setStep("active");
       return;
     }
-    // 2) processing 중 나갔다가 돌아온 경우 — 필수 필드 검증 후 재개
-    let proc = null;
-    try { proc = loadProc(); } catch { clearProc(); }
-    if (proc?.sessionId && proc?.svc && proc?.step) {
-      // 유효한 step인지 확인 (깨진 데이터 방지)
-      const validSteps = ["approving","depositing","opening","waiting"];
-      if (!validSteps.includes(proc.step)) {
-        // 알 수 없는 step — 버리고 home으로
-        clearProc();
-        return;
-      }
+    // 2) processing 중 나갔다가 돌아온 경우 — 마지막 완료 단계부터 재개
+    const proc = loadProc();
+    if (proc?.sessionId && proc?.svc) {
       setSelectedSvc(proc.svc);
       setStep("processing");
       setLog([{ msg: "⏳ 이전 결제 재개 중...", type: "info" }]);
-      // ref가 세팅될 충분한 시간 확보
-      setTimeout(() => {
-        if (resumePaymentRef.current) {
-          resumePaymentRef.current(proc);
-        } else {
-          // ref 미세팅 — 안전하게 포기하고 home으로
-          clearProc();
-          setStep("home");
-          setLog([]);
-        }
-      }, 500);
+      // 비동기로 재개 (렌더 완료 후)
+      setTimeout(() => resumePaymentRef.current?.(proc), 300);
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
