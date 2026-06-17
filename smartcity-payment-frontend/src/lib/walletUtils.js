@@ -100,18 +100,78 @@ export async function sendUsdcOnChain(fromAddress, toAddress, amountUsdc) {
 }
 
 /**
+ * RPC로 TX 컨펌 대기 (MetaMask 팝업 없음, 순수 폴링)
+ */
+async function waitForReceipt(txHash, intervalMs = 2000, maxMs = 90000) {
+  const rpc = "https://sepolia.base.org";
+  const deadline = Date.now() + maxMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(rpc, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1,
+          method: "eth_getTransactionReceipt", params: [txHash] }),
+      });
+      const { result } = await res.json();
+      if (result) {
+        if (result.status === "0x1") return result;       // 성공
+        throw new Error("TX reverted: " + txHash);        // 실패
+      }
+    } catch (e) {
+      if (e.message.startsWith("TX reverted")) throw e;
+    }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+  throw new Error("TX 컨펌 타임아웃(90s): " + txHash);
+}
+
+/**
+ * USDC allowance 현재값 조회
+ */
+async function getAllowance(owner, spender) {
+  const rpc = "https://sepolia.base.org";
+  const data = "0xdd62ed3e"
+    + owner.replace("0x","").toLowerCase().padStart(64,"0")
+    + spender.replace("0x","").toLowerCase().padStart(64,"0");
+  const res = await fetch(rpc, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc:"2.0", id:1,
+      method:"eth_call", params:[{ to: USDC_ADDRESS, data }, "latest"] }),
+  });
+  const { result } = await res.json();
+  return result ? BigInt(result) : 0n;
+}
+
+/**
  * USDC approve — 에스크로 컨트랙트에 지출 허가
+ * approve TX 컨펌까지 대기 후 return → userDeposit allowance 에러 방지
  */
 export async function approveUsdcForEscrow(fromAddress, spender, amountUsdc) {
   if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
-  const amountMicro = BigInt(Math.round(amountUsdc * 1e6));
+  const needed = BigInt(Math.round(amountUsdc * 1e6));
+
+  // 이미 충분한 allowance 있으면 approve 스킵
+  const current = await getAllowance(fromAddress, spender);
+  if (current >= needed) {
+    console.log("approve 스킵 — 기존 allowance 충분:", current.toString());
+    return null;
+  }
+
+  // MAX_UINT256으로 approve → 이후 재사용 가능
+  const MAX = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
   const spenderHex = spender.replace("0x", "").toLowerCase().padStart(64, "0");
-  const amountHex = amountMicro.toString(16).padStart(64, "0");
-  const data = "0x095ea7b3" + spenderHex + amountHex;
-  return await window.ethereum.request({
+  const data = "0x095ea7b3" + spenderHex + MAX;
+  const txHash = await window.ethereum.request({
     method: "eth_sendTransaction",
-    params: [{ from: fromAddress, to: USDC_ADDRESS, data, gas: "0x0186A0" }], // 100,000
+    params: [{ from: fromAddress, to: USDC_ADDRESS, data, gas: "0x0186A0" }],
   });
+
+  // ★ approve TX 체인 반영 확인 후 return
+  await waitForReceipt(txHash);
+  console.log("approve 컨펌 완료:", txHash);
+  return txHash;
 }
 
 /**
