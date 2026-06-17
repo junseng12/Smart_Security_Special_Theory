@@ -17,7 +17,7 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
-const RATE_PER_MIN = 0.1; // USDC/분 — 분당 0.1 USDC 고정 (rebuild 1781678476)
+const RATE_PER_MIN = 0.1; // USDC/분 — 분당 0.1 USDC 고정 [1781684073]
 
 const SERVICE_TYPES = [
   { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
@@ -172,7 +172,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     };
 
     // home/ended 단계 → 모든 타이머 중지
-    if (step === "home") {
+    if (step === "home" || step === "ended") {
       clearInterval(timerRef.current);
       clearInterval(chargeIntervalRef.current);
       setElapsed(0);
@@ -261,16 +261,14 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     setCameraError(null);
     setScanReady(false);
     try {
-      // 모바일: 후면 카메라 우선 / 데스크탑: 기본 카메라
-      let stream;
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }
-        });
-      } catch {
-        // facingMode 실패 시 any 카메라로 fallback (데스크탑 대응)
-        stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      }
+      const constraints = {
+        video: {
+          facingMode: { ideal: "environment" },
+          width:  { ideal: 1280 },
+          height: { ideal: 720 },
+        }
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -421,7 +419,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       if (stage === "session_created" || !stage) {
         addLog("② MetaMask: USDC 승인 서명 요청...", "info");
         await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
-        addLog("✅ USDC 승인 완료 (체인 반영 확인됨)", "success");
+        addLog("✅ USDC 승인 완료", "success");
         saveProc({ ...proc, stage: "approved", startedAt: null });
       }
 
@@ -517,8 +515,9 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
   // ── Charge 자동 청구 ──────────────────────────────────────────────────────────
   // sessionDataRef 사용 → 의존성 배열 고정 → interval이 재생성되지 않음
-  // liveCharged — 분 단위 스텝 계산 (분당 0.1 USDC 고정)
-  // 완성된 분(elapsedMinutes)마다 0.1 USDC씩 계단식으로 올라감
+  // liveCharged — 분 단위 스텝 계산
+  // ProposeUsageUpdate(60초 1회)와 화면 표시를 일치시킴
+  // elapsed가 60초 넘을 때마다 0.01 USDC씩 계단식으로 올라감
   const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분만 카운트
   const liveCharged = (() => {
     const sd = sessionDataRef.current;
@@ -547,27 +546,14 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
         userFinalSig: String(liveCharged.toFixed(6)),
         // fareUsdc는 백엔드가 started_at 기준으로 직접 계산 — 프론트 값 전달 안 함
       });
-      // ── 프론트 계산값 우선 적용 ──────────────────────────────────────
-      // 백엔드가 0을 반환하더라도 프론트에서 누적한 liveCharged를 기준으로 표시
-      const depositAmt = parseFloat(sessionData.svc?.depositUsdc || 3.0);
-      const frontFare   = parseFloat(liveCharged.toFixed(6));
-      const backFare    = parseFloat(res.fareUsdc || 0);
-      // 백엔드값이 0이거나 비정상(음수)이면 프론트 계산값 사용
-      const finalFare   = (backFare > 0 && backFare <= depositAmt) ? backFare : frontFare;
-      const finalRefund = parseFloat((depositAmt - finalFare).toFixed(6));
+      const fareUsdc   = res.fareUsdc   ?? res.fare   ?? "계산중...";
+      const refundUsdc  = res.refundUsdc  ?? res.refund  ?? "계산중...";
+      addLog(`✅ 요금: ${fareUsdc} USDC`, "success");
+      addLog(`✅ 환불: ${refundUsdc} USDC`, "success");
+      if (res.deferred) addLog(`⏳ 24시간 분쟁 대기 후 자동 정산됩니다`, "info");
 
-      const finalResult = {
-        ...res,
-        fareUsdc:   finalFare.toFixed(6),
-        refundUsdc: finalRefund.toFixed(6),
-      };
-      addLog(`✅ 요금: ${finalResult.fareUsdc} USDC (${elapsedMinutes}분)`, "success");
-      addLog(`✅ 환불: ${finalResult.refundUsdc} USDC`, "success");
-
-      // elapsed 스냅샷 — clearSession() 전에 먼저 찍어야 localStorage가 살아있음
-      const snapshotElapsed = elapsed > 0 ? elapsed : Math.floor((Date.now() - (getStartedAt() || Date.now())) / 1000);
       clearSession();
-      setSessionData({ ...sessionData, result: { ...finalResult, elapsedSec: snapshotElapsed }, status: "ended" });
+      setSessionData({ ...sessionData, result: { ...res, fareUsdc, refundUsdc }, status: "ended" });
       setStep("ended");
       queryClient.invalidateQueries({ queryKey: ['sessions-history'] });
     } catch (err) {
@@ -775,7 +761,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
                   {/* 분 단위로 올라가는 요금 — ProposeUsageUpdate 주기와 일치 */}
-                  <div className="text-xl font-bold">{liveCharged.toFixed(2)} USDC</div>
+                  <div className="text-xl font-bold">{liveCharged.toFixed(2)}</div>
                   <div className="text-xs text-blue-200 mt-0.5">
                     USDC ({elapsedMinutes}분)
                   </div>
@@ -866,7 +852,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
               </div>
               <div className="flex justify-between py-2 border-b border-gray-50">
                 <span className="text-gray-500">이용 시간</span>
-                <span className="font-mono text-gray-900">{formatTime(sessionData?.result?.elapsedSec || elapsed || 0)}</span>
+                <span className="font-mono text-gray-900">{formatTime(elapsed)}</span>
               </div>
               {/* 세션 ID — 환불 신청 시 필요 */}
               <div className="flex justify-between items-center py-2">
