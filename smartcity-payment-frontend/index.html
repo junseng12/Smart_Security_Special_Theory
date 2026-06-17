@@ -6,6 +6,35 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="manifest" href="/manifest.json" />
     <title>Base44 APP</title>
+    <script>
+      // Temporary compatibility shim for ScanPay.jsx.
+      // Some deployed builds reference a global elapsedSec identifier during active payment rendering.
+      var elapsedSec = 0;
+      (function () {
+        function readStartedAt() {
+          try {
+            var active = JSON.parse(localStorage.getItem('active_session') || 'null');
+            if (active && active.startedAt) return Number(active.startedAt);
+
+            var processing = JSON.parse(localStorage.getItem('payment_processing') || 'null');
+            if (processing && processing.startedAt) return Number(processing.startedAt);
+          } catch (e) {}
+          return 0;
+        }
+
+        function syncElapsedSec() {
+          var startedAt = readStartedAt();
+          elapsedSec = startedAt > 0
+            ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+            : 0;
+        }
+
+        syncElapsedSec();
+        setInterval(syncElapsedSec, 1000);
+        window.addEventListener('focus', syncElapsedSec);
+        window.addEventListener('pageshow', syncElapsedSec);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
