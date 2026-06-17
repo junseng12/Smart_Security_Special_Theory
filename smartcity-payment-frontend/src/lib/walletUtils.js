@@ -1,3 +1,4 @@
+// walletUtils [1781686426]
 export const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
 export const ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"; // SmartCityEscrow V3.2 (Base Sepolia 배포 확정)
 export const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"; // 컨트랙트 OPERATOR_ROLE
@@ -123,15 +124,32 @@ async function waitForReceipt(txHash, ms = 90000) {
 
 export async function approveUsdcForEscrow(fromAddress, spender, amountUsdc) {
   if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
-  // MAX_UINT256 approve — 이후 approve 팝업 없음
-  const MAX = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+  // ① 현재 allowance 체크 — 이미 충분하면 approve 스킵 (MetaMask 팝업 없음)
+  const needed = BigInt(Math.round(amountUsdc * 1e6));
   const spenderHex = spender.replace("0x", "").toLowerCase().padStart(64, "0");
+  const ownerHex  = fromAddress.replace("0x", "").toLowerCase().padStart(64, "0");
+  try {
+    const res = await fetch(RPC_LIST[1], {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc:"2.0", id:1, method:"eth_call",
+        params:[{ to: USDC_ADDRESS, data: "0xdd62ed3e" + ownerHex + spenderHex }, "latest"] }),
+    });
+    const { result } = await res.json();
+    if (result && BigInt(result) >= needed) {
+      console.log("[approve] allowance 충분 — approve 스킵");
+      return null; // approve TX 없음
+    }
+  } catch(e) { /* allowance 조회 실패 시 그냥 approve 진행 */ }
+
+  // ② allowance 부족 → MAX_UINT256 approve
+  const MAX = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
   const data = "0x095ea7b3" + spenderHex + MAX;
   const txHash = await window.ethereum.request({
     method: "eth_sendTransaction",
     params: [{ from: fromAddress, to: USDC_ADDRESS, data, gas: "0x0186A0" }],
   });
-  // approve TX 체인 반영 확인 후 return — userDeposit 타이밍 에러 방지
+  // approve TX 체인 컨펌 대기 — userDeposit 타이밍 에러 방지
   await waitForReceipt(txHash);
   return txHash;
 }
