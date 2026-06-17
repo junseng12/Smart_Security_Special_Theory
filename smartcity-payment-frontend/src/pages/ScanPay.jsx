@@ -261,14 +261,16 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     setCameraError(null);
     setScanReady(false);
     try {
-      const constraints = {
-        video: {
-          facingMode: { ideal: "environment" },
-          width:  { ideal: 1280 },
-          height: { ideal: 720 },
-        }
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      // 모바일: 후면 카메라 우선 / 데스크탑: 기본 카메라
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } }
+        });
+      } catch {
+        // facingMode 실패 시 any 카메라로 fallback (데스크탑 대응)
+        stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      }
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -419,7 +421,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       if (stage === "session_created" || !stage) {
         addLog("② MetaMask: USDC 승인 서명 요청...", "info");
         await approveUsdcForEscrow(addr, ESCROW_V3_ADDRESS, svc.depositUsdc);
-        addLog("✅ USDC 승인 완료", "success");
+        addLog("✅ USDC 승인 완료 (체인 반영 확인됨)", "success");
         saveProc({ ...proc, stage: "approved", startedAt: null });
       }
 
