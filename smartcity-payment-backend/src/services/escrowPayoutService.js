@@ -118,25 +118,8 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
   }
 
   let userDepTx = depositTxHash;
-
-  // userDeposit이 아직 안 됐으면 Operator가 대신 호출 (테스트/자동화용)
-  if (onchainState === 0) {
-    try {
-      const al = await usdc.allowance(wallet.address, ESCROW_ADDR);
-      if (al < amtWei * 2n) {
-        const atx = await usdc.approve(ESCROW_ADDR, amtWei * 20n, { gasLimit: 80000 });
-        await atx.wait();
-        logger.info('USDC approve OK', { sessionId });
-      }
-      const tx = await escrow.userDeposit(escrowId, operator, amtWei, deadline, { gasLimit: 250000 });
-      const r  = await tx.wait();
-      userDepTx = r.hash;
-      onchainState = 1;
-      logger.info('userDeposit OK (operator-side)', { sessionId, tx: r.hash });
-    } catch (e) {
-      logger.error('userDeposit 실패', { sessionId, error: e.message.slice(0, 200) });
-    }
-  }
+  // userDeposit은 반드시 사용자 MetaMask에서만 실행 — operator 대행 금지
+  // onchainState === 0이면 아직 사용자가 서명 안 한 것이므로 operatorDeposit도 스킵
 
   // operatorDeposit — FullyFunded 전환
   let opDepTx = null;
