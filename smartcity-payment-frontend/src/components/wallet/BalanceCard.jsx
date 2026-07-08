@@ -3,14 +3,19 @@ import { motion } from 'framer-motion';
 import { Eye, EyeOff, Copy } from 'lucide-react';
 import { toast } from 'sonner';
 
-export default function BalanceCard({ wallet, showBalance, onToggle }) {
-  const balance = wallet?.balance || 0;
-  const address = wallet?.address || '0x...';
+export default function BalanceCard({ wallet, balance: balanceProp, address: addressProp, showBalance, onToggle }) {
+  // wallet 객체 또는 balance/address 직접 props 모두 지원
+  const balance = balanceProp ?? wallet?.balance ?? 0;
+  const address = addressProp ?? wallet?.address ?? '0x...';
 
   const copyAddress = () => {
     navigator.clipboard.writeText(address);
     toast.success('주소가 복사되었습니다');
   };
+
+  const shortAddr = address && address !== '0x...'
+    ? `${address.slice(0, 8)}...${address.slice(-6)}`
+    : '0x...';
 
   return (
     <motion.div
@@ -25,7 +30,7 @@ export default function BalanceCard({ wallet, showBalance, onToggle }) {
         <div className="flex items-center justify-between mb-4">
           <div className="flex items-center gap-2">
             <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-              <span className="text-primary text-sm font-bold">₿</span>
+              <span className="text-primary text-sm font-bold">B</span>
             </div>
             <div>
               <p className="text-xs text-muted-foreground">BasePay Wallet</p>
@@ -41,7 +46,9 @@ export default function BalanceCard({ wallet, showBalance, onToggle }) {
           <p className="text-xs text-muted-foreground mb-1">총 잔액</p>
           <div className="flex items-baseline gap-2">
             <span className="text-4xl font-bold tracking-tight">
-              {showBalance ? balance.toFixed(2) : '••••••'}
+              {showBalance
+                ? (balance !== null && balance !== undefined ? Number(balance).toFixed(2) : '...')
+                : '••••••'}
             </span>
             <span className="text-sm text-muted-foreground font-medium">USDC</span>
           </div>
@@ -51,7 +58,7 @@ export default function BalanceCard({ wallet, showBalance, onToggle }) {
           onClick={copyAddress}
           className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-secondary/50 hover:bg-secondary/80 transition-colors"
         >
-          <span className="text-xs font-mono text-muted-foreground truncate max-w-[180px]">{address}</span>
+          <span className="text-xs font-mono text-muted-foreground truncate max-w-[180px]">{shortAddr}</span>
           <Copy className="w-3 h-3 text-muted-foreground shrink-0" />
         </button>
       </div>

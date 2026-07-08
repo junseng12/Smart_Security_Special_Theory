@@ -1,6 +1,6 @@
 {
   "name": "smartcity-payment-backend",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Smart city micro-payment backend using Perun State Channels on Base L2",
   "main": "src/index.js",
   "scripts": {

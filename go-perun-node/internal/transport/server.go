@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -28,15 +29,26 @@ func New(orch *channel.Orchestrator, ref *refund.Manager, aud *audit.Logger, log
 }
 
 func (s *Server) StartSession(ctx context.Context, req *pb.StartSessionRequest) (*pb.StartSessionResponse, error) {
-	res, err := s.orch.StartSessionAndOpen(ctx, channel.StartRequest{
+	fundCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	s.log.WithFields(logrus.Fields{
+		"user":    req.UserAddress,
+		"service": req.ServiceId,
+		"deposit": req.DepositUsdc,
+	}).Info("[Session] StartSession (fundCtx 3min)")
+
+	res, err := s.orch.StartSessionAndOpen(fundCtx, channel.StartRequest{
 		UserAddress: req.UserAddress,
 		ServiceID:   req.ServiceId,
 		DepositUsdc: req.DepositUsdc,
 		HoldSeconds: req.HoldSeconds,
 	})
 	if err != nil {
+		s.log.WithError(err).Error("[Session] StartSession failed")
 		return &pb.StartSessionResponse{Ok: false, Error: err.Error()}, nil
 	}
+	s.log.WithField("session_id", res.SessionID).Info("[Session] ✅ StartSession success")
 	return &pb.StartSessionResponse{
 		Ok:           true,
 		SessionId:    res.SessionID,
@@ -47,13 +59,27 @@ func (s *Server) StartSession(ctx context.Context, req *pb.StartSessionRequest) 
 	}, nil
 }
 
+// EndSession — 온체인 정산
+// ★ user_final_sig 필드에 chargedUsdc 값이 실려 옴 (Node.js DB 폴백)
+//   인메모리 세션이 없을 때(컨테이너 재시작 등) 이 값으로 FinalUpdate 수행
 func (s *Server) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
-	res, err := s.orch.EndSessionAndSettle(ctx, channel.EndRequest{
+	settleCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	s.log.WithFields(logrus.Fields{
+		"session_id":   req.SessionId,
+		"channel_id":   req.ChannelId,
+		"charged_usdc": req.UserFinalSig, // user_final_sig 필드에 chargedUsdc 값 전달
+	}).Info("[Session] EndSession")
+
+	res, err := s.orch.EndSessionAndSettle(settleCtx, channel.EndRequest{
 		SessionID:   req.SessionId,
 		ChannelID:   req.ChannelId,
 		UserAddress: req.UserAddress,
+		ChargedUsdc: req.UserFinalSig, // ★ 폴백: Node.js DB에서 읽은 charged_usdc
 	})
 	if err != nil {
+		s.log.WithError(err).Error("[Session] EndSession failed")
 		return &pb.EndSessionResponse{Ok: false, Error: err.Error()}, nil
 	}
 	return &pb.EndSessionResponse{Ok: true, FareUsdc: res.FareUsdc, RefundUsdc: res.RefundUsdc}, nil
@@ -134,7 +160,7 @@ func Serve(port int, srv *Server) error {
 	if err != nil {
 		return fmt.Errorf("listen :%d: %w", port, err)
 	}
-	g := grpc.NewServer()
+	g := grpc.NewServer(grpc.MaxRecvMsgSize(16 * 1024 * 1024))
 	pb.RegisterSmartCityNodeServer(g, srv)
 	reflection.Register(g)
 	srv.log.WithField("port", port).Info("[gRPC] server listening")

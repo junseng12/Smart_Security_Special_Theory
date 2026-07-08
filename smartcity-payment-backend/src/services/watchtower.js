@@ -77,12 +77,20 @@ async function processPendingSettles() {
     const db        = require('./db');
     const escrowSvc = require('./escrowPayoutService');
 
+    // retry_count/last_error 컬럼 보장
+    await db.getPool().query(`
+      ALTER TABLE escrow_locks
+        ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS last_error  TEXT
+    `).catch(() => {});
+
     const { rows } = await db.getPool().query(
       `SELECT el.session_id, el.fare_amount
        FROM escrow_locks el
        WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
          AND el.hold_deadline IS NOT NULL
          AND el.hold_deadline < NOW()
+         AND COALESCE(el.retry_count, 0) < 5
        LIMIT 10`
     );
 
@@ -98,10 +106,69 @@ async function processPendingSettles() {
         logger.info('Watchtower: settle OK', { sessionId: row.session_id, result: JSON.stringify(result) });
       } catch (e) {
         logger.error('Watchtower: settle fail', { sessionId: row.session_id, error: e.message });
+        // revert 시 retry_count 증가 — 5회 이상 실패 시 SettleFailed로 마킹 (무한 루프 방지)
+        try {
+          // 현재 retry_count 조회 후 판단
+          const countRow = await db.getPool().query(
+            `SELECT COALESCE(retry_count, 0) as cnt FROM escrow_locks WHERE session_id=$1`,
+            [row.session_id]
+          );
+          const currentCount = parseInt(countRow.rows[0]?.cnt || 0);
+          const newState = currentCount >= 4 ? 'SettleFailed' : undefined;
+          await db.getPool().query(
+            `UPDATE escrow_locks
+             SET retry_count = COALESCE(retry_count, 0) + 1,
+                 ${newState ? "state = 'SettleFailed'," : ''}
+                 last_error = $2
+             WHERE session_id = $1`,
+            [row.session_id, e.message.slice(0, 200)]
+          );
+          if (newState) {
+            logger.warn('Watchtower: 5회 실패 → SettleFailed 마킹', { sessionId: row.session_id });
+          }
+        } catch (dbErr) {
+          logger.error('Watchtower: DB update fail', { error: dbErr.message });
+        }
       }
     }
   } catch (e) {
     logger.error('Watchtower processPendingSettles error', { error: e.message });
+  }
+}
+
+// ── ClaimSettlement 워커 (V3.2) — 24h 분쟁 기간 종료 후 자동 정산 실행 ───────
+async function processClaimSettlements() {
+  try {
+    const db        = require('./db');
+    const escrowSvc = require('./escrowPayoutService');
+
+    // claimable_after가 지났고 아직 Released 상태인 에스크로
+    const { rows } = await db.getPool().query(
+      `SELECT session_id
+       FROM escrow_locks
+       WHERE state = 'Released'
+         AND claimable_after IS NOT NULL
+         AND claimable_after < NOW()
+       LIMIT 10`
+    );
+
+    if (rows.length > 0)
+      logger.info(`Watchtower: ClaimSettlement ${rows.length}건 처리 시작`);
+
+    for (const row of rows) {
+      try {
+        const result = await escrowSvc.claimSettlement(row.session_id);
+        if (result.skipped) {
+          logger.info('Watchtower: claimSettlement skipped', { sessionId: row.session_id, reason: result.reason });
+        } else {
+          logger.info('Watchtower: claimSettlement OK ✅', { sessionId: row.session_id, txHash: result.txHash });
+        }
+      } catch (e) {
+        logger.error('Watchtower: claimSettlement fail', { sessionId: row.session_id, error: e.message });
+      }
+    }
+  } catch (e) {
+    logger.error('Watchtower processClaimSettlements error', { error: e.message });
   }
 }
 
@@ -114,6 +181,10 @@ async function startLoop() {
   processPendingSettles();
   setInterval(processPendingSettles, 30_000);
 
+  // V3.2: ClaimSettlement 워커 (5분마다 — 24h 기간 대비 충분한 여유)
+  processClaimSettlements();
+  setInterval(processClaimSettlements, 60_000); // [TEST] 1분 폴링 (운영: 5분)
+
   // 채널 모니터링
   await runWatchtower();
   setInterval(runWatchtower, POLL_INTERVAL_MS);
@@ -123,3 +194,6 @@ startLoop().catch((err) => {
   logger.error('Watchtower fatal error', { error: err.message });
   process.exit(1);
 });
+
+
+

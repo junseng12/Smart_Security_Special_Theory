@@ -17,6 +17,7 @@ import (
 
 	ethchannel "github.com/perun-network/perun-eth-backend/channel"
 	ethwallet  "github.com/perun-network/perun-eth-backend/wallet"
+	ethwire    "github.com/perun-network/perun-eth-backend/wire"
 	swallet    "github.com/perun-network/perun-eth-backend/wallet/simple"
 
 	"perun.network/go-perun/channel"
@@ -114,12 +115,13 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	bus := wire.NewLocalBus()
 	log.Info("[Setup] ✓ LocalBus initialized (no P2P)")
 
-	// Step 8: operator wire 주소 (가상 — LocalBus용)
+	// Step 8: operator wire 주소 — ethwire.Address 래퍼 사용
 	operatorWireKey, err := crypto.GenerateKey()
 	if err != nil {
 		return nil, fmt.Errorf("generating operator wire key: %w", err)
 	}
-	operatorWireAddr := ethwallet.AsWalletAddr(crypto.PubkeyToAddress(operatorWireKey.PublicKey))
+	operatorEthAddr := ethwallet.AsWalletAddr(crypto.PubkeyToAddress(operatorWireKey.PublicKey))
+	operatorWireAddr := &ethwire.Address{Address: operatorEthAddr}
 	wireAddrs := map[wallet.BackendID]wire.Address{ethwallet.BackendID: operatorWireAddr}
 
 	// Step 9: go-perun Client 조립
@@ -173,13 +175,16 @@ func DeployContracts(ctx context.Context, cfg *Config, log *logrus.Logger) (*Dep
 }
 
 // newContractBackend — ethclient + swallet.Transactor → ContractBackend
+// ★ backgroundChainReader로 래핑: SubscribeNewHead가 gRPC deadline에 의해
+//    취소되지 않도록 context를 Background()로 고정
 func newContractBackend(rpcURL string, chainID uint64, w *swallet.Wallet) (ethchannel.ContractBackend, error) {
 	ec, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return ethchannel.ContractBackend{}, fmt.Errorf("ethclient.Dial: %w", err)
 	}
-	signer := types.NewLondonSigner(new(big.Int).SetUint64(chainID))
-	tr     := swallet.NewTransactor(w, signer)
-	cid    := ethchannel.MakeChainID(new(big.Int).SetUint64(chainID))
-	return ethchannel.NewContractBackend(ec, cid, tr, 1), nil
+	bgClient := &backgroundChainReader{Client: ec}
+	signer   := types.NewLondonSigner(new(big.Int).SetUint64(chainID))
+	tr       := swallet.NewTransactor(w, signer)
+	cid      := ethchannel.MakeChainID(new(big.Int).SetUint64(chainID))
+	return ethchannel.NewContractBackend(bgClient, cid, tr, 1), nil
 }

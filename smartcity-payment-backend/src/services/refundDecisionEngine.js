@@ -75,27 +75,57 @@ const RULES = {
   },
 
   /**
+   * 잠금 해제 실패: 서비스 자체를 이용 못 함 → 전액 환불 자동 승인
+   */
+  unlock_failure: async ({ requestedUsdc }) => ({
+    eligible: true,
+    refundUsdc: requestedUsdc || '3.000000',
+    reason: 'Unlock failure: full refund auto-approved',
+  }),
+
+  /**
    * 서비스 장애: 운영 장애 시간대와 세션 겹침
    */
-  service_outage: async ({ sessionId, evidence }) => {
+  service_outage: async ({ sessionId, evidence, requestedUsdc }) => {
     const outage = evidence.find((e) => e.type === 'outage_record');
-    if (!outage) return { eligible: false, reason: 'No outage record in evidence' };
-
+    // evidence 없으면 전액 환불 자동 승인
+    if (!outage) {
+      return {
+        eligible: true,
+        refundUsdc: requestedUsdc || '3.000000',
+        reason: 'Service outage: full refund auto-approved (no evidence required)',
+      };
+    }
     const fareRecord = await getLatestFareRecord(sessionId);
-    if (!fareRecord) return { eligible: false, reason: 'No fare record' };
-
-    // 장애 시간과 세션 겹침 비율에 따라 환불
+    if (!fareRecord) return { eligible: true, refundUsdc: requestedUsdc || '3.000000', reason: 'Service outage full refund' };
     const overlapMinutes = outage.overlapMinutes || 0;
     const totalMinutes = fareRecord.usage_data?.durationMinutes || 1;
     const refundRatio = Math.min(overlapMinutes / totalMinutes, 1.0);
     const refundUsdc = (parseFloat(fareRecord.final_fare) * refundRatio).toFixed(6);
-
     return {
       eligible: refundUsdc > 0,
       refundUsdc,
       reason: `Service outage ${overlapMinutes}min overlap out of ${totalMinutes}min session`,
     };
   },
+
+  /**
+   * 이용 중 기기 결함: 실이용 fare만 청구, 나머지 환불 (수동 검토)
+   */
+  device_fault: async () => ({
+    eligible: null,
+    requiresManualReview: true,
+    reason: 'Device fault: manual review required for partial refund calculation',
+  }),
+
+  /**
+   * 잘못된 요금 계산: 수동 검토
+   */
+  wrong_charge: async () => ({
+    eligible: null,
+    requiresManualReview: true,
+    reason: 'Wrong charge: manual review required',
+  }),
 
   /**
    * 요금 오류 / 기기 결함 / 수동 요청: 운영자 수동 검토
@@ -193,8 +223,69 @@ async function manualReject(caseId, reviewerNotes) {
   return { caseId, status: 'REJECTED' };
 }
 
+/**
+ * calcRefundFare — issueType + 실이용 fare 기반으로 refundFare 결정
+ *
+ * refundFare = 운영자에게 지급할 금액 (0이면 전액 환불)
+ * 컨트랙트 refundToBuyer(escrowId, refundFare)에 직접 전달됨
+ *
+ * @param {string} issueType         — escrowPayoutService issueTypeMap의 키
+ * @param {number|string} confirmedUsageFare — 백엔드가 확인한 실이용 요금 (USDC)
+ * @param {number|string} totalUserDeposit   — 사용자 예치금 (상한 검증용)
+ * @returns {string} refundFare as USDC string (6 decimal)
+ */
+function calcRefundFare(issueType, confirmedUsageFare = '0', totalUserDeposit = '0') {
+  const fare    = Math.max(0, parseFloat(confirmedUsageFare) || 0);
+  const deposit = Math.max(0, parseFloat(totalUserDeposit)  || 0);
+
+  let refundFare;
+
+  switch (issueType) {
+    // 서비스 시작 전 실패 — 이용 없음 → 전액 환불
+    case 'unlock_failure':
+    case 'service_outage':
+      refundFare = 0;
+      break;
+
+    // 부분 이용 후 장애 — 실이용 fare만 operator 지급, 나머지 환불
+    case 'device_fault':
+    case 'device_malfunction':
+      refundFare = fare;
+      break;
+
+    // 잘못된 요금 계산 — 정상 fare만 operator 지급, 과다 청구분 환불
+    case 'wrong_charge':
+    case 'wrong_amount':
+    case 'sensor_failure':
+      refundFare = fare;  // confirmedUsageFare = 백엔드가 정상 계산한 요금
+      break;
+
+    // 중복 청구 — 중복분 제외한 정상 fare만 지급
+    case 'double_charge':
+      refundFare = fare;
+      break;
+
+    // 수동 요청 — 백엔드가 confirmedUsageFare 직접 지정
+    case 'manual_request':
+      refundFare = fare;
+      break;
+
+    default:
+      refundFare = fare;
+  }
+
+  // 상한: userDeposit 초과 방지
+  if (deposit > 0) refundFare = Math.min(refundFare, deposit);
+
+  logger.info('calcRefundFare', { issueType, confirmedUsageFare, refundFare: refundFare.toFixed(6) });
+  return refundFare.toFixed(6);
+}
+
 module.exports = {
   evaluateCase,
   manualApprove,
   manualReject,
+  calcRefundFare,
 };
+
+

@@ -1,18 +1,6 @@
 /**
- * perunClient.js
- * ─────────────────────────────────────────────────────────────────────────────
- * Node.js ↔ Go Perun 노드 gRPC 브릿지
- *
- * Proto: src/proto/smartcity.proto  (go-perun-node와 완전 동기화)
- * Service: SmartCityNode
- *
- * 환경변수:
- *   PERUN_GRPC_HOST  — go-perun 노드 호스트 (예: localhost, railway 내부 주소)
- *   PERUN_GRPC_PORT  — go-perun 노드 포트 (기본 50051)
- *
- * PERUN_GRPC_HOST 미설정 시 → MOCK 모드 (기존 테스트 호환 유지)
+ * perunClient.js — Node.js ↔ Go Perun 노드 gRPC 브릿지
  */
-
 'use strict';
 
 const path    = require('path');
@@ -22,29 +10,19 @@ const logger  = require('../utils/logger');
 
 const PROTO_PATH = path.join(__dirname, '../proto/smartcity.proto');
 
-// ── gRPC 스텁 ────────────────────────────────────────────────────────────────
-
-let stub   = null;   // SmartCityNode gRPC stub
-let _mode  = 'mock'; // 'grpc' | 'mock'
+let stub   = null;
+let _mode  = 'mock';
 
 function initGrpc() {
   const host = process.env.PERUN_GRPC_HOST;
   const port = process.env.PERUN_GRPC_PORT || '50051';
-
   if (!host || host === 'undefined') {
     logger.info('[perunClient] PERUN_GRPC_HOST 미설정 → MOCK 모드');
     _mode = 'mock';
     return;
   }
-
   try {
-    const pkgDef = loader.loadSync(PROTO_PATH, {
-      keepCase:  true,
-      longs:     String,
-      enums:     String,
-      defaults:  true,
-      oneofs:    true,
-    });
+    const pkgDef = loader.loadSync(PROTO_PATH, { keepCase: true, longs: String, enums: String, defaults: true, oneofs: true });
     const proto  = grpc.loadPackageDefinition(pkgDef).smartcity;
     const target = `${host}:${port}`;
     stub  = new proto.SmartCityNode(target, grpc.credentials.createInsecure());
@@ -55,10 +33,7 @@ function initGrpc() {
     _mode = 'mock';
   }
 }
-
 initGrpc();
-
-// ── gRPC 호출 헬퍼 ───────────────────────────────────────────────────────────
 
 function call(method, req, timeoutMs = 10_000) {
   return new Promise((resolve, reject) => {
@@ -72,54 +47,29 @@ function call(method, req, timeoutMs = 10_000) {
   });
 }
 
-// ── MOCK 응답 ────────────────────────────────────────────────────────────────
-// go-perun 노드 없이도 기존 흐름 유지
-
 const { v4: uuidv4 } = require('uuid');
 
 const mock = {
   StartSession(req) {
-    const sessionId  = `sess_${uuidv4().slice(0,8)}`;
-    const channelId  = `0x${Buffer.from(sessionId).toString('hex').slice(0,64).padEnd(64,'0')}`;
-    const stateHash  = `0x${Buffer.from('init').toString('hex').padEnd(64,'0')}`;
-    logger.info('[MOCK] StartSession', { sessionId, channelId });
-    return {
-      ok:            true,
-      session_id:    sessionId,
-      channel_id:    channelId,
-      escrow_id:     `escrow_${sessionId}`,
-      hold_deadline: Math.floor(Date.now() / 1000) + (req.hold_seconds || 120),
-      state_hash:    stateHash,
-    };
+    const sessionId = `sess_${uuidv4().slice(0,8)}`;
+    const channelId = `0x${Buffer.from(sessionId).toString('hex').slice(0,64).padEnd(64,'0')}`;
+    return { ok: true, session_id: sessionId, channel_id: channelId,
+      escrow_id: `escrow_${sessionId}`, hold_deadline: String(Math.floor(Date.now()/1000)+(req.hold_seconds||240)),
+      state_hash: `0x${Buffer.from('init').toString('hex').padEnd(64,'0')}` };
   },
   EndSession(req) {
-    logger.info('[MOCK] EndSession', { session_id: req.session_id });
-    return { ok: true, fare_usdc: '0.05', refund_usdc: '0.0' };
+    // user_final_sig 필드에 chargedUsdc 값이 실려 옴 (orchestrator 폴백)
+    const chargedUsdc = parseFloat(req.user_final_sig || '0') || 0.05;
+    return { ok: true, fare_usdc: String(chargedUsdc.toFixed(6)), refund_usdc: '0.0', tx_hash: '0xmock_settle' };
   },
   ProposeUsageUpdate(req) {
-    logger.info('[MOCK] ProposeUsageUpdate', { session_id: req.session_id });
-    return {
-      ok:           true,
-      fare_usdc:    '0.01',
-      policy_hash:  '0xpolicy',
-      new_nonce:    1,
-      state_hash:   '0xstatehash',
-      balance_user: String(parseFloat(req.deposit_usdc || '1') - 0.01),
-    };
+    return { ok: true, fare_usdc: '0.01', policy_hash: '0xpolicy', new_nonce: 1,
+      state_hash: '0xstatehash', balance_user: String(parseFloat(req.deposit_usdc||'1')-0.01) };
   },
-  GetChannelStatus(req) {
-    return { ok: true, nonce: 1, balance_user: '0.99', balance_op: '0.01', state_hash: '0x' };
-  },
-  InitiateDispute(req) {
-    logger.warn('[MOCK] InitiateDispute', { channel_id: req.channel_id });
-    return { ok: true };
-  },
-  AccumulateCredit(req) {
-    return { ok: true, total: req.credit_usdc };
-  },
-  PostCompensation(req) {
-    return { ok: true, tx_hash: '0xmock' };
-  },
+  GetChannelStatus() { return { ok: true, nonce: 1, balance_user: '0.99', balance_op: '0.01' }; },
+  InitiateDispute() { return { ok: true }; },
+  AccumulateCredit(req) { return { ok: true, total: req.credit_usdc }; },
+  PostCompensation() { return { ok: true, tx_hash: '0xmock' }; },
 };
 
 function runMock(method, req) {
@@ -127,103 +77,62 @@ function runMock(method, req) {
   return Promise.reject(new Error(`Mock not implemented: ${method}`));
 }
 
-// ── Public API ───────────────────────────────────────────────────────────────
-
-/**
- * 세션 시작 + 채널 개설
- * go-perun: ProposeChannel → Funder.Fund() → ERC20Depositor (approve + deposit)
- */
-async function startSession({ userAddress, serviceId, depositUsdc, userWireAddr = '', holdSeconds = 120 }) {
-  const req = {
-    user_address:   userAddress,
-    service_id:     serviceId,
-    deposit_usdc:   depositUsdc,
-    user_wire_addr: userWireAddr,
-    hold_seconds:   holdSeconds,
-  };
+async function startSession({ userAddress, serviceId, depositUsdc, userWireAddr='', holdSeconds=120 }) {
+  const req = { user_address: userAddress, service_id: serviceId, deposit_usdc: depositUsdc,
+    user_wire_addr: userWireAddr, hold_seconds: holdSeconds };
   if (_mode === 'mock') return runMock('StartSession', req);
-  return call('StartSession', req, 30_000); // 온체인 tx 포함 → 30초
+  return call('StartSession', req, 120_000);
 }
 
 /**
  * 세션 종료 + 채널 정산
- * go-perun: FinalUpdate(IsFinal=true) → ch.Settle() → Adjudicator.conclude() → withdraw
+ * ★ chargedUsdc: 컨테이너 재시작 시 go-perun 인메모리 세션 유실 대비 폴백
+ *   user_final_sig 필드에 chargedUsdc 값을 실어서 go-perun에 전달
  */
-async function endSession({ sessionId, channelId, userAddress, userFinalSig = '' }) {
+async function endSession({ sessionId, channelId, userAddress, userFinalSig='', chargedUsdc='' }) {
   const req = {
     session_id:     sessionId,
     channel_id:     channelId,
     user_address:   userAddress,
-    user_final_sig: userFinalSig,
+    user_final_sig: chargedUsdc || userFinalSig,
   };
   if (_mode === 'mock') return runMock('EndSession', req);
-  return call('EndSession', req, 60_000); // 온체인 정산 → 60초
+  return call('EndSession', req, 60_000);
 }
 
-/**
- * 오프체인 요금 청구 (1분마다 호출)
- * go-perun: ch.Update(TransferBalance user→operator) — 가스비 0
- */
-async function proposeUsageUpdate({ sessionId, channelId, serviceType, durationMinutes, energyKwh = 0 }) {
-  const req = {
-    session_id: sessionId,
-    channel_id: channelId,
-    usage_delta: {
-      service_type:     serviceType,
-      duration_minutes: durationMinutes,
-      energy_kwh:       energyKwh,
-    },
-  };
+async function proposeUsageUpdate({ sessionId, channelId, serviceType, durationMinutes, energyKwh=0 }) {
+  const req = { session_id: sessionId, channel_id: channelId,
+    usage_delta: { service_type: serviceType, duration_minutes: durationMinutes, energy_kwh: energyKwh } };
   if (_mode === 'mock') return runMock('ProposeUsageUpdate', req);
   return call('ProposeUsageUpdate', req, 10_000);
 }
 
-/**
- * 채널 상태 조회
- */
 async function getChannelStatus({ channelId }) {
-  const req = { channel_id: channelId };
-  if (_mode === 'mock') return runMock('GetChannelStatus', req);
-  return call('GetChannelStatus', req);
+  if (_mode === 'mock') return runMock('GetChannelStatus', { channel_id: channelId });
+  return call('GetChannelStatus', { channel_id: channelId });
 }
 
-/**
- * 분쟁 등록 — go-perun: ch.Register() → Adjudicator.register()
- */
 async function initiateDispute({ channelId }) {
-  const req = { channel_id: channelId };
-  if (_mode === 'mock') return runMock('InitiateDispute', req);
-  return call('InitiateDispute', req, 30_000);
+  if (_mode === 'mock') return runMock('InitiateDispute', { channel_id: channelId });
+  return call('InitiateDispute', { channel_id: channelId }, 30_000);
 }
 
-/**
- * 크레딧 누적 (환불 포인트)
- */
 async function accumulateCredit({ channelId, creditUsdc, reason }) {
-  const req = { channel_id: channelId, credit_usdc: creditUsdc, reason };
-  if (_mode === 'mock') return runMock('AccumulateCredit', req);
-  return call('AccumulateCredit', req);
+  if (_mode === 'mock') return runMock('AccumulateCredit', { channel_id: channelId, credit_usdc: creditUsdc, reason });
+  return call('AccumulateCredit', { channel_id: channelId, credit_usdc: creditUsdc, reason });
 }
 
-/**
- * 운영자 보상 지급
- */
 async function postCompensation({ userAddress, amountUsdc, reason }) {
-  const req = { user_address: userAddress, amount_usdc: amountUsdc, reason };
-  if (_mode === 'mock') return runMock('PostCompensation', req);
-  return call('PostCompensation', req);
+  if (_mode === 'mock') return runMock('PostCompensation', {});
+  return call('PostCompensation', { user_address: userAddress, amount_usdc: amountUsdc, reason });
 }
 
-/**
- * Perun 노드 헬스체크
- */
 async function ping() {
   if (_mode === 'mock') return { connected: false, mode: 'mock' };
   try {
     await call('GetChannelStatus', { channel_id: 'ping' }, 2_000);
     return { connected: true, mode: 'grpc' };
   } catch (err) {
-    // "channel not found" 에러는 연결은 됐다는 뜻
     if (err.message?.includes('not found') || err.code === grpc.status.NOT_FOUND) {
       return { connected: true, mode: 'grpc' };
     }
@@ -231,27 +140,10 @@ async function ping() {
   }
 }
 
-/**
- * gRPC 재초기화 (런타임 환경변수 변경 후)
- */
-function reinit() {
-  stub  = null;
-  _mode = 'mock';
-  initGrpc();
-  return { mode: _mode };
-}
-
+function reinit() { stub = null; _mode = 'mock'; initGrpc(); return { mode: _mode }; }
 function getMode() { return _mode; }
 
-module.exports = {
-  startSession,
-  endSession,
-  proposeUsageUpdate,
-  getChannelStatus,
-  initiateDispute,
-  accumulateCredit,
-  postCompensation,
-  ping,
-  reinit,
-  getMode,
-};
+module.exports = { startSession, endSession, proposeUsageUpdate, getChannelStatus,
+  initiateDispute, accumulateCredit, postCompensation, ping, reinit, getMode };
+
+

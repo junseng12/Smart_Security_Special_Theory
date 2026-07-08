@@ -1,11 +1,12 @@
+// walletUtils [1781686426]
 export const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
-export const ESCROW_V3_ADDRESS = "0xb6094337a6F37306eBDadd9923991275Cc6220f7"; // SmartCityEscrowV3 최신 배포 주소
+export const ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"; // SmartCityEscrow V3.2 (Base Sepolia 배포 확정)
 export const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"; // 컨트랙트 OPERATOR_ROLE
 export const SERVICE_PROVIDER_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"; // 요금 수취 = operator 동일
 const RPC_LIST = [
   "https://base-sepolia-rpc.publicnode.com",
-  "https://84532.rpc.thirdweb.com",
   "https://sepolia.base.org",
+  "https://84532.rpc.thirdweb.com",
 ];
 export const BASE_SEPOLIA_RPC = RPC_LIST[0]; // 체인 추가용 기본값
 export const BASE_SEPOLIA_CHAIN_ID = "0x14a34"; // 84532
@@ -102,16 +103,38 @@ export async function sendUsdcOnChain(fromAddress, toAddress, amountUsdc) {
 /**
  * USDC approve — 에스크로 컨트랙트에 지출 허가
  */
+// approve TX 컨펌 대기 헬퍼
+async function waitForReceipt(txHash, ms = 90000) {
+  const rpc = "https://sepolia.base.org";
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(rpc, { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc:"2.0", id:1, method:"eth_getTransactionReceipt", params:[txHash] }) });
+      const { result } = await r.json();
+      if (result) {
+        if (result.status === "0x1") return result;
+        throw new Error("TX reverted: " + txHash);
+      }
+    } catch(e) { if (e.message.startsWith("TX reverted")) throw e; }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  throw new Error("approve TX 컨펌 타임아웃(90s): " + txHash);
+}
+
 export async function approveUsdcForEscrow(fromAddress, spender, amountUsdc) {
   if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
-  const amountMicro = BigInt(Math.round(amountUsdc * 1e6));
+  // MAX_UINT256 approve — MetaMask 팝업 → 서명 → 컨펌 대기 → userDeposit 진행
+  const MAX = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
   const spenderHex = spender.replace("0x", "").toLowerCase().padStart(64, "0");
-  const amountHex = amountMicro.toString(16).padStart(64, "0");
-  const data = "0x095ea7b3" + spenderHex + amountHex;
-  return await window.ethereum.request({
+  const data = "0x095ea7b3" + spenderHex + MAX;
+  const txHash = await window.ethereum.request({
     method: "eth_sendTransaction",
-    params: [{ from: fromAddress, to: USDC_ADDRESS, data }],
+    params: [{ from: fromAddress, to: USDC_ADDRESS, data, gas: "0x0186A0" }],
   });
+  // approve TX 체인 컨펌 대기 — userDeposit allowance 타이밍 에러 방지
+  await waitForReceipt(txHash);
+  return txHash;
 }
 
 /**
@@ -149,7 +172,7 @@ export async function userDeposit(fromAddress, escrowId, operator, amountUsdc, h
   const data = selector + escrowIdHex + operatorHex + amountHex + holdDeadlineHex;
   return await window.ethereum.request({
     method: "eth_sendTransaction",
-    params: [{ from: fromAddress, to: ESCROW_V3_ADDRESS, data }],
+    params: [{ from: fromAddress, to: ESCROW_V3_ADDRESS, data, gas: "0x49910" }], // 300,000
   });
 }
 

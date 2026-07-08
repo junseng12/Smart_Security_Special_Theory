@@ -129,14 +129,70 @@ const endSchema = Joi.object({
 
 router.post('/:id/end', validate(endSchema), async (req, res, next) => {
   try {
-    const result = await orchestrator.endSessionAndSettle({
-      sessionId:    req.params.id,
-      channelId:    req.body.channelId,
-      userAddress:  req.body.userAddress,
-      userFinalSig: req.body.userFinalSig,
-      fareUsdc:     req.body.fareUsdc,      // ★ charge 요금 직접 전달
-      adjustment:   req.body.adjustment,
-    });
+    // ── 세션 존재 여부 사전 검증 ──────────────────────────────────────────────
+    const _db = require('../services/db');
+    const _sess = await _db.getPool().query(
+      `SELECT id, status FROM sessions WHERE id = $1`, [req.params.id]
+    ).catch(() => ({ rows: [] }));
+    if (!_sess.rows[0]) {
+      return res.status(404).json({ ok: false, error: `Session not found: ${req.params.id}` });
+    }
+    // ──────────────────────────────────────────────────────────────────────────
+
+    // 세션 종료 + 정산 (비동기 처리 — deferred 시 즉시 202 반환)
+    let result;
+    try {
+      result = await Promise.race([
+        orchestrator.endSessionAndSettle({
+          sessionId:    req.params.id,
+          channelId:    req.body.channelId,
+          userAddress:  req.body.userAddress,
+          userFinalSig: req.body.userFinalSig,
+          fareUsdc:     req.body.fareUsdc,
+          adjustment:   req.body.adjustment,
+        }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('SETTLE_DEFERRED')), 8000)),
+      ]);
+    } catch (raceErr) {
+      if (raceErr.message === 'SETTLE_DEFERRED') {
+        // holdDeadline 대기 중 — 백그라운드 정산 진행 중, 즉시 accepted 반환
+        // DB에서 예상 요금/환불금 계산해서 같이 반환
+        let fareUsdc = '0', refundUsdc = '0', depositUsdc = '3';
+        try {
+          const db = require('../services/db');
+          const fareEngine = require('../services/fareEngine');
+          const row = await db.getPool().query(
+            `SELECT s.started_at, s.service_type, s.deposit_usdc, e.user_deposit
+             FROM sessions s LEFT JOIN escrow_locks e ON e.session_id = s.id
+             WHERE s.id = $1 LIMIT 1`, [req.params.id]
+          );
+          if (row.rows[0]) {
+            const r0 = row.rows[0];
+            const dep = parseFloat(r0.user_deposit || r0.deposit_usdc || 3);
+            depositUsdc = String(dep);
+            const endTs = new Date();
+            const startTs = new Date(r0.started_at);
+            const durationMinutes = Math.max(0, (endTs - startTs) / 60_000);
+            const fareResult = await fareEngine.calculateFare({
+              sessionId: req.params.id,
+              serviceType: r0.service_type,
+              usage: { durationMinutes },
+            }).catch(() => ({ fare: 0.01 }));
+            fareUsdc = String((fareResult.fare ?? 0.01).toFixed(6));
+            refundUsdc = String(Math.max(dep - parseFloat(fareUsdc), 0).toFixed(6));
+          }
+        } catch (_) {}
+        return res.status(202).json({
+          ok: true,
+          data: {
+            deferred: true, status: 'settling',
+            message: 'holdDeadline 대기 중, 자동 정산 예약됨',
+            fareUsdc, refundUsdc, depositUsdc,
+          }
+        });
+      }
+      throw raceErr;
+    }
 
     sseClients.broadcast(req.body.userAddress, {
       event: 'settlement_complete',
@@ -151,7 +207,7 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
 // ── POST /sessions/:id/deposit — 프론트 buyerDeposit 완료 후 DB 기록 ────────────
 router.post('/:id/deposit', async (req, res, next) => {
   try {
-    const { channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash } = req.body;
+    const { channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash, serviceStartedAt } = req.body;
 
     // 1) DB에 사용자 예치 기록
     const result = await escrowSvc.recordUserDeposit({
@@ -164,14 +220,64 @@ router.post('/:id/deposit', async (req, res, next) => {
       depositTxHash,
     });
 
+    // 1-b) 실제 서비스 시작 시점(deposit 완료 시각) → DB + Redis 캐시 동기화
+    if (serviceStartedAt) {
+      const db      = require('../services/db');
+      const sessMgr = require('../services/sessionManager');
+      // DB 업데이트
+      await db.getPool().query(
+        `UPDATE sessions SET started_at = to_timestamp($1 / 1000.0) WHERE id = $2`,
+        [Number(serviceStartedAt), req.params.id]
+      ).catch(() => {});
+      // Redis 캐시 갱신 — getSession이 캐시 우선이므로 반드시 동기화
+      try {
+        const redis = require('../services/redisClient').getRedis();
+        if (redis) {
+          const SESSION_KEY = (id) => `session:${id}`;
+          const raw = await redis.get(SESSION_KEY(req.params.id));
+          if (raw) {
+            const cached = JSON.parse(raw);
+            cached.startedAt = Number(serviceStartedAt);
+            await redis.set(SESSION_KEY(req.params.id), JSON.stringify(cached), 'EX', 86400);
+          }
+        }
+      } catch(redisErr) {
+        require('../utils/logger').warn('Redis cache update failed (non-fatal)', { error: redisErr.message });
+      }
+    }
+
     // 2) operator 보증금 자동 예치
     // ★ await로 처리: Railway는 비동기 .then이 요청 완료 후 실행 보장 안 됨
     // userDepositTxHash가 실제 TX인 경우만 온체인 operatorDeposit 실행
     const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
-    const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock') && !depositTxHash.startsWith('0xtest');
+    const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock');
+
+    // ★ TX receipt 검증: userDeposit TX가 실제로 성공했는지 확인 후 operatorDeposit 실행
+    let userTxSuccess = true;
+    if (isRealTx) {
+      try {
+        const { ethers } = require('ethers');
+        const provider = new ethers.JsonRpcProvider(
+          process.env.BASE_RPC_URL || 'https://sepolia.base.org'
+        );
+        const receipt = await provider.getTransactionReceipt(depositTxHash);
+        if (!receipt) {
+          require('../utils/logger').warn('/deposit: TX not found (pending?)', { depositTxHash });
+          userTxSuccess = false;
+        } else if (receipt.status !== 1) {
+          require('../utils/logger').warn('/deposit: userDeposit TX REVERTED — skip operatorDeposit', {
+            depositTxHash, status: receipt.status
+          });
+          userTxSuccess = false;
+        }
+      } catch (rpcErr) {
+        require('../utils/logger').warn('/deposit: receipt 조회 실패 — operatorDeposit 시도는 계속', { error: rpcErr.message });
+        // RPC 오류 시 낙관적으로 진행
+      }
+    }
 
     let operatorDepositResult = null;
-    if (canEscrow && isRealTx) {
+    if (canEscrow && isRealTx && userTxSuccess) {
       const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '3.0';
       try {
         operatorDepositResult = await escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash);
@@ -243,7 +349,8 @@ router.get('/:id/escrow-status', async (req, res, next) => {
     const fareUsdc   = parseFloat(row.fare_amount || 0);
     const userDep    = parseFloat(row.user_deposit || 0);
     const refundUsdc = (userDep - fareUsdc).toFixed(6);
-    const settled    = row.state === 'Released' || onchain?.state === 'Released';
+    const FINAL_STATES = new Set(['Released','Refunded']);
+    const settled    = FINAL_STATES.has(row.state) || FINAL_STATES.has(onchain?.state);
 
     res.json({
       ok: true,
@@ -286,6 +393,107 @@ function _deriveStage(status, settlement) {
   return 'unknown';
 }
 
+
+// ── GET /sessions — 세션 목록 (결제 내역) ─────────────────────────────────────
+// Query params:
+//   userAddress (required) — 해당 지갑 주소의 세션만
+//   status      (optional) — Active|Ended|Settling|Settled|Disputed
+//   limit       (optional) — 기본 20, 최대 100
+//   offset      (optional) — 페이지네이션
+router.get('/', async (req, res, next) => {
+  try {
+    const { userAddress, status, limit = '20', offset = '0' } = req.query;
+    if (!userAddress) return res.status(400).json({ ok: false, error: 'userAddress required' });
+
+    const db = require('../services/db');
+    const lim = Math.min(parseInt(limit) || 20, 100);
+    const off = parseInt(offset) || 0;
+
+    // sessions + escrow_locks 조인으로 결제 정보 통합
+    const conditions = ['s.user_address = $1'];
+    const params     = [userAddress.toLowerCase()];
+    let   pidx       = 2;
+
+    if (status) {
+      conditions.push(`s.status = $${pidx++}`);
+      params.push(status);
+    }
+
+    const where = conditions.join(' AND ');
+
+    const { rows } = await db.getPool().query(
+      `SELECT
+         s.id,
+         s.user_address,
+         s.service_type,
+         s.channel_id,
+         s.status,
+         s.deposit_usdc,
+         s.charged_usdc,
+         s.started_at,
+         s.ended_at,
+         s.settled_at,
+         el.state         AS escrow_state,
+         el.fare_amount   AS fare_usdc,
+         el.user_deposit,
+         el.settle_tx     AS tx_hash,
+         el.hold_deadline,
+         -- 환불 금액 계산
+         CASE
+           WHEN el.user_deposit IS NOT NULL AND el.fare_amount IS NOT NULL
+           THEN (el.user_deposit - el.fare_amount)
+           ELSE 0
+         END              AS refund_usdc
+       FROM sessions s
+       LEFT JOIN escrow_locks el ON el.session_id = s.id
+       WHERE ${where}
+       ORDER BY s.started_at DESC
+       LIMIT $${pidx} OFFSET $${pidx + 1}`,
+      [...params, lim, off]
+    );
+
+    // 서비스 타입 한글 라벨 매핑
+    const SERVICE_LABELS = {
+      bicycle:     { label: '공유 자전거', emoji: '🚲' },
+      ev_charging: { label: 'EV 충전',     emoji: '⚡' },
+      parking:     { label: '주차',         emoji: '🅿️' },
+    };
+
+    const sessions = rows.map(r => ({
+      id:           r.id,
+      serviceType:  r.service_type,
+      serviceLabel: SERVICE_LABELS[r.service_type]?.label || r.service_type,
+      serviceEmoji: SERVICE_LABELS[r.service_type]?.emoji || '📦',
+      status:       r.status,
+      escrowState:  r.escrow_state,
+      depositUsdc:  r.deposit_usdc ? parseFloat(r.deposit_usdc).toFixed(2) : '0.00',
+      chargedUsdc:  r.charged_usdc ? parseFloat(r.charged_usdc).toFixed(6) : '0.000000',
+      fareUsdc:     r.fare_usdc    ? parseFloat(r.fare_usdc).toFixed(6)    : null,
+      refundUsdc:   r.refund_usdc  ? parseFloat(r.refund_usdc).toFixed(6)  : null,
+      txHash:       r.tx_hash,
+      startedAt:    r.started_at,
+      endedAt:      r.ended_at,
+      settledAt:    r.settled_at,
+      holdDeadline: r.hold_deadline ? Number(r.hold_deadline) : null,
+    }));
+
+    // 전체 건수
+    const { rows: countRows } = await db.getPool().query(
+      `SELECT COUNT(*) AS total FROM sessions s WHERE ${where}`,
+      params
+    );
+
+    res.json({
+      ok:    true,
+      data:  sessions,
+      total: parseInt(countRows[0].total),
+      limit: lim,
+      offset: off,
+    });
+  } catch (err) { next(err); }
+});
+
+
 // ── GET /sessions/:id/stream (SSE) ───────────────────────────────────────────
 router.get('/:id/stream', async (req, res) => {
   const { userAddress } = req.query;
@@ -311,4 +519,18 @@ router.get('/:id/stream', async (req, res) => {
   });
 });
 
+
+// ── POST /sessions/:id/force-refund — UserDeposited 상태에서 강제 환불 ──────
+// operatorDeposit 없이 userDeposit만 있는 경우 forceRefund 호출
+router.post('/:id/force-refund', async (req, res, next) => {
+  try {
+    const sessionId = req.params.id;
+    const escrowSvc = require('../services/escrowPayoutService');
+    const result = await escrowSvc.forceRefundOnchain(sessionId);
+    res.json({ ok: true, data: result });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;
+
+

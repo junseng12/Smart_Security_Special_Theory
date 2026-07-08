@@ -123,7 +123,7 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 
 	// ── Step 2: 사용자 노드 핸들러 시작 (자동 수락) ───────────────────
 	go userNode.Client.Handle(
-		&autoAcceptProposalHandler{log: m.log},
+		&autoAcceptProposalHandler{log: m.log, participant: userNode.EthAddress},
 		&autoAcceptUpdateHandler{log: m.log},
 	)
 
@@ -135,9 +135,11 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 		[]wallet.BackendID{ethwallet.BackendID},
 		m.node.USDCAsset,
 	)
+	// ★ SmartCityEscrow가 자금 보관/정산 전담 → AssetHolder 예치 불필요
+	// Perun 채널은 오프체인 요금 계산 및 서명 추적 역할만 수행
 	initAlloc.SetAssetBalances(m.node.USDCAsset, []channel.Bal{
-		depositWei,    // operator 측에서 예치 (custodial)
-		big.NewInt(0), // user (custodial, 별도 예치 불필요)
+		big.NewInt(0), // operator: SmartCityEscrow에 예치 (AssetHolder 이중 예치 제거)
+		big.NewInt(0), // user:     SmartCityEscrow에 예치 (MetaMask 직접)
 	})
 
 	// ── Step 4: 채널 제안 ─────────────────────────────────────────────
@@ -451,7 +453,8 @@ func (h *updateHandler) HandleUpdate(cur *channel.State, next client.ChannelUpda
 
 // ★ autoAcceptProposalHandler — custodial 사용자 노드용 (모든 제안 자동 수락)
 type autoAcceptProposalHandler struct {
-	log *logrus.Logger
+	log         *logrus.Logger
+	participant map[wallet.BackendID]wallet.Address // user custodial eth address
 }
 
 func (h *autoAcceptProposalHandler) HandleProposal(p client.ChannelProposal, r *client.ProposalResponder) {
@@ -462,7 +465,7 @@ func (h *autoAcceptProposalHandler) HandleProposal(p client.ChannelProposal, r *
 		r.Reject(context.TODO(), "unknown proposal type") //nolint:errcheck
 		return
 	}
-	acc := lcp.Accept(nil, client.WithRandomNonce())
+	acc := lcp.Accept(h.participant, client.WithRandomNonce())
 	if _, err := r.Accept(context.TODO(), acc); err != nil {
 		h.log.WithError(err).Error("[Channel] custodial user: failed to accept proposal")
 	}

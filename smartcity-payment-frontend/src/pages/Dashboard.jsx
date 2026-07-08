@@ -1,318 +1,272 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { base44 } from '@/api/base44Client';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { Zap, AlertTriangle, LogOut } from 'lucide-react';
+import { Zap, AlertTriangle, LogOut, ChevronRight, RefreshCw } from 'lucide-react';
 import BottomNav from '@/components/wallet/BottomNav';
 import BalanceCard from '@/components/wallet/BalanceCard';
 import QuickActions from '@/components/wallet/QuickActions';
-import RecentTransactions from '@/components/wallet/RecentTransactions';
 import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage, getConnectedMetaMaskAddress } from '@/lib/walletUtils';
+import { calcFare, calcRefund } from '@/lib/fareUtils';
 
+const BACKEND     = "https://payment-backend-production.up.railway.app";
 const SESSION_KEY = "active_session";
+const PROC_KEY    = "payment_processing";
 
-function generateAddress() {
-  const chars = '0123456789abcdef';
-  let addr = '0x';
-  for (let i = 0; i < 40; i++) addr += chars[Math.floor(Math.random() * 16)];
-  return addr;
+const SERVICE_EMOJI = { bicycle: '🚲', ev_charging: '⚡', parking: '🅿️' };
+const STATUS_COLOR  = {
+  Active:   'text-blue-600',
+  Settled:  'text-green-600',
+  Settling: 'text-orange-600',
+  Ended:    'text-gray-500',
+};
+
+async function fetchRecentSessions(userAddress) {
+  const res  = await fetch(`${BACKEND}/api/v1/sessions?userAddress=${userAddress}&limit=5`);
+  const data = await res.json();
+  return data.ok ? data.data : [];
 }
 
 export default function Dashboard() {
-  const navigate = useNavigate();
-  const [showBalance, setShowBalance] = useState(true);
-  const [user, setUser] = useState(null);
-  const [mmAddress, setMmAddress] = useState(null);
-  const [mmBalance, setMmBalance] = useState(null);
+  const navigate     = useNavigate();
+  const queryClient  = useQueryClient();
+  const [showBalance,  setShowBalance]  = useState(true);
+  const [mmAddress,    setMmAddress]    = useState(null);
+  const [mmBalance,    setMmBalance]    = useState(null);
   const [mmConnecting, setMmConnecting] = useState(false);
-  const [mmError, setMmError] = useState(null);
-  const [activeSession, setActiveSession] = useState(null);
-  const queryClient = useQueryClient();
+  const [mmError,      setMmError]      = useState(null);
+  const [activeSession,setActiveSession]= useState(null);
 
-  useEffect(() => {
-    base44.auth.me().then(setUser).catch(() => {});
-  }, []);
+  // 최근 세션 (결제 내역 미리보기)
+  const { data: recentSessions = [], isFetching: sessionsFetching, refetch: refetchSessions } = useQuery({
+    queryKey: ['sessions-recent', mmAddress],
+    queryFn:  () => fetchRecentSessions(mmAddress),
+    enabled:  !!mmAddress,
+    staleTime: 30_000,
+  });
 
+  // MetaMask 동기화
   useEffect(() => {
     const syncMetaMask = async () => {
       const actualAddr = await getConnectedMetaMaskAddress();
       const storedAddr = localStorage.getItem("mm_address");
-
       if (!actualAddr) {
-        if (storedAddr) {
-          localStorage.removeItem("mm_address");
-          localStorage.removeItem("mm_balance");
-        }
-        setMmAddress(null);
-        setMmBalance(null);
+        if (storedAddr) { localStorage.removeItem("mm_address"); localStorage.removeItem("mm_balance"); }
+        setMmAddress(null); setMmBalance(null);
       } else if (actualAddr.toLowerCase() === storedAddr?.toLowerCase()) {
         setMmAddress(actualAddr);
-        getUsdcBalance(actualAddr).then(bal => {
-          setMmBalance(bal);
-          localStorage.setItem("mm_balance", bal);
-        }).catch(() => {});
+        getUsdcBalance(actualAddr).then(bal => { setMmBalance(bal); localStorage.setItem("mm_balance", bal); }).catch(() => {});
       } else {
-        localStorage.removeItem("mm_address");
-        localStorage.removeItem("mm_balance");
-        setMmAddress(null);
-        setMmBalance(null);
+        clearMetaMaskStorage(); setMmAddress(null); setMmBalance(null);
       }
     };
-
     syncMetaMask();
-
     if (window.ethereum) {
-      const onAccountsChanged = (accounts) => {
-        if (!accounts || accounts.length === 0) {
-          clearMetaMaskStorage();
-          setMmAddress(null);
-          setMmBalance(null);
-        } else if (accounts[0].toLowerCase() !== mmAddress?.toLowerCase()) {
-          clearMetaMaskStorage();
-          setMmAddress(null);
-          setMmBalance(null);
-        }
-      };
-      window.ethereum.on('accountsChanged', onAccountsChanged);
-      return () => window.ethereum.removeListener('accountsChanged', onAccountsChanged);
+      const handler = () => { clearMetaMaskStorage(); setMmAddress(null); setMmBalance(null); };
+      window.ethereum.on('accountsChanged', handler);
+      return () => window.ethereum.removeListener('accountsChanged', handler);
     }
   }, []);
 
-  // 진행 중인 세션 복원
+  // 진행 중인 세션 복원 (active + processing 모두)
   useEffect(() => {
     try {
       const saved = JSON.parse(localStorage.getItem(SESSION_KEY));
-      if (saved?.sessionData && saved?.service) {
-        setActiveSession(saved);
+      if (saved?.sessionId && saved?.status === "active") { setActiveSession(saved); return; }
+      // processing 중 나갔다가 메인으로 돌아온 경우도 표시
+      const proc = JSON.parse(localStorage.getItem(PROC_KEY));
+      if (proc?.sessionId && Date.now() - proc.savedAt < 10 * 60 * 1000) {
+        setActiveSession({ ...proc, status: "processing" });
       }
     } catch {}
   }, []);
 
-  // MetaMask 주소가 있을 때만 잔액 조회
+  // 잔액 주기적 갱신
   useEffect(() => {
     if (!mmAddress) return;
-    getUsdcBalance(mmAddress).then(bal => {
-      setMmBalance(bal);
-      localStorage.setItem("mm_balance", bal);
-    }).catch(() => {});
+    const id = setInterval(() => {
+      getUsdcBalance(mmAddress).then(bal => { setMmBalance(bal); localStorage.setItem("mm_balance", bal); }).catch(() => {});
+    }, 15_000);
+    return () => clearInterval(id);
   }, [mmAddress]);
 
-  // 10초마다 잔액 갱신 (MetaMask 연결 시에만)
-  useEffect(() => {
-    if (!mmAddress) return;
-    const interval = setInterval(async () => {
-      const bal = await getUsdcBalance(mmAddress);
-      setMmBalance(bal);
-      localStorage.setItem("mm_balance", bal);
-    }, 10000);
-    return () => clearInterval(interval);
-  }, [mmAddress]);
+  // 모바일 감지
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  const hasEthereum = typeof window !== 'undefined' && !!window.ethereum;
 
-  const { data: wallets = [], isLoading: walletsLoading } = useQuery({
-    queryKey: ['wallets'],
-    queryFn: () => base44.entities.Wallet.list(),
-  });
-
-  const { data: transactions = [] } = useQuery({
-    queryKey: ['transactions'],
-    queryFn: () => base44.entities.Transaction.list('-created_date', 20),
-  });
-
-  // Auto-create wallet for new users
-  useEffect(() => {
-    if (!walletsLoading && wallets.length === 0 && user) {
-      base44.entities.Wallet.create({
-        address: generateAddress(),
-        balance: 0,
-        network: 'Base Sepolia',
-        is_active: true,
-      }).then(() => queryClient.invalidateQueries({ queryKey: ['wallets'] }));
-    }
-  }, [walletsLoading, wallets, user, queryClient]);
-
-  const wallet = wallets[0];
+  // MetaMask 앱 딥링크 (모바일 외부 브라우저용)
+  const FRONTEND_URL = window.location.origin + window.location.pathname;
+  const MM_DEEPLINK  = `https://metamask.app.link/dapp/${FRONTEND_URL.replace(/^https?:\/\//, '')}`;
 
   const handleConnectMetaMask = async () => {
-    setMmConnecting(true);
-    setMmError(null);
+    // 모바일인데 window.ethereum 없음 → MetaMask 앱으로 리디렉션
+    if (isMobile && !hasEthereum) {
+      window.location.href = MM_DEEPLINK;
+      return;
+    }
+    setMmConnecting(true); setMmError(null);
     try {
       const addr = await connectMetaMask();
-      const bal = await getUsdcBalance(addr);
-      setMmAddress(addr);
-      setMmBalance(bal);
-      localStorage.setItem("mm_address", addr);
-      localStorage.setItem("mm_balance", bal);
-      if (wallet) {
-        await base44.entities.Wallet.update(wallet.id, { address: addr, balance: bal });
-        queryClient.invalidateQueries({ queryKey: ['wallets'] });
+      if (addr) {
+        setMmAddress(addr);
+        localStorage.setItem("mm_address", addr);
+        const bal = await getUsdcBalance(addr);
+        setMmBalance(bal);
+        localStorage.setItem("mm_balance", bal);
       }
-    } catch (e) {
-      setMmError(e.message);
-    }
-    setMmConnecting(false);
-  };
-
-  const handleDisconnectMetaMask = () => {
-    setMmAddress(null);
-    setMmBalance(null);
-    setMmError(null);
-    clearMetaMaskStorage();
-    // DB wallet도 초기화
-    if (wallet) {
-      base44.entities.Wallet.update(wallet.id, { address: generateAddress(), balance: 0 })
-        .then(() => queryClient.invalidateQueries({ queryKey: ['wallets'] }));
-    }
+    } catch (e) { setMmError(e.message || "MetaMask 연결 실패"); }
+    finally      { setMmConnecting(false); }
   };
 
   const handleLogout = () => {
-    clearMetaMaskStorage();
-    base44.auth.logout(window.location.href);
+    clearMetaMaskStorage(); setMmAddress(null); setMmBalance(null);
+    localStorage.removeItem(SESSION_KEY); localStorage.removeItem(PROC_KEY); setActiveSession(null);
   };
 
-  // 경과 시간 포맷
-  const fmtElapsed = () => {
-    if (!activeSession?.startedAt) return '';
-    const s = Math.floor((Date.now() - activeSession.startedAt) / 1000);
-    return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  const shortAddr = mmAddress ? `${mmAddress.slice(0,6)}...${mmAddress.slice(-4)}` : null;
+
+  const formatDate = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
   };
 
   return (
     <div className="min-h-screen bg-background pb-24">
-      <div className="max-w-md mx-auto px-4 pt-6">
-        {/* Header */}
-        <motion.div
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="flex items-center justify-between mb-6"
-        >
-          <div>
-            <p className="text-xs text-muted-foreground">안녕하세요,</p>
-            <h1 className="text-lg font-semibold">
-              {user?.full_name || 'BasePay 사용자'}
-            </h1>
-          </div>
-          <div className="flex items-center gap-2">
-            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/20">
-              <Zap className="w-3 h-3 text-primary" />
-              <span className="text-[10px] font-semibold text-primary">Perun Channel</span>
-            </div>
-            <button
-              onClick={handleLogout}
-              className="p-2 rounded-xl hover:bg-secondary transition-colors"
-              title="로그아웃"
-            >
-              <LogOut className="w-4 h-4 text-muted-foreground" />
-            </button>
-          </div>
-        </motion.div>
+      <div className="max-w-md mx-auto px-4">
 
-        {/* 진행 중인 세션 배너 */}
+        {/* Header */}
+        <div className="flex items-center justify-between pt-12 pb-4">
+          <div>
+            <p className="text-sm text-muted-foreground">BasePay Smart City</p>
+            <h1 className="text-2xl font-bold">{mmAddress ? shortAddr : '지갑 미연결'}</h1>
+          </div>
+          {mmAddress && (
+            <button onClick={handleLogout} className="p-2 rounded-full hover:bg-muted">
+              <LogOut className="w-5 h-5 text-muted-foreground" />
+            </button>
+          )}
+        </div>
+
+        {/* 진행 중 세션 배너 */}
         {activeSession && (
-          <motion.button
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            onClick={() => navigate('/scan')}
-            className="w-full mb-4 flex items-center justify-between p-4 rounded-2xl bg-destructive/10 border border-destructive/30 hover:bg-destructive/15 transition-colors text-left"
-          >
-            <div className="flex items-center gap-3">
-              <div className="relative">
-                <AlertTriangle className="w-5 h-5 text-destructive" />
-                <div className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-destructive animate-ping" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-destructive">미종료 세션 있음</p>
-                <p className="text-xs text-muted-foreground">
-                  {activeSession.service?.emoji} {activeSession.service?.label} · {fmtElapsed()} 경과 · 탭하여 종료
-                </p>
-              </div>
-            </div>
-            <span className="text-xs text-destructive font-bold shrink-0">→</span>
-          </motion.button>
+          <motion.div initial={{ opacity:0, y:-10 }} animate={{ opacity:1, y:0 }}
+            className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-xl flex items-center gap-2">
+            <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+            <span className="text-sm text-blue-800 flex-1">
+              {SERVICE_EMOJI[activeSession.svc?.serviceType] || '📦'}{' '}
+              {activeSession.status === "processing"
+                ? `${activeSession.svc?.label || activeSession.svc?.serviceType} 결제 진행 중...`
+                : `${activeSession.svc?.label || activeSession.svc?.serviceType} 이용 중`}
+            </span>
+            <button onClick={() => navigate('/scan')}
+              className="text-xs text-blue-700 font-bold flex items-center gap-0.5">
+              {activeSession.status === "processing" ? "재개하기" : "계속하기"} <ChevronRight className="w-3 h-3" />
+            </button>
+          </motion.div>
         )}
 
-        {/* MetaMask 연결 / 연결됨 */}
-        <div className="mb-4">
-          {!mmAddress ? (
-            <button
-              onClick={handleConnectMetaMask}
-              disabled={mmConnecting}
-              className="w-full flex items-center justify-center gap-2 py-3 rounded-2xl bg-card border border-border hover:border-primary/30 hover:bg-primary/5 transition-all disabled:opacity-50"
-            >
-              <span className="text-lg">🦊</span>
-              <span className="text-sm font-medium">
-                {mmConnecting ? "연결 중..." : "MetaMask 연결"}
-              </span>
-            </button>
-          ) : (
-            <div className="flex items-center justify-between px-4 py-3 rounded-2xl bg-card border border-primary/20">
+        {/* MetaMask 미연결 */}
+        {!mmAddress && (
+          <motion.div initial={{ opacity:0, y:10 }} animate={{ opacity:1, y:0 }}
+            className="mb-4 p-4 bg-orange-50 border border-orange-200 rounded-xl">
+            <div className="flex items-center gap-2 mb-2">
+              <AlertTriangle className="w-5 h-5 text-orange-500" />
+              <span className="text-sm font-semibold text-orange-800">MetaMask 연결 필요</span>
+            </div>
+            {isMobile && !hasEthereum ? (
+              <>
+                <p className="text-xs text-orange-700 mb-3">
+                  MetaMask 앱 내장 브라우저에서 접속하거나, 아래 버튼으로 MetaMask 앱을 열어주세요.
+                </p>
+                <a href={MM_DEEPLINK}
+                  className="block w-full text-center py-2.5 bg-orange-500 text-white text-sm font-semibold rounded-lg">
+                  MetaMask 앱에서 열기 →
+                </a>
+                <p className="text-xs text-orange-400 mt-2 text-center">
+                  또는 MetaMask 앱 → 브라우저 탭 → 이 주소 직접 입력
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="text-xs text-orange-700 mb-3">결제 기능을 사용하려면 MetaMask를 연결해주세요.</p>
+                {mmError && <p className="text-xs text-red-600 mb-2">{mmError}</p>}
+                <button onClick={handleConnectMetaMask} disabled={mmConnecting}
+                  className="w-full py-2 bg-orange-500 text-white text-sm font-semibold rounded-lg hover:bg-orange-600 disabled:opacity-50">
+                  {mmConnecting ? '연결 중...' : 'MetaMask 연결'}
+                </button>
+              </>
+            )}
+          </motion.div>
+        )}
+
+        {/* 잔액 카드 */}
+        <BalanceCard balance={mmBalance} address={mmAddress}
+          showBalance={showBalance} onToggle={() => setShowBalance(b => !b)} />
+
+        {/* 빠른 액션 */}
+        <QuickActions address={mmAddress} />
+
+        {/* ── 최근 결제 내역 ───────────────────────────────────────── */}
+        {mmAddress && (
+          <div className="mt-6">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="text-sm font-bold text-gray-900">최근 결제 내역</h2>
               <div className="flex items-center gap-2">
-                <span className="text-lg">🦊</span>
-                <div>
-                  <p className="text-xs font-mono text-foreground">{mmAddress.slice(0, 8)}...{mmAddress.slice(-6)}</p>
-                  <p className="text-[10px] text-primary">Base Sepolia</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <div className="text-right">
-                  <p className="text-sm font-bold text-primary">
-                    {mmBalance !== null ? mmBalance.toFixed(2) : '조회 중...'} USDC
-                  </p>
-                  <p className="text-[10px] text-muted-foreground">실제 잔액</p>
-                </div>
-                <button
-                  onClick={handleDisconnectMetaMask}
-                  className="text-[10px] text-muted-foreground hover:text-destructive transition-colors px-2 py-1 rounded-lg hover:bg-destructive/10"
-                >
-                  해제
+                <button onClick={() => refetchSessions()}
+                  className={`p-1 rounded-lg hover:bg-gray-100 ${sessionsFetching ? 'animate-spin' : ''}`}>
+                  <RefreshCw className="w-3.5 h-3.5 text-gray-400" />
+                </button>
+                <button onClick={() => navigate('/history')}
+                  className="text-xs text-blue-600 font-medium flex items-center gap-0.5">
+                  전체보기 <ChevronRight className="w-3 h-3" />
                 </button>
               </div>
             </div>
-          )}
-          {mmError && <p className="text-xs text-destructive mt-2 px-1">{mmError}</p>}
-        </div>
 
-        {/* Balance Card — MetaMask 연결 시에만 표시 */}
-        {mmAddress ? (
-          <div className="mb-6">
-            <BalanceCard
-              wallet={{ ...wallet, balance: mmBalance ?? 0, address: mmAddress }}
-              showBalance={showBalance}
-              onToggle={() => setShowBalance(!showBalance)}
-            />
-          </div>
-        ) : (
-          <div className="mb-6 rounded-3xl bg-card border border-border/50 border-dashed p-6 text-center">
-            <p className="text-sm text-muted-foreground">MetaMask를 연결하면</p>
-            <p className="text-sm text-muted-foreground">지갑 잔액과 주소를 확인할 수 있습니다</p>
+            {recentSessions.length === 0 ? (
+              <div className="bg-card border border-border rounded-2xl p-6 text-center">
+                <div className="text-3xl mb-2">📭</div>
+                <p className="text-sm text-muted-foreground">결제 내역이 없습니다</p>
+                <button onClick={() => navigate('/scan')}
+                  className="mt-3 text-blue-600 text-sm font-medium">첫 결제 시작하기</button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {recentSessions.map((s, i) => (
+                  <motion.div key={s.id}
+                    initial={{ opacity:0, x:-10 }} animate={{ opacity:1, x:0 }}
+                    transition={{ delay: i * 0.05 }}
+                    className="bg-card border border-border rounded-xl flex items-center gap-3 p-3">
+                    <div className="w-10 h-10 bg-gray-100 rounded-xl flex items-center justify-center text-xl flex-shrink-0">
+                      {s.serviceEmoji}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-semibold text-gray-900 truncate">{s.serviceLabel}</div>
+                      <div className="text-xs text-gray-400">{formatDate(s.startedAt)}</div>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <div className={`text-sm font-bold ${STATUS_COLOR[s.status] || 'text-gray-700'}`}>
+                        {s.status === 'Active'
+                          ? `${parseFloat(s.depositUsdc||0).toFixed(2)} USDC`
+                          : `-${calcFare(s).toFixed(4)} USDC`
+                        }
+                      </div>
+                      {s.status !== 'Active' && calcRefund(s) > 0 && (
+                        <div className="text-xs text-green-600">+{calcRefund(s).toFixed(4)} 환불</div>
+                      )}
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 
-        {/* Quick Actions */}
-        <div className="mb-6">
-          <QuickActions />
-        </div>
-
-        {/* Smart City Info */}
-        <motion.div
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.2 }}
-          className="rounded-2xl bg-gradient-to-r from-primary/5 via-card to-blue-500/5 border border-border p-4 mb-6"
-        >
-          <div className="flex items-center gap-2 mb-2">
-            <span className="text-base">🏙️</span>
-            <span className="text-xs font-semibold">Smart City Payment</span>
-          </div>
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
-            Base 체인 기반 USDC 결제 시스템 · Perun State Channel을 활용한 실시간 마이크로페이먼트 · 주차, 대중교통, 공유 자전거, 전기차 충전
-          </p>
-        </motion.div>
-
-        {/* Recent Transactions */}
-        <RecentTransactions transactions={transactions} />
       </div>
       <BottomNav />
     </div>
   );
 }
+
+
