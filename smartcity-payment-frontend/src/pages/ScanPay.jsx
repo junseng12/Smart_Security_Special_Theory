@@ -3,9 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   approveUsdcForEscrow,
+  connectMetaMask,
+  waitForMetaMaskProvider,
   userDeposit as escrowUserDeposit,
 } from '@/lib/walletUtils';
 import BottomNav from '@/components/wallet/BottomNav';
+import useMetaMaskProvider from '@/hooks/use-metamask-provider';
 
 const BACKEND          = "https://payment-backend-production.up.railway.app";
 const OPERATOR_ADDRESS  = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
@@ -94,6 +97,7 @@ export default function ScanPay() {
   const navigate    = useNavigate();
   const queryClient = useQueryClient();
   const [mmAddress, setMmAddress] = React.useState(() => localStorage.getItem("mm_address"));
+  const { provider, isDetecting, isMobile, deepLink } = useMetaMaskProvider();
 
   // localStorage 변경 감지 (다른 탭/컴포넌트에서 연결된 경우)
   React.useEffect(() => {
@@ -103,6 +107,36 @@ export default function ScanPay() {
     window.addEventListener('focus', sync);
     return () => { window.removeEventListener('storage', sync); window.removeEventListener('focus', sync); };
   }, []);
+
+  // MetaMask Mobile provider가 늦게 주입되거나 계정이 변경되는 경우 상태 동기화
+  React.useEffect(() => {
+    if (!provider) return;
+    const syncAccounts = async () => {
+      try {
+        const accounts = await provider.request({ method: "eth_accounts" });
+        const address = accounts?.[0] || null;
+        if (address) localStorage.setItem("mm_address", address);
+        else localStorage.removeItem("mm_address");
+        setMmAddress(address);
+      } catch {}
+    };
+    syncAccounts();
+    provider.on("accountsChanged", syncAccounts);
+    return () => provider.removeListener("accountsChanged", syncAccounts);
+  }, [provider]);
+
+  const connectWallet = useCallback(async () => {
+    if (isMobile && !provider && !isDetecting) {
+      window.location.href = deepLink;
+      return null;
+    }
+    const address = await connectMetaMask();
+    if (address) {
+      localStorage.setItem("mm_address", address);
+      setMmAddress(address);
+    }
+    return address;
+  }, [deepLink, isDetecting, isMobile, provider]);
 
   // step: "home" | "camera" | "manual" | "processing" | "active" | "ending" | "ended"
   const [step,          setStep]          = useState("home");
@@ -364,14 +398,13 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     setSelectedSvc(svc);
     let addr = localStorage.getItem("mm_address") || mmAddress;
     if (!addr) {
-      if (!window.ethereum) { alert("MetaMask 앱 브라우저에서 열어주세요."); return; }
       try {
-        const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-        addr = accounts[0];
+        addr = await connectWallet();
         if (!addr) return;
-        localStorage.setItem("mm_address", addr);
-        setMmAddress(addr);
-      } catch { return; }
+      } catch (e) {
+        alert(e?.code === 4001 ? "MetaMask 연결을 거부하셨습니다." : (e?.message || "MetaMask 연결 실패"));
+        return;
+      }
     }
     startPayment(svc, addr);
   };
@@ -383,18 +416,11 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     let addr = localStorage.getItem("mm_address") || mmAddress;
     // MetaMask 미연결 시 연결 먼저 시도
     if (!addr) {
-      if (!window.ethereum) {
-        alert("MetaMask가 필요합니다.\nMetaMask 앱 브라우저에서 열어주세요.");
-        return;
-      }
       try {
-        const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-        addr = accounts[0];
+        addr = await connectWallet();
         if (!addr) return;
-        localStorage.setItem("mm_address", addr);
-        setMmAddress(addr);
       } catch (e) {
-        alert("MetaMask 연결을 거부하셨습니다.");
+        alert(e?.code === 4001 ? "MetaMask 연결을 거부하셨습니다." : (e?.message || "MetaMask 연결 실패"));
         return;
       }
     }
@@ -407,7 +433,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
   const resumePayment = async (proc) => {
     const { svc, addr, sessionId, channelId, escrowId, holdDeadline, stage } = proc;
-    if (!window.ethereum) {
+    if (!(await waitForMetaMaskProvider())) {
       addLog("❌ MetaMask를 찾을 수 없습니다. MetaMask 앱 브라우저를 사용해주세요.", "error");
       setTimeout(() => { clearProc(); setStep("home"); }, 5000);
       return;
@@ -459,7 +485,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     if (addr) setMmAddress(addr);
     setStep("processing");
     setLog([]);
-    if (!window.ethereum) {
+    if (!(await waitForMetaMaskProvider())) {
       addLog("❌ MetaMask를 찾을 수 없습니다.", "error");
       addLog("📱 MetaMask 앱 → 브라우저에서 이 페이지를 열어주세요.", "info");
       setTimeout(() => setStep("home"), 6000);
@@ -606,18 +632,24 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
         {!mmAddress && step === "home" && (
           <div className="bg-orange-50 border border-orange-200 rounded-2xl p-4 text-sm text-orange-800">
             ⚠️ MetaMask가 연결되지 않았습니다.
-            <button
-              onClick={async () => {
-                if (!window.ethereum) { alert("MetaMask 앱 브라우저에서 열어주세요."); return; }
-                try {
-                  const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
-                  const addr = accounts[0];
-                  if (addr) { localStorage.setItem("mm_address", addr); setMmAddress(addr); }
-                } catch { alert("MetaMask 연결을 거부하셨습니다."); }
-              }}
-              className="block mt-2 w-full text-center bg-orange-500 text-white py-2 rounded-xl font-semibold">
-              MetaMask 연결하기
-            </button>
+            {isMobile && !provider && !isDetecting ? (
+              <a href={deepLink}
+                className="block mt-2 w-full text-center bg-orange-500 text-white py-2 rounded-xl font-semibold">
+                MetaMask 앱에서 열기 →
+              </a>
+            ) : (
+              <button
+                onClick={async () => {
+                  try { await connectWallet(); }
+                  catch (e) {
+                    alert(e?.code === 4001 ? "MetaMask 연결을 거부하셨습니다." : (e?.message || "MetaMask 연결 실패"));
+                  }
+                }}
+                disabled={isDetecting}
+                className="block mt-2 w-full text-center bg-orange-500 text-white py-2 rounded-xl font-semibold disabled:opacity-50">
+                {isDetecting ? "MetaMask 확인 중..." : "MetaMask 연결하기"}
+              </button>
+            )}
           </div>
         )}
 

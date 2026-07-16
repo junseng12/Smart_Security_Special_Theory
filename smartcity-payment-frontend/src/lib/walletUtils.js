@@ -11,10 +11,61 @@ const RPC_LIST = [
 export const BASE_SEPOLIA_RPC = RPC_LIST[0]; // 체인 추가용 기본값
 export const BASE_SEPOLIA_CHAIN_ID = "0x14a34"; // 84532
 
+/**
+ * 여러 지갑이 provider를 함께 주입하는 환경에서도 MetaMask provider를 우선 반환한다.
+ */
+export function getMetaMaskProvider() {
+  if (typeof window === "undefined") return null;
+  const ethereum = window.ethereum;
+  if (!ethereum) return null;
+  if (Array.isArray(ethereum.providers)) {
+    return ethereum.providers.find((provider) => provider?.isMetaMask) || null;
+  }
+  return ethereum.isMetaMask ? ethereum : null;
+}
+
+/**
+ * MetaMask Mobile은 페이지 로드 후 provider를 늦게 주입할 수 있다.
+ * 공식 ethereum#initialized 이벤트와 타임아웃을 함께 사용한다.
+ */
+export async function waitForMetaMaskProvider(timeoutMs = 3000) {
+  const current = getMetaMaskProvider();
+  if (current || typeof window === "undefined") return current;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("ethereum#initialized", handleInitialized);
+      clearTimeout(timer);
+      resolve(getMetaMaskProvider());
+    };
+    const handleInitialized = () => finish();
+    const timer = setTimeout(finish, timeoutMs);
+    window.addEventListener("ethereum#initialized", handleInitialized, { once: true });
+  });
+}
+
+export function isMobileDevice() {
+  if (typeof navigator === "undefined") return false;
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+/** MetaMask Mobile 내장 브라우저에서 현재 dapp URL을 여는 universal link. */
+export function getMetaMaskDeepLink(url = typeof window !== "undefined" ? window.location.href : "") {
+  if (!url) return "https://metamask.io/download/";
+  const baseUrl = typeof window !== "undefined" ? window.location.origin : undefined;
+  const dappUrl = new URL(url, baseUrl).href.replace(/^https?:\/\//, "");
+  return `https://metamask.app.link/dapp/${dappUrl}`;
+}
+
 export async function getConnectedMetaMaskAddress() {
-  if (!window.ethereum) return null;
+  const provider = getMetaMaskProvider();
+  if (!provider) return null;
   try {
-    const accounts = await window.ethereum.request({ method: "eth_accounts" });
+    const accounts = await provider.request({ method: "eth_accounts" });
     return accounts && accounts.length > 0 ? accounts[0] : null;
   } catch {
     return null;
@@ -22,15 +73,16 @@ export async function getConnectedMetaMaskAddress() {
 }
 
 export async function connectMetaMask() {
-  if (!window.ethereum) throw new Error("MetaMask가 설치되지 않았습니다");
+  const provider = await waitForMetaMaskProvider();
+  if (!provider) throw new Error("MetaMask를 찾을 수 없습니다");
   try {
-    await window.ethereum.request({
+    await provider.request({
       method: "wallet_switchEthereumChain",
       params: [{ chainId: BASE_SEPOLIA_CHAIN_ID }],
     });
   } catch (e) {
     if (e.code === 4902) {
-      await window.ethereum.request({
+      await provider.request({
         method: "wallet_addEthereumChain",
         params: [{
           chainId: BASE_SEPOLIA_CHAIN_ID,
@@ -44,7 +96,7 @@ export async function connectMetaMask() {
       throw e;
     }
   }
-  const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+  const accounts = await provider.request({ method: "eth_requestAccounts" });
   return accounts[0];
 }
 
@@ -80,7 +132,8 @@ export async function getUsdcBalance(address) {
  * @returns {string} txHash
  */
 export async function sendUsdcOnChain(fromAddress, toAddress, amountUsdc) {
-  if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
+  const provider = await waitForMetaMaskProvider();
+  if (!provider) throw new Error("MetaMask가 필요합니다");
 
   // ERC-20 transfer(address,uint256) selector: 0xa9059cbb
   const amountMicro = BigInt(Math.round(amountUsdc * 1e6));
@@ -88,7 +141,7 @@ export async function sendUsdcOnChain(fromAddress, toAddress, amountUsdc) {
   const amountHex = amountMicro.toString(16).padStart(64, "0");
   const data = "0xa9059cbb" + toHex + amountHex;
 
-  const txHash = await window.ethereum.request({
+  const txHash = await provider.request({
     method: "eth_sendTransaction",
     params: [{
       from: fromAddress,
@@ -123,12 +176,13 @@ async function waitForReceipt(txHash, ms = 90000) {
 }
 
 export async function approveUsdcForEscrow(fromAddress, spender, amountUsdc) {
-  if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
+  const provider = await waitForMetaMaskProvider();
+  if (!provider) throw new Error("MetaMask가 필요합니다");
   // MAX_UINT256 approve — MetaMask 팝업 → 서명 → 컨펌 대기 → userDeposit 진행
   const MAX = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
   const spenderHex = spender.replace("0x", "").toLowerCase().padStart(64, "0");
   const data = "0x095ea7b3" + spenderHex + MAX;
-  const txHash = await window.ethereum.request({
+  const txHash = await provider.request({
     method: "eth_sendTransaction",
     params: [{ from: fromAddress, to: USDC_ADDRESS, data, gas: "0x0186A0" }],
   });
@@ -163,14 +217,15 @@ async function toBytes32Hex(str) {
  * 에스크로 V3 userDeposit 호출
  */
 export async function userDeposit(fromAddress, escrowId, operator, amountUsdc, holdDeadline) {
-  if (!window.ethereum) throw new Error("MetaMask가 필요합니다");
+  const provider = await waitForMetaMaskProvider();
+  if (!provider) throw new Error("MetaMask가 필요합니다");
   const selector        = "0x6ec5bc17"; // keccak256("userDeposit(bytes32,address,uint256,uint256)")
   const escrowIdHex     = await toBytes32Hex(escrowId);
   const operatorHex     = operator.replace("0x", "").toLowerCase().padStart(64, "0");
   const amountHex       = BigInt(Math.round(amountUsdc * 1e6)).toString(16).padStart(64, "0");
   const holdDeadlineHex = BigInt(holdDeadline).toString(16).padStart(64, "0");
   const data = selector + escrowIdHex + operatorHex + amountHex + holdDeadlineHex;
-  return await window.ethereum.request({
+  return await provider.request({
     method: "eth_sendTransaction",
     params: [{ from: fromAddress, to: ESCROW_V3_ADDRESS, data, gas: "0x49910" }], // 300,000
   });

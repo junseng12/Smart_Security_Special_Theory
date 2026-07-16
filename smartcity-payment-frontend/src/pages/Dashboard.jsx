@@ -8,6 +8,7 @@ import BalanceCard from '@/components/wallet/BalanceCard';
 import QuickActions from '@/components/wallet/QuickActions';
 import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage, getConnectedMetaMaskAddress } from '@/lib/walletUtils';
 import { calcFare, calcRefund } from '@/lib/fareUtils';
+import useMetaMaskProvider from '@/hooks/use-metamask-provider';
 
 const BACKEND     = "https://payment-backend-production.up.railway.app";
 const SESSION_KEY = "active_session";
@@ -36,6 +37,7 @@ export default function Dashboard() {
   const [mmConnecting, setMmConnecting] = useState(false);
   const [mmError,      setMmError]      = useState(null);
   const [activeSession,setActiveSession]= useState(null);
+  const { provider, isDetecting, isMobile, deepLink } = useMetaMaskProvider();
 
   // 최근 세션 (결제 내역 미리보기)
   const { data: recentSessions = [], isFetching: sessionsFetching, refetch: refetchSessions } = useQuery({
@@ -60,13 +62,14 @@ export default function Dashboard() {
         clearMetaMaskStorage(); setMmAddress(null); setMmBalance(null);
       }
     };
+    if (isDetecting) return;
     syncMetaMask();
-    if (window.ethereum) {
+    if (provider) {
       const handler = () => { clearMetaMaskStorage(); setMmAddress(null); setMmBalance(null); };
-      window.ethereum.on('accountsChanged', handler);
-      return () => window.ethereum.removeListener('accountsChanged', handler);
+      provider.on('accountsChanged', handler);
+      return () => provider.removeListener('accountsChanged', handler);
     }
-  }, []);
+  }, [provider, isDetecting]);
 
   // 진행 중인 세션 복원 (active + processing 모두)
   useEffect(() => {
@@ -90,18 +93,10 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, [mmAddress]);
 
-  // 모바일 감지
-  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  const hasEthereum = typeof window !== 'undefined' && !!window.ethereum;
-
-  // MetaMask 앱 딥링크 (모바일 외부 브라우저용)
-  const FRONTEND_URL = window.location.origin + window.location.pathname;
-  const MM_DEEPLINK  = `https://metamask.app.link/dapp/${FRONTEND_URL.replace(/^https?:\/\//, '')}`;
-
   const handleConnectMetaMask = async () => {
-    // 모바일인데 window.ethereum 없음 → MetaMask 앱으로 리디렉션
-    if (isMobile && !hasEthereum) {
-      window.location.href = MM_DEEPLINK;
+    // 모바일 외부 브라우저라 provider가 없으면 MetaMask 앱으로 이동
+    if (isMobile && !provider && !isDetecting) {
+      window.location.href = deepLink;
       return;
     }
     setMmConnecting(true); setMmError(null);
@@ -174,12 +169,14 @@ export default function Dashboard() {
               <AlertTriangle className="w-5 h-5 text-orange-500" />
               <span className="text-sm font-semibold text-orange-800">MetaMask 연결 필요</span>
             </div>
-            {isMobile && !hasEthereum ? (
+            {isDetecting ? (
+              <p className="text-xs text-orange-700 text-center py-2">MetaMask 확인 중...</p>
+            ) : isMobile && !provider ? (
               <>
                 <p className="text-xs text-orange-700 mb-3">
                   MetaMask 앱 내장 브라우저에서 접속하거나, 아래 버튼으로 MetaMask 앱을 열어주세요.
                 </p>
-                <a href={MM_DEEPLINK}
+                <a href={deepLink}
                   className="block w-full text-center py-2.5 bg-orange-500 text-white text-sm font-semibold rounded-lg">
                   MetaMask 앱에서 열기 →
                 </a>
