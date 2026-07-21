@@ -75,6 +75,13 @@ export async function getConnectedMetaMaskAddress() {
 export async function connectMetaMask() {
   const provider = await waitForMetaMaskProvider();
   if (!provider) throw new Error("MetaMask를 찾을 수 없습니다");
+  await ensureBaseSepoliaNetwork(provider);
+  const accounts = await provider.request({ method: "eth_requestAccounts" });
+  return accounts[0];
+}
+
+export async function ensureBaseSepoliaNetwork(provider = getMetaMaskProvider()) {
+  if (!provider) throw new Error("MetaMask를 찾을 수 없습니다");
   try {
     await provider.request({
       method: "wallet_switchEthereumChain",
@@ -96,8 +103,6 @@ export async function connectMetaMask() {
       throw e;
     }
   }
-  const accounts = await provider.request({ method: "eth_requestAccounts" });
-  return accounts[0];
 }
 
 export async function getUsdcBalance(address) {
@@ -131,12 +136,34 @@ export async function getUsdcBalance(address) {
  * @param {number} amountUsdc  - USDC 금액 (소수점 포함)
  * @returns {string} txHash
  */
+export function parseUsdcAmount(amountUsdc) {
+  const value = String(amountUsdc ?? "").trim();
+  if (!/^\d+(\.\d{1,6})?$/.test(value)) {
+    throw new Error("USDC 금액은 소수점 6자리까지 입력할 수 있습니다");
+  }
+
+  const [whole, fraction = ""] = value.split(".");
+  const amountMicro = BigInt(whole) * 1_000_000n
+    + BigInt(fraction.padEnd(6, "0"));
+  if (amountMicro <= 0n) throw new Error("송금액은 0보다 커야 합니다");
+  return amountMicro;
+}
+
 export async function sendUsdcOnChain(fromAddress, toAddress, amountUsdc) {
   const provider = await waitForMetaMaskProvider();
   if (!provider) throw new Error("MetaMask가 필요합니다");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(fromAddress || "")) throw new Error("보내는 지갑 주소가 올바르지 않습니다");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(toAddress || "")) throw new Error("받는 지갑 주소가 올바르지 않습니다");
+  if (fromAddress.toLowerCase() === toAddress.toLowerCase()) throw new Error("자기 지갑 주소로는 송금할 수 없습니다");
+
+  await ensureBaseSepoliaNetwork(provider);
+  const accounts = await provider.request({ method: "eth_accounts" });
+  if (!accounts?.[0] || accounts[0].toLowerCase() !== fromAddress.toLowerCase()) {
+    throw new Error("MetaMask에서 연결된 계정이 변경되었습니다. 홈에서 다시 연결해주세요");
+  }
 
   // ERC-20 transfer(address,uint256) selector: 0xa9059cbb
-  const amountMicro = BigInt(Math.round(amountUsdc * 1e6));
+  const amountMicro = parseUsdcAmount(amountUsdc);
   const toHex = toAddress.replace("0x", "").toLowerCase().padStart(64, "0");
   const amountHex = amountMicro.toString(16).padStart(64, "0");
   const data = "0xa9059cbb" + toHex + amountHex;
@@ -157,22 +184,25 @@ export async function sendUsdcOnChain(fromAddress, toAddress, amountUsdc) {
  * USDC approve — 에스크로 컨트랙트에 지출 허가
  */
 // approve TX 컨펌 대기 헬퍼
-async function waitForReceipt(txHash, ms = 90000) {
-  const rpc = "https://sepolia.base.org";
+export async function waitForTransactionReceipt(txHash, ms = 90000) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
-    try {
-      const r = await fetch(rpc, { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jsonrpc:"2.0", id:1, method:"eth_getTransactionReceipt", params:[txHash] }) });
-      const { result } = await r.json();
-      if (result) {
-        if (result.status === "0x1") return result;
-        throw new Error("TX reverted: " + txHash);
+    for (const rpc of RPC_LIST) {
+      try {
+        const r = await fetch(rpc, { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc:"2.0", id:1, method:"eth_getTransactionReceipt", params:[txHash] }) });
+        const { result } = await r.json();
+        if (result) {
+          if (result.status === "0x1") return result;
+          throw new Error("트랜잭션이 체인에서 실패했습니다: " + txHash);
+        }
+      } catch(e) {
+        if (e.message.startsWith("트랜잭션이 체인에서 실패")) throw e;
       }
-    } catch(e) { if (e.message.startsWith("TX reverted")) throw e; }
+    }
     await new Promise(r => setTimeout(r, 2000));
   }
-  throw new Error("approve TX 컨펌 타임아웃(90s): " + txHash);
+  throw new Error("트랜잭션 확인 시간이 초과되었습니다. BaseScan에서 상태를 확인해주세요");
 }
 
 export async function approveUsdcForEscrow(fromAddress, spender, amountUsdc) {
@@ -187,7 +217,7 @@ export async function approveUsdcForEscrow(fromAddress, spender, amountUsdc) {
     params: [{ from: fromAddress, to: USDC_ADDRESS, data, gas: "0x0186A0" }],
   });
   // approve TX 체인 컨펌 대기 — userDeposit allowance 타이밍 에러 방지
-  await waitForReceipt(txHash);
+  await waitForTransactionReceipt(txHash);
   return txHash;
 }
 
