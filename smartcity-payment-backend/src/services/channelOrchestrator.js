@@ -182,22 +182,22 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
         chargedUsdc  = fareUsdc || '0';
         chargeSource = 'client_fallback_invalid_start';
         logger.warn('[Orchestrator] invalid started_at, fallback', { sessionId, rawStart });
-        return; // 아래 else 건너뜀
-      }
-      const durationMin = (Date.now() - startMs) / 60_000;
+      } else {
+        const durationMin = (Date.now() - startMs) / 60_000;
 
-      const fareResult = await fareEngine.calculateFare({
-        sessionId,
-        serviceType: sess.service_type,
-        usage: { durationMinutes: durationMin },
-      });
-      const raw = parseFloat(fareResult.fareUsdc);
-      chargedUsdc  = String(Math.min(raw, depositUsdc).toFixed(6));
-      chargeSource = 'fareengine_recalc';
-      logger.info('[Orchestrator] chargedUsdc recalculated from started_at (fallback)', {
-        sessionId, durationMin: durationMin.toFixed(2),
-        fareResult: fareResult.fareUsdc, chargedUsdc,
-      });
+        const fareResult = await fareEngine.calculateFare({
+          sessionId,
+          serviceType: sess.service_type,
+          usage: { durationMinutes: durationMin },
+        });
+        const raw = parseFloat(fareResult.fareUsdc);
+        chargedUsdc  = String(Math.min(raw, depositUsdc).toFixed(6));
+        chargeSource = 'fareengine_recalc';
+        logger.info('[Orchestrator] chargedUsdc recalculated from started_at (fallback)', {
+          sessionId, durationMin: durationMin.toFixed(2),
+          fareResult: fareResult.fareUsdc, chargedUsdc,
+        });
+      }
 
     } else {
       // ③ 최후 폴백 — 클라이언트 전달값
@@ -254,9 +254,28 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
     throw new Error(`Escrow settle failed: ${escrowErr.message}`);
   }
 
+  // holdDeadline 전이거나 아직 온체인 최종 확인이 안 된 경우 완료로 기록하지 않는다.
+  if (escrowResult?.deferred || !escrowResult?.confirmed) {
+    return {
+      deferred: true,
+      status: 'settling',
+      fareUsdc: finalFareUsdc,
+      refundUsdc: escrowResult?.refundUsdc || perunRes.refund_usdc || '0',
+      escrow: escrowResult,
+    };
+  }
+
   // ── 4. DB 정산 기록 ───────────────────────────────────────────────────────
   const refundUsdc = escrowResult?.refundUsdc || perunRes.refund_usdc || '0';
-  const txHash     = escrowResult?.txHash     || perunRes.tx_hash     || 'settled_via_perun';
+  let txHash       = escrowResult?.txHash || null;
+  if (!txHash) {
+    const db = require('./db');
+    const txRow = await db.getPool().query(
+      'SELECT settle_tx FROM escrow_locks WHERE session_id=$1',
+      [sessionId]
+    ).catch(() => ({ rows: [] }));
+    txHash = txRow.rows[0]?.settle_tx || null;
+  }
 
   await settleMgr.recordSettlement({
     sessionId, channelId,
@@ -264,6 +283,7 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
     fareUsdc:   finalFareUsdc,
     refundUsdc,
     userAddress,
+    confirmed: true,
   }).catch(() => {});
 
   logger.info('[Orchestrator] endSessionAndSettle complete', {
@@ -274,6 +294,7 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
     txHash,
     fareUsdc:   finalFareUsdc,
     refundUsdc,
+    confirmed: true,
     escrow:     escrowResult,
   };
 }

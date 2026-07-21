@@ -16,6 +16,7 @@ const sigMgr = require('../services/signatureManager');
 const sessionMgr = require('../services/sessionManager');
 const { isValidAddress } = require('../services/walletService');
 const { getSettlement } = require('../services/settlementManager');
+const { deriveDisplayStatus, DISPLAY_STATUS } = require('../services/displayStatus');
 const escrowSvc = require('../services/escrowPayoutService');
 const sseClients = require('../utils/sseClients');
 const logger = require('../utils/logger');
@@ -192,6 +193,10 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
         });
       }
       throw raceErr;
+    }
+
+    if (result?.deferred) {
+      return res.status(202).json({ ok: true, data: result });
     }
 
     sseClients.broadcast(req.body.userAddress, {
@@ -375,29 +380,58 @@ router.get('/:id/status', async (req, res, next) => {
     if (!session) return res.status(404).json({ ok: false, error: 'Session not found' });
 
     const settlement = await getSettlement(req.params.id);
+    const db = require('../services/db');
+    const stateResult = await db.getPool().query(
+      `SELECT el.state AS escrow_state, ct.status AS tx_status, ct.action AS tx_action,
+              ct.tx_hash, ct.last_error
+       FROM sessions s
+       LEFT JOIN escrow_locks el ON el.session_id=s.id
+       LEFT JOIN LATERAL (
+         SELECT status, action, tx_hash, last_error
+         FROM chain_transactions
+         WHERE session_id=s.id
+         ORDER BY created_at DESC LIMIT 1
+       ) ct ON TRUE
+       WHERE s.id=$1`,
+      [req.params.id]
+    );
+    const facts = stateResult.rows[0] || {};
+    const displayStatus = deriveDisplayStatus({
+      sessionStatus: session.status,
+      escrowState: facts.escrow_state,
+      txStatus: facts.tx_status,
+      startedAt: session.startedAt || session.started_at,
+    });
+    const stage = {
+      ACTIVE: 'deposit_complete',
+      SETTLING: 'settling',
+      COMPLETED: 'completed',
+      REFUNDED: 'refunded',
+      NEEDS_ATTENTION: 'needs_attention',
+    }[displayStatus];
 
-    // 프론트용 단계 표시
-    const stage = _deriveStage(session.status, settlement);
-
-    res.json({ ok: true, data: { session, settlement, stage } });
+    res.json({
+      ok: true,
+      data: {
+        session,
+        settlement,
+        stage,
+        displayStatus,
+        escrowState: facts.escrow_state || null,
+        txStatus: facts.tx_status || null,
+        txAction: facts.tx_action || null,
+        txHash: facts.tx_hash || settlement?.tx_hash || null,
+        txError: facts.last_error || null,
+      },
+    });
   } catch (err) { next(err); }
 });
-
-function _deriveStage(status, settlement) {
-  if (status === 'Active')           return 'deposit_complete';
-  if (status === 'Ended')            return 'session_ended';
-  if (status === 'Settling')         return 'settling';
-  if (status === 'Settled')          return settlement ? 'completed' : 'settled';
-  if (status === 'Disputed')         return 'disputed';
-  if (status === 'ForceClosed')      return 'force_closed';
-  return 'unknown';
-}
 
 
 // ── GET /sessions — 세션 목록 (결제 내역) ─────────────────────────────────────
 // Query params:
 //   userAddress (required) — 해당 지갑 주소의 세션만
-//   status      (optional) — Active|Ended|Settling|Settled|Disputed
+//   status      (optional) — ACTIVE|SETTLING|COMPLETED|REFUNDED|NEEDS_ATTENTION
 //   limit       (optional) — 기본 20, 최대 100
 //   offset      (optional) — 페이지네이션
 router.get('/', async (req, res, next) => {
@@ -409,17 +443,10 @@ router.get('/', async (req, res, next) => {
     const lim = Math.min(parseInt(limit) || 20, 100);
     const off = parseInt(offset) || 0;
 
-    // sessions + escrow_locks 조인으로 결제 정보 통합
-    const conditions = ['s.user_address = $1'];
-    const params     = [userAddress.toLowerCase()];
-    let   pidx       = 2;
-
-    if (status) {
-      conditions.push(`s.status = $${pidx++}`);
-      params.push(status);
+    const validStatuses = new Set(Object.values(DISPLAY_STATUS));
+    if (status && !validStatuses.has(status)) {
+      return res.status(400).json({ ok: false, error: `Invalid display status: ${status}` });
     }
-
-    const where = conditions.join(' AND ');
 
     const { rows } = await db.getPool().query(
       `SELECT
@@ -436,8 +463,14 @@ router.get('/', async (req, res, next) => {
          el.state         AS escrow_state,
          el.fare_amount   AS fare_usdc,
          el.user_deposit,
-         el.settle_tx     AS tx_hash,
+         el.settle_tx,
          el.hold_deadline,
+         ct.action        AS chain_action,
+         ct.status        AS chain_tx_status,
+         ct.tx_hash       AS chain_tx_hash,
+         ct.submitted_at  AS chain_submitted_at,
+         ct.confirmed_at  AS chain_confirmed_at,
+         ct.last_error    AS chain_last_error,
          -- 환불 금액 계산
          CASE
            WHEN el.user_deposit IS NOT NULL AND el.fare_amount IS NOT NULL
@@ -446,10 +479,16 @@ router.get('/', async (req, res, next) => {
          END              AS refund_usdc
        FROM sessions s
        LEFT JOIN escrow_locks el ON el.session_id = s.id
-       WHERE ${where}
-       ORDER BY s.started_at DESC
-       LIMIT $${pidx} OFFSET $${pidx + 1}`,
-      [...params, lim, off]
+       LEFT JOIN LATERAL (
+         SELECT action, status, tx_hash, submitted_at, confirmed_at, last_error
+         FROM chain_transactions
+         WHERE session_id = s.id
+         ORDER BY created_at DESC
+         LIMIT 1
+       ) ct ON TRUE
+       WHERE s.user_address = $1
+       ORDER BY s.started_at DESC`,
+      [userAddress.toLowerCase()]
     );
 
     // 서비스 타입 한글 라벨 매핑
@@ -459,34 +498,47 @@ router.get('/', async (req, res, next) => {
       parking:     { label: '주차',         emoji: '🅿️' },
     };
 
-    const sessions = rows.map(r => ({
-      id:           r.id,
-      serviceType:  r.service_type,
-      serviceLabel: SERVICE_LABELS[r.service_type]?.label || r.service_type,
-      serviceEmoji: SERVICE_LABELS[r.service_type]?.emoji || '📦',
-      status:       r.status,
-      escrowState:  r.escrow_state,
-      depositUsdc:  r.deposit_usdc ? parseFloat(r.deposit_usdc).toFixed(2) : '0.00',
-      chargedUsdc:  r.charged_usdc ? parseFloat(r.charged_usdc).toFixed(6) : '0.000000',
-      fareUsdc:     r.fare_usdc    ? parseFloat(r.fare_usdc).toFixed(6)    : null,
-      refundUsdc:   r.refund_usdc  ? parseFloat(r.refund_usdc).toFixed(6)  : null,
-      txHash:       r.tx_hash,
-      startedAt:    r.started_at,
-      endedAt:      r.ended_at,
-      settledAt:    r.settled_at,
-      holdDeadline: r.hold_deadline ? Number(r.hold_deadline) : null,
-    }));
+    const allSessions = rows.map(r => {
+      const displayStatus = deriveDisplayStatus({
+        sessionStatus: r.status,
+        escrowState: r.escrow_state,
+        txStatus: r.chain_tx_status,
+        startedAt: r.started_at,
+      });
+      return {
+        id:             r.id,
+        serviceType:    r.service_type,
+        serviceLabel:   SERVICE_LABELS[r.service_type]?.label || r.service_type,
+        serviceEmoji:   SERVICE_LABELS[r.service_type]?.emoji || '📦',
+        status:         r.status,
+        displayStatus,
+        escrowState:    r.escrow_state,
+        txAction:       r.chain_action,
+        txStatus:       r.chain_tx_status,
+        txError:        r.chain_last_error,
+        depositUsdc:    r.deposit_usdc ? parseFloat(r.deposit_usdc).toFixed(2) : '0.00',
+        chargedUsdc:    r.charged_usdc ? parseFloat(r.charged_usdc).toFixed(6) : '0.000000',
+        fareUsdc:       r.fare_usdc    ? parseFloat(r.fare_usdc).toFixed(6)    : null,
+        refundUsdc:     r.refund_usdc  ? parseFloat(r.refund_usdc).toFixed(6)  : null,
+        txHash:         r.chain_tx_hash || r.settle_tx,
+        startedAt:      r.started_at,
+        endedAt:        r.ended_at,
+        settledAt:      r.settled_at,
+        txSubmittedAt:  r.chain_submitted_at,
+        txConfirmedAt:  r.chain_confirmed_at,
+        holdDeadline:   r.hold_deadline ? new Date(r.hold_deadline).getTime() : null,
+      };
+    });
 
-    // 전체 건수
-    const { rows: countRows } = await db.getPool().query(
-      `SELECT COUNT(*) AS total FROM sessions s WHERE ${where}`,
-      params
-    );
+    const filtered = status
+      ? allSessions.filter(s => s.displayStatus === status)
+      : allSessions;
+    const sessions = filtered.slice(off, off + lim);
 
     res.json({
       ok:    true,
       data:  sessions,
-      total: parseInt(countRows[0].total),
+      total: filtered.length,
       limit: lim,
       offset: off,
     });

@@ -97,15 +97,25 @@ async function bootstrap() {
   // 스케줄러: 실패해도 계속
   try {
     const escrowSvc = require('./services/escrowPayoutService');
+    const chainTx = require('./services/chainTransactionTracker');
+    await chainTx.ensureTable();
+    let schedulerRunning = false;
     async function runPendingSettles() {
+      if (schedulerRunning) return;
+      schedulerRunning = true;
       try {
         const db = require('./services/db');
+
+        // 서버 재시작 전에 전송된 Base Sepolia TX부터 영수증/컨트랙트 상태 재검증
+        await chainTx.reconcilePendingTransactions(20);
 
         // ① holdDeadline 지난 PendingSettle → settleAndRelease (돈 잠금)
         const { rows: pendingRows } = await db.getPool().query(
           `SELECT el.session_id, el.fare_amount
            FROM escrow_locks el
+           JOIN sessions s ON s.id = el.session_id
            WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
+             AND s.status IN ('Ended','Settling')
              AND el.hold_deadline IS NOT NULL
              AND el.hold_deadline < NOW()
            LIMIT 5`
@@ -119,24 +129,11 @@ async function bootstrap() {
           }).catch(e => logger.error('Scheduler: settle fail', { sessionId: row.session_id, error: e.message }));
         }
 
-        // ② claimableAfter 지난 Reserved → claimSettlement (실제 분배)
-        //    환불 요청(RefundIssue)이 없을 때만
-        const { rows: reservedRows } = await db.getPool().query(
-          `SELECT el.session_id
-           FROM escrow_locks el
-           WHERE el.state = 'Reserved'
-             AND el.claimable_after IS NOT NULL
-             AND el.claimable_after < NOW()
-           LIMIT 5`
-        ).catch(() => ({ rows: [] }));
-
-        for (const row of reservedRows) {
-          logger.info('[Scheduler] claimSettlement 실행', { sessionId: row.session_id });
-          await escrowSvc.claimSettlement(row.session_id)
-            .catch(e => logger.error('Scheduler: claim fail', { sessionId: row.session_id, error: e.message }));
-        }
-
-      } catch (e) { logger.error('Scheduler error', { error: e.message }); }
+      } catch (e) {
+        logger.error('Scheduler error', { error: e.message });
+      } finally {
+        schedulerRunning = false;
+      }
     }
     setInterval(runPendingSettles, 30_000);  // 30초마다 실행
     setTimeout(runPendingSettles, 5_000);    // 서버 시작 5초 후 첫 실행

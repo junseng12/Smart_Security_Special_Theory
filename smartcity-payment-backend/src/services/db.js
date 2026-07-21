@@ -128,6 +128,30 @@ async function runMigrations() {
       created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    -- ── Base Sepolia TX 추적 ──────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS chain_transactions (
+      id                 BIGSERIAL PRIMARY KEY,
+      session_id         TEXT NOT NULL,
+      action             TEXT NOT NULL, -- SETTLE | REFUND
+      chain_id           BIGINT NOT NULL DEFAULT 84532,
+      contract_address   TEXT NOT NULL,
+      escrow_id          TEXT NOT NULL,
+      tx_hash            TEXT,
+      status             TEXT NOT NULL DEFAULT 'QUEUED',
+      block_number       BIGINT,
+      receipt            JSONB,
+      submitted_at       TIMESTAMPTZ,
+      confirmed_at       TIMESTAMPTZ,
+      last_checked_at    TIMESTAMPTZ,
+      last_error         TEXT,
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_chain_tx_session ON chain_transactions(session_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_chain_tx_status  ON chain_transactions(status, updated_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_chain_tx_hash
+      ON chain_transactions(tx_hash) WHERE tx_hash IS NOT NULL;
+
     -- ── 환불 케이스 ────────────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS refund_cases (
       id              TEXT PRIMARY KEY,
@@ -178,6 +202,8 @@ async function runMigrations() {
     ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS settle_tx           TEXT;
     ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS settled_at          TIMESTAMPTZ;
     ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS claimable_after     TIMESTAMPTZ;  -- V3.2
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS retry_count          INTEGER DEFAULT 0;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS last_error           TEXT;
     -- NOT NULL 없는 구버전 컬럼엔 기본값 채우기
     UPDATE escrow_locks SET operator_address = user_address WHERE operator_address IS NULL;
     UPDATE escrow_locks SET escrow_id_bytes  = '' WHERE escrow_id_bytes IS NULL;

@@ -76,6 +76,9 @@ async function processPendingSettles() {
   try {
     const db        = require('./db');
     const escrowSvc = require('./escrowPayoutService');
+    const chainTx   = require('./chainTransactionTracker');
+
+    await chainTx.reconcilePendingTransactions(20);
 
     // retry_count/last_error 컬럼 보장
     await db.getPool().query(`
@@ -87,7 +90,9 @@ async function processPendingSettles() {
     const { rows } = await db.getPool().query(
       `SELECT el.session_id, el.fare_amount
        FROM escrow_locks el
+       JOIN sessions s ON s.id = el.session_id
        WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
+         AND s.status IN ('Ended','Settling')
          AND el.hold_deadline IS NOT NULL
          AND el.hold_deadline < NOW()
          AND COALESCE(el.retry_count, 0) < 5
@@ -181,9 +186,8 @@ async function startLoop() {
   processPendingSettles();
   setInterval(processPendingSettles, 30_000);
 
-  // V3.2: ClaimSettlement 워커 (5분마다 — 24h 기간 대비 충분한 여유)
-  processClaimSettlements();
-  setInterval(processClaimSettlements, 60_000); // [TEST] 1분 폴링 (운영: 5분)
+  // 현재 배포본(0xa264...)은 settleAndRelease가 최종 분배이며
+  // claimSettlement 함수가 없으므로 별도 claim 루프를 실행하지 않는다.
 
   // 채널 모니터링
   await runWatchtower();

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -9,19 +9,20 @@ import { calcFare, calcRefund } from '@/lib/fareUtils';
 const BACKEND = "https://payment-backend-production.up.railway.app";
 
 const STATUS_CONFIG = {
-  Active:    { label: '이용 중',   color: 'bg-blue-100 text-blue-700',   dot: 'bg-blue-500'   },
-  Ended:     { label: '종료됨',    color: 'bg-yellow-100 text-yellow-700',dot: 'bg-yellow-500' },
-  Settling:  { label: '정산 중',   color: 'bg-orange-100 text-orange-700',dot: 'bg-orange-500' },
-  Settled:   { label: '정산 완료', color: 'bg-green-100 text-green-700',  dot: 'bg-green-500'  },
-  Disputed:  { label: '분쟁',      color: 'bg-red-100 text-red-700',      dot: 'bg-red-500'    },
-  ForceClosed:{ label: '강제종료', color: 'bg-gray-100 text-gray-700',    dot: 'bg-gray-400'   },
+  ACTIVE:          { label: '이용 중',   color: 'bg-blue-100 text-blue-700'     },
+  SETTLING:        { label: '정산 중',   color: 'bg-orange-100 text-orange-700' },
+  COMPLETED:       { label: '정산 완료', color: 'bg-green-100 text-green-700'   },
+  REFUNDED:        { label: '환불 완료', color: 'bg-emerald-100 text-emerald-700' },
+  NEEDS_ATTENTION: { label: '확인 필요', color: 'bg-red-100 text-red-700'       },
 };
 
 const FILTERS = [
-  { key: 'all',      label: '전체'   },
-  { key: 'Active',   label: '이용 중' },
-  { key: 'Settled',  label: '완료'   },
-  { key: 'Settling', label: '정산 중' },
+  { key: 'all',             label: '전체'      },
+  { key: 'ACTIVE',          label: '이용 중'   },
+  { key: 'SETTLING',        label: '정산 중'   },
+  { key: 'COMPLETED',       label: '완료'      },
+  { key: 'REFUNDED',        label: '환불 완료' },
+  { key: 'NEEDS_ATTENTION', label: '확인 필요' },
 ];
 
 async function fetchSessions(userAddress, status) {
@@ -140,7 +141,8 @@ export default function TransactionHistory() {
           <AnimatePresence>
             <div className="space-y-2">
               {sessions.map((s, i) => {
-                const status = STATUS_CONFIG[s.status] || STATUS_CONFIG.Active;
+                const status = STATUS_CONFIG[s.displayStatus] || STATUS_CONFIG.NEEDS_ATTENTION;
+                const isActive = s.displayStatus === 'ACTIVE';
                 const isOpen = expanded === s.id;
                 return (
                   <motion.div key={s.id}
@@ -162,10 +164,10 @@ export default function TransactionHistory() {
                       </div>
                       <div className="text-right flex-shrink-0">
                         <div className="font-bold text-gray-900 text-sm">
-                          {(s.status === 'Active') ? `-${parseFloat(s.depositUsdc || 0).toFixed(2)}` : `-${calcFare(s).toFixed(4)}`}
+                          {isActive ? `-${parseFloat(s.depositUsdc || 0).toFixed(2)}` : `-${calcFare(s).toFixed(4)}`}
                           <span className="text-xs text-gray-400 ml-0.5">USDC</span>
                         </div>
-                        {s.status !== 'Active' && calcRefund(s) > 0 && (
+                        {!isActive && calcRefund(s) > 0 && (
                           <div className="text-xs text-green-600 font-medium">
                             +{calcRefund(s).toFixed(4)} 환불
                           </div>
@@ -197,13 +199,13 @@ export default function TransactionHistory() {
                           <span>보증금</span>
                           <span className="text-gray-700">{parseFloat(s.depositUsdc || 0).toFixed(2)} USDC</span>
                         </div>
-                        {s.status !== 'Active' && calcFare(s) > 0 && (
+                        {!isActive && calcFare(s) > 0 && (
                           <div className="flex justify-between text-gray-500">
                             <span>이용 요금</span>
                             <span className="text-gray-700">{calcFare(s).toFixed(4)} USDC</span>
                           </div>
                         )}
-                        {s.status !== 'Active' && calcRefund(s) > 0 && (
+                        {!isActive && calcRefund(s) > 0 && (
                           <div className="flex justify-between text-gray-500">
                             <span>환불 금액</span>
                             <span className="text-green-600 font-medium">{calcRefund(s).toFixed(4)} USDC</span>
@@ -213,6 +215,15 @@ export default function TransactionHistory() {
                           <span>에스크로 상태</span>
                           <span className="text-gray-700">{s.escrowState || '-'}</span>
                         </div>
+                        <div className="flex justify-between text-gray-500">
+                          <span>Base TX 상태</span>
+                          <span className="text-gray-700">{s.txStatus || '-'}</span>
+                        </div>
+                        {s.txError && (
+                          <div className="rounded-lg bg-red-50 p-2 text-red-600 break-all">
+                            {s.txError}
+                          </div>
+                        )}
                         {s.txHash && s.txHash !== 'settled_via_perun' && (
                           <a href={`https://sepolia.basescan.org/tx/${s.txHash}`}
                             target="_blank" rel="noreferrer"

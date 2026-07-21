@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'framer-motion';
-import { Zap, AlertTriangle, LogOut, ChevronRight, RefreshCw } from 'lucide-react';
+import { AlertTriangle, LogOut, ChevronRight, RefreshCw } from 'lucide-react';
 import BottomNav from '@/components/wallet/BottomNav';
 import BalanceCard from '@/components/wallet/BalanceCard';
 import QuickActions from '@/components/wallet/QuickActions';
@@ -16,10 +16,11 @@ const PROC_KEY    = "payment_processing";
 
 const SERVICE_EMOJI = { bicycle: '🚲', ev_charging: '⚡', parking: '🅿️' };
 const STATUS_COLOR  = {
-  Active:   'text-blue-600',
-  Settled:  'text-green-600',
-  Settling: 'text-orange-600',
-  Ended:    'text-gray-500',
+  ACTIVE:          'text-blue-600',
+  COMPLETED:       'text-green-600',
+  REFUNDED:        'text-emerald-600',
+  SETTLING:        'text-orange-600',
+  NEEDS_ATTENTION: 'text-red-500',
 };
 
 async function fetchRecentSessions(userAddress) {
@@ -246,13 +247,13 @@ export default function Dashboard() {
                       <div className="text-xs text-gray-400">{formatDate(s.startedAt)}</div>
                     </div>
                     <div className="text-right flex-shrink-0">
-                      <div className={`text-sm font-bold ${STATUS_COLOR[s.status] || 'text-gray-700'}`}>
-                        {s.status === 'Active'
+                      <div className={`text-sm font-bold ${STATUS_COLOR[s.displayStatus] || 'text-gray-700'}`}>
+                        {s.displayStatus === 'ACTIVE'
                           ? `${parseFloat(s.depositUsdc||0).toFixed(2)} USDC`
                           : `-${calcFare(s).toFixed(4)} USDC`
                         }
                       </div>
-                      {s.status !== 'Active' && calcRefund(s) > 0 && (
+                      {s.displayStatus !== 'ACTIVE' && calcRefund(s) > 0 && (
                         <div className="text-xs text-green-600">+{calcRefund(s).toFixed(4)} 환불</div>
                       )}
                     </div>

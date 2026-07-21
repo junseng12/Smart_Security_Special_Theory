@@ -18,6 +18,7 @@
 
 const { ethers } = require('ethers');
 const logger     = require('../utils/logger');
+const chainTx    = require('./chainTransactionTracker');
 
 const ESCROW_ADDR = process.env.ESCROW_CONTRACT_ADDRESS || '0xa2642876a2Aa9F19D22a6e69379bbcA10556977f';
 const USDC_ADDR   = process.env.USDC_CONTRACT_ADDRESS   || '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
@@ -62,6 +63,28 @@ function getUsdc(sw)    { return new ethers.Contract(USDC_ADDR, ERC20_ABI, sw); 
 function toEscrowId(id) { return ethers.keccak256(ethers.toUtf8Bytes(id)); }
 function getPool()      { return require('./db').getPool(); }
 
+async function executeTrackedFinalTx({ sessionId, action, send }) {
+  const tracking = await chainTx.queueTransaction({ sessionId, action });
+  try {
+    const tx = await send();
+    await chainTx.markSubmitted(tracking.id, tx.hash);
+    const receipt = await tx.wait();
+    const verification = await chainTx.confirmTransaction(tracking.id, receipt);
+    if (!verification.confirmed) {
+      throw new Error(`On-chain ${action} verification failed: ${verification.reason}`);
+    }
+    return { receipt, verification };
+  } catch (err) {
+    const reverted = err?.code === 'CALL_EXCEPTION' || Number(err?.receipt?.status) === 0;
+    await chainTx.markProblem(
+      tracking.id,
+      reverted ? 'REVERTED' : 'NEEDS_REVIEW',
+      err.message
+    ).catch(() => {});
+    throw err;
+  }
+}
+
 async function ensureTable() {
   await getPool().query(`
     CREATE TABLE IF NOT EXISTS escrow_locks (
@@ -86,7 +109,9 @@ async function ensureTable() {
       fare_amount         NUMERIC(18,6) DEFAULT 0,
       retry_count         INTEGER DEFAULT 0,
       last_error          TEXT
-    )
+    );
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
+    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS last_error TEXT;
   `).catch(() => {});
 }
 
@@ -139,12 +164,23 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
     }
   }
 
+  // DB에는 추정값이 아니라 최종 온체인 상태를 기록한다.
+  let finalOnchainState = onchainState;
+  try {
+    const finalStatus = await escrow.getEscrowStatus(escrowId);
+    finalOnchainState = Number(finalStatus[0]);
+  } catch (e) {
+    logger.warn('recordUserDeposit: final state lookup failed', { sessionId, error: e.message });
+  }
+  const finalStateLabel = STATE_LABELS[finalOnchainState] || 'None';
+  const operatorDepositUsdc = finalOnchainState >= 2 ? (depositUsdc || '3') : '0';
+
   await getPool().query(
     `INSERT INTO escrow_locks
        (session_id, escrow_id_bytes, channel_id, user_address, operator_address,
         user_deposit, operator_deposit, amount_usdc, hold_deadline,
         user_deposit_tx, operator_deposit_tx, state)
-     VALUES ($1,$2,$3,$4,$5,$6,$6,$6,to_timestamp($7),$8,$9,'FullyFunded')
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$6,to_timestamp($8),$9,$10,$11)
      ON CONFLICT (session_id) DO UPDATE SET
        user_deposit        = EXCLUDED.user_deposit,
        operator_deposit    = EXCLUDED.operator_deposit,
@@ -152,15 +188,15 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
        hold_deadline       = EXCLUDED.hold_deadline,
        user_deposit_tx     = COALESCE(EXCLUDED.user_deposit_tx, escrow_locks.user_deposit_tx),
        operator_deposit_tx = COALESCE(EXCLUDED.operator_deposit_tx, escrow_locks.operator_deposit_tx),
-       state               = 'FullyFunded'`,
+       state               = EXCLUDED.state`,
     [sessionId, escrowId, channelId, userAddress, operator,
-     depositUsdc || '3', deadline, userDepTx, opDepTx]
+     depositUsdc || '3', operatorDepositUsdc, deadline, userDepTx, opDepTx, finalStateLabel]
   ).catch(e => logger.warn('DB upsert 오류', { error: e.message }));
 
   return {
     escrowId, sessionId, depositUsdc,
     holdDeadline: new Date(deadline * 1000).toISOString(),
-    userDepTx, opDepTx,
+    userDepTx, opDepTx, state: finalStateLabel,
   };
 }
 
@@ -176,7 +212,7 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   const escrowId = toEscrowId(sessionId);
 
   // 온체인 상태 확인
-  let state = 0, deadline = 0, isFullyFunded = false, isDeadlinePassed = false;
+  let state = null, deadline = 0, isFullyFunded = false, isDeadlinePassed = false;
   try {
     const s      = await escrow.getEscrowStatus(escrowId);
     state           = Number(s[0]);
@@ -188,11 +224,18 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     });
   } catch (e) {
     logger.warn('getEscrowStatus 실패', { sessionId, error: e.message });
+    throw new Error(`Escrow state lookup failed: ${e.message}`);
   }
 
   // 이미 정산 완료
   if (state === 4 /* Released */ || state === 5 /* Refunded */) {
-    return { skipped: true, reason: 'already_settled', state: STATE_LABELS[state] };
+    await chainTx.syncFinalState(sessionId, STATE_LABELS[state]);
+    return {
+      skipped: true,
+      confirmed: true,
+      reason: 'already_settled',
+      state: STATE_LABELS[state],
+    };
   }
 
   // 온체인 에스크로 없음
@@ -232,30 +275,15 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     }
   }
 
-  // holdDeadline 대기
+  // holdDeadline 전에는 DB에 예약만 남긴다. 실제 실행은 재시작 가능한 스케줄러가 담당한다.
   if (!isDeadlinePassed && deadline > 0) {
     const waitMs = deadline * 1000 - Date.now();
-    if (waitMs > 300_000) {
-      // 5분 초과 → 비동기 처리 (나중에 watchtower가 처리)
+    if (waitMs > 0) {
       await getPool().query(
         `UPDATE escrow_locks SET state='PendingSettle', fare_amount=$2 WHERE session_id=$1`,
         [sessionId, fareUsdc || '0']
       ).catch(() => {});
-      // 백그라운드 타이머
-      setTimeout(async () => {
-        try {
-          logger.info('BG settleAndRelease 시작', { sessionId, waitMs });
-          await new Promise(r => setTimeout(r, waitMs + 3000));
-          await settleAndRelease({ sessionId, fareUsdc });
-        } catch (e) {
-          logger.error('BG settle 실패', { sessionId, error: e.message });
-        }
-      }, 0);
       return { deferred: true, reason: 'pending_deadline', waitMs, fareUsdc };
-    } else if (waitMs > 0) {
-      // 5분 이내 → 그냥 대기
-      logger.info('holdDeadline 대기 중', { sessionId, waitSec: Math.ceil(waitMs / 1000) });
-      await new Promise(r => setTimeout(r, waitMs + 2000));
     }
   }
 
@@ -264,10 +292,13 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     String(Math.max(parseFloat(fareUsdc || '0'), 0.01).toFixed(6)), 6
   );
 
-  let receipt;
+  let receipt, verification;
   try {
-    const tx = await escrow.settleAndRelease(escrowId, fareWei, { gasLimit: 250000 });
-    receipt  = await tx.wait();
+    ({ receipt, verification } = await executeTrackedFinalTx({
+      sessionId,
+      action: 'SETTLE',
+      send: () => escrow.settleAndRelease(escrowId, fareWei, { gasLimit: 250000 }),
+    }));
     logger.info('settleAndRelease OK', { sessionId, tx: receipt.hash });
   } catch (e) {
     logger.error('settleAndRelease revert', { sessionId, error: e.message.slice(0, 300) });
@@ -277,13 +308,6 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     ).catch(() => {});
     throw e;
   }
-
-  // 정산 후 온체인 상태 재확인
-  let finalState = 4;
-  try {
-    const sf = await escrow.getEscrowStatus(escrowId);
-    finalState = Number(sf[0]);
-  } catch (_) {}
 
   // 실제 환불 금액 = userDeposit - fare (온체인 값 기반)
   let depositNum = 3.0; // 기본값
@@ -297,15 +321,16 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
   const refundUsdc = String(Math.max(depositNum - fareNum, 0).toFixed(6));
 
   await getPool().query(
-    `UPDATE escrow_locks SET state='Released', settle_tx=$2, settled_at=NOW(), fare_amount=$3 WHERE session_id=$1`,
-    [sessionId, receipt.hash, fareUsdc || '0']
+    'UPDATE escrow_locks SET fare_amount=$2 WHERE session_id=$1',
+    [sessionId, fareUsdc || '0']
   ).catch(() => {});
 
   return {
     txHash:     receipt.hash,
     fareUsdc:   String(fareNum),
     refundUsdc,
-    state:      STATE_LABELS[finalState],
+    state:      verification.onchain.stateLabel,
+    confirmed:  true,
     mode:       'v32_settle_and_release',
   };
 }
@@ -343,25 +368,32 @@ async function refundToBuyer(sessionId, caseId, refundFare) {
   const escrow   = getEscrow(wallet);
   const escrowId = toEscrowId(sessionId);
 
-  let state = 0;
+  let state = null;
   try {
     const s = await escrow.getEscrowStatus(escrowId);
     state = Number(s[0]);
     logger.info('refundToBuyer: 온체인 상태', { sessionId, state: STATE_LABELS[state] });
   } catch (e) {
-    logger.warn('getEscrowStatus 실패', { sessionId });
+    logger.warn('getEscrowStatus 실패', { sessionId, error: e.message });
+    throw new Error(`Escrow state lookup failed: ${e.message}`);
   }
 
   if (state === 0) {
     await getPool().query(
-      `UPDATE escrow_locks SET state='Refunded', settled_at=NOW(), case_id=$2 WHERE session_id=$1`,
+      `UPDATE escrow_locks SET state='SettleFailed', last_error='no_onchain_escrow', case_id=$2 WHERE session_id=$1`,
       [sessionId, caseId]
     ).catch(() => {});
-    return { skipped: true, reason: 'no_onchain_escrow' };
+    return { skipped: true, confirmed: false, reason: 'no_onchain_escrow' };
   }
 
   if (state === 4 || state === 5) {
-    return { skipped: true, reason: 'already_settled', state: STATE_LABELS[state] };
+    await chainTx.syncFinalState(sessionId, STATE_LABELS[state]);
+    return {
+      skipped: true,
+      confirmed: true,
+      reason: 'already_settled',
+      state: STATE_LABELS[state],
+    };
   }
 
   // FullyFunded(2) 상태 → 먼저 registerRefundIssue 필요
@@ -380,14 +412,17 @@ async function refundToBuyer(sessionId, caseId, refundFare) {
   // UserDeposited(1) → forceRefund 직접 사용
   if (state === 1) {
     try {
-      const ft = await escrow.forceRefund(escrowId, { gasLimit: 200000 });
-      const fr = await ft.wait();
+      const { receipt: fr } = await executeTrackedFinalTx({
+        sessionId,
+        action: 'REFUND',
+        send: () => escrow.forceRefund(escrowId, { gasLimit: 200000 }),
+      });
       await getPool().query(
-        `UPDATE escrow_locks SET state='Refunded', settle_tx=$2, settled_at=NOW(), case_id=$3 WHERE session_id=$1`,
-        [sessionId, fr.hash, caseId]
+        `UPDATE escrow_locks SET case_id=$2 WHERE session_id=$1`,
+        [sessionId, caseId]
       ).catch(() => {});
       logger.info('forceRefund OK (UserDeposited→Refunded)', { sessionId, tx: fr.hash });
-      return { txHash: fr.hash, mode: 'force_refund' };
+      return { txHash: fr.hash, confirmed: true, state: 'Refunded', mode: 'force_refund' };
     } catch (e) {
       logger.error('forceRefund 실패', { sessionId, error: e.message });
       throw e;
@@ -398,16 +433,19 @@ async function refundToBuyer(sessionId, caseId, refundFare) {
   const refundFareWei = refundFare != null
     ? ethers.parseUnits(String(parseFloat(refundFare).toFixed(6)), 6)
     : 0n;
-  const tx = await escrow.refundToBuyer(escrowId, refundFareWei, { gasLimit: 200000 });
-  const r  = await tx.wait();
+  const { receipt: r } = await executeTrackedFinalTx({
+    sessionId,
+    action: 'REFUND',
+    send: () => escrow.refundToBuyer(escrowId, refundFareWei, { gasLimit: 200000 }),
+  });
 
   await getPool().query(
-    `UPDATE escrow_locks SET state='Refunded', settle_tx=$2, settled_at=NOW(), case_id=$3 WHERE session_id=$1`,
-    [sessionId, r.hash, caseId]
+    `UPDATE escrow_locks SET case_id=$2 WHERE session_id=$1`,
+    [sessionId, caseId]
   ).catch(() => {});
 
   logger.info('refundToBuyer OK', { sessionId, tx: r.hash });
-  return { txHash: r.hash, mode: 'refund_to_buyer' };
+  return { txHash: r.hash, confirmed: true, state: 'Refunded', mode: 'refund_to_buyer' };
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -419,22 +457,33 @@ async function forceRefundOnchain(sessionId) {
   const escrow   = getEscrow(wallet);
   const escrowId = toEscrowId(sessionId);
 
-  let state = 0;
-  try { const s = await escrow.getEscrowStatus(escrowId); state = Number(s[0]); } catch (_) {}
+  let state = null;
+  try {
+    const s = await escrow.getEscrowStatus(escrowId);
+    state = Number(s[0]);
+  } catch (e) {
+    throw new Error(`Escrow state lookup failed: ${e.message}`);
+  }
 
   if (state === 0) return { skipped: true, reason: 'no_onchain_escrow' };
-  if (state === 4 || state === 5) return { skipped: true, reason: 'already_settled', state: STATE_LABELS[state] };
+  if (state === 4 || state === 5) {
+    await chainTx.syncFinalState(sessionId, STATE_LABELS[state]);
+    return {
+      skipped: true,
+      confirmed: true,
+      reason: 'already_settled',
+      state: STATE_LABELS[state],
+    };
+  }
 
-  const tx = await escrow.forceRefund(escrowId, { gasLimit: 200000 });
-  const r  = await tx.wait();
-
-  await getPool().query(
-    `UPDATE escrow_locks SET state='Refunded', settle_tx=$2, settled_at=NOW() WHERE session_id=$1`,
-    [sessionId, r.hash]
-  ).catch(() => {});
+  const { receipt: r } = await executeTrackedFinalTx({
+    sessionId,
+    action: 'REFUND',
+    send: () => escrow.forceRefund(escrowId, { gasLimit: 200000 }),
+  });
 
   logger.info('forceRefund OK', { sessionId, tx: r.hash });
-  return { txHash: r.hash, mode: 'force_refund' };
+  return { txHash: r.hash, confirmed: true, state: 'Refunded', mode: 'force_refund' };
 }
 
 // ─────────────────────────────────────────────────────────────────

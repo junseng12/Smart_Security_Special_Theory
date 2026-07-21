@@ -17,7 +17,9 @@ router.get('/settle-pending', async (req, res) => {
     const { rows } = await getPool().query(`
       SELECT el.session_id, el.fare_amount, el.hold_deadline, el.user_deposit
       FROM escrow_locks el
+      JOIN sessions s ON s.id = el.session_id
       WHERE el.state = 'PendingSettle'
+        AND s.status IN ('Ended','Settling')
         AND (
           el.hold_deadline IS NULL
           OR EXTRACT(EPOCH FROM el.hold_deadline) <= $1

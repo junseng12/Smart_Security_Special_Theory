@@ -39,7 +39,16 @@ async function ensureSettlementTable() {
  * @param {object} params.finalState  - { nonce, balances: { user, operator }, ... }
  * @param {string} params.userAddress
  */
-async function recordSettlement({ sessionId, channelId, txHash, finalState, userAddress, fareUsdc, refundUsdc }) {
+async function recordSettlement({
+  sessionId,
+  channelId,
+  txHash,
+  finalState,
+  userAddress,
+  fareUsdc,
+  refundUsdc,
+  confirmed = false,
+}) {
   await ensureSettlementTable();
 
   // go-perun 모드: fareUsdc / refundUsdc 직접 전달
@@ -61,53 +70,30 @@ async function recordSettlement({ sessionId, channelId, txHash, finalState, user
 
   await getPool().query(
     `INSERT INTO settlements
-     (session_id, channel_id, tx_hash, status, final_nonce, user_refund_usdc, operator_earn_usdc, final_state)
-     VALUES ($1, $2, $3, 'pending', $4, $5, $6, $7)`,
-    [sessionId, channelId, txHash, finalNonce, userRefundUsdc, operatorEarnUsdc, JSON.stringify(finalState)]
+     (session_id, channel_id, tx_hash, status, final_nonce, user_refund_usdc,
+      operator_earn_usdc, final_state, confirmed_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, CASE WHEN $4='confirmed' THEN NOW() ELSE NULL END)`,
+    [
+      sessionId,
+      channelId,
+      txHash,
+      confirmed ? 'confirmed' : 'pending',
+      finalNonce,
+      userRefundUsdc,
+      operatorEarnUsdc,
+      JSON.stringify(finalState),
+    ]
   );
 
-  logger.info('Settlement recorded', { sessionId, txHash, userRefundUsdc, operatorEarnUsdc });
-
-  // TX 확인 대기 (비동기 백그라운드)
-  _waitForConfirmation(sessionId, txHash).catch((err) =>
-    logger.error('Settlement confirmation error', { sessionId, error: err.message })
-  );
+  logger.info('Settlement recorded', {
+    sessionId,
+    txHash,
+    status: confirmed ? 'confirmed' : 'pending',
+    userRefundUsdc,
+    operatorEarnUsdc,
+  });
 
   return { userRefundUsdc, operatorEarnUsdc };
-}
-
-/**
- * TX 확인 대기 (Base RPC polling)
- */
-async function _waitForConfirmation(sessionId, txHash, maxAttempts = 30) {
-  const { ethers } = require('ethers');
-  const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL);
-
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise((r) => setTimeout(r, 5000)); // 5초마다 체크
-    try {
-      const receipt = await provider.getTransactionReceipt(txHash);
-      if (receipt) {
-        const success = receipt.status === 1;
-        await getPool().query(
-          `UPDATE settlements
-           SET status = $2, confirmed_at = NOW()
-           WHERE session_id = $1 AND tx_hash = $3`,
-          [sessionId, success ? 'confirmed' : 'failed', txHash]
-        );
-        logger.info('Settlement TX confirmed', { sessionId, txHash, success });
-        return;
-      }
-    } catch (err) {
-      logger.warn('TX receipt check failed', { attempt: i + 1, error: err.message });
-    }
-  }
-
-  logger.error('Settlement TX confirmation timeout', { sessionId, txHash });
-  await getPool().query(
-    `UPDATE settlements SET status = 'failed' WHERE session_id = $1 AND tx_hash = $2`,
-    [sessionId, txHash]
-  );
 }
 
 /**
