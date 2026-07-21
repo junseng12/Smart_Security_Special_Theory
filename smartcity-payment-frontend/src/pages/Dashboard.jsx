@@ -197,12 +197,15 @@ export default function Dashboard() {
           </motion.div>
         )}
 
-        {/* 잔액 카드 */}
-        <BalanceCard balance={mmBalance} address={mmAddress}
-          showBalance={showBalance} onToggle={() => setShowBalance(b => !b)} />
+        {/* 지갑 기능 */}
+        {mmAddress && (
+          <>
+            <BalanceCard balance={mmBalance} address={mmAddress}
+              showBalance={showBalance} onToggle={() => setShowBalance(b => !b)} />
 
-        {/* 빠른 액션 */}
-        <QuickActions address={mmAddress} />
+            <QuickActions address={mmAddress} />
+          </>
+        )}
 
         {/* ── 최근 결제 내역 ───────────────────────────────────────── */}
         {mmAddress && (
