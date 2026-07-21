@@ -264,7 +264,7 @@ export default function Dashboard() {
         )}
 
       </div>
-      <BottomNav />
+      {mmAddress && <BottomNav />}
     </div>
   );
 }
