@@ -3,7 +3,11 @@
  * DB fareUsdc/refundUsdc가 0이거나 없을 때 프론트에서 직접 재계산하는 공통 유틸
  */
 
-const RATE_PER_MIN = 0.1; // 0.1 USDC/분
+const RATE_PER_MIN = {
+  bicycle: 0.1,
+  parking: 0.02,
+  ev_charging: (7 * 0.25) / 60,
+};
 
 /**
  * 이용 요금 계산
@@ -20,8 +24,9 @@ export function calcFare(s) {
   if (start && end) {
     const mins = (new Date(end) - new Date(start)) / 60_000;
     if (mins > 0) {
+      const rate = RATE_PER_MIN[s.serviceType || s.service_type] || RATE_PER_MIN.bicycle;
       return Math.min(
-        Math.round(mins * RATE_PER_MIN * 1_000_000) / 1_000_000,
+        Math.max(0.01, Math.round(mins * rate * 1_000_000) / 1_000_000),
         deposit
       );
     }

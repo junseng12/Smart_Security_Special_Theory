@@ -275,22 +275,26 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     }
   }
 
+  const parsedFare = Number(fareUsdc);
+  if (!Number.isFinite(parsedFare) || parsedFare < 0.01) {
+    throw new Error(`Invalid settlement fare: ${fareUsdc}`);
+  }
+  const normalizedFareUsdc = parsedFare.toFixed(6);
+
   // holdDeadline 전에는 DB에 예약만 남긴다. 실제 실행은 재시작 가능한 스케줄러가 담당한다.
   if (!isDeadlinePassed && deadline > 0) {
     const waitMs = deadline * 1000 - Date.now();
     if (waitMs > 0) {
       await getPool().query(
         `UPDATE escrow_locks SET state='PendingSettle', fare_amount=$2 WHERE session_id=$1`,
-        [sessionId, fareUsdc || '0']
+        [sessionId, normalizedFareUsdc]
       ).catch(() => {});
-      return { deferred: true, reason: 'pending_deadline', waitMs, fareUsdc };
+      return { deferred: true, reason: 'pending_deadline', waitMs, fareUsdc: normalizedFareUsdc };
     }
   }
 
   // settleAndRelease 실행
-  const fareWei = ethers.parseUnits(
-    String(Math.max(parseFloat(fareUsdc || '0'), 0.01).toFixed(6)), 6
-  );
+  const fareWei = ethers.parseUnits(normalizedFareUsdc, 6);
 
   let receipt, verification;
   try {
@@ -317,17 +321,17 @@ async function settleAndRelease({ sessionId, fareUsdc }) {
     );
     if (dbRow.rows[0]?.user_deposit) depositNum = parseFloat(dbRow.rows[0].user_deposit);
   } catch(_) {}
-  const fareNum    = parseFloat(fareUsdc || '0.01');
+  const fareNum    = parsedFare;
   const refundUsdc = String(Math.max(depositNum - fareNum, 0).toFixed(6));
 
   await getPool().query(
     'UPDATE escrow_locks SET fare_amount=$2 WHERE session_id=$1',
-    [sessionId, fareUsdc || '0']
+    [sessionId, normalizedFareUsdc]
   ).catch(() => {});
 
   return {
     txHash:     receipt.hash,
-    fareUsdc:   String(fareNum),
+    fareUsdc:   normalizedFareUsdc,
     refundUsdc,
     state:      verification.onchain.stateLabel,
     confirmed:  true,

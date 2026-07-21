@@ -6,7 +6,7 @@
  *   - 무료 시간 없음 (freeMinutes = 0)
  *   - 매 N분 증분(incremental)으로 호출됨 → 각 호출마다 독립 계산
  *   - 요금 = durationMinutes * ratePerMinute (소수점 분 포함)
- *   - 최소 요금 = ratePerMinute (1분 요금, 즉 1초라도 과금)
+ *   - 최소 요금 = 0.01 USDC
  *
  * policyId 체계:
  *   "active_{serviceType}" 고정 → ON CONFLICT DO UPDATE 항상 작동
@@ -19,15 +19,16 @@ const { getPool } = require('./db');
 // ── 현재 활성 정책 (Perun 마이크로 페이먼트 기준) ─────────────────────────────
 const ACTIVE_POLICIES = {
   bicycle: {
-    version: 'v3.0',
+    version: 'v3.1',
     type: 'time_based',
-    ratePerMinute: 0.01,     // USDC/분 (숫자형 — 문자열 파싱 버그 방지)
+    ratePerMinute: 0.10,
+    minimumFare: 0.01,
     cap: 5.00,
     freeMinutes: 0,          // 무료 없음
     penaltyLate: 1.00,
   },
   ev_charging: {
-    version: 'v3.0',
+    version: 'v3.1',
     type: 'energy_based',
     ratePerKwh: 0.25,
     cap: 20.00,
@@ -35,9 +36,10 @@ const ACTIVE_POLICIES = {
     sessionFee: 0.00,
   },
   parking: {
-    version: 'v3.0',
+    version: 'v3.1',
     type: 'time_based',
     ratePerMinute: 0.02,
+    minimumFare: 0.01,
     cap: 10.00,
     freeMinutes: 0,
     penaltyOverstay: 2.00,
@@ -119,12 +121,10 @@ async function calculateFare({ sessionId, serviceType, usage }) {
 
   if (policy.type === 'time_based') {
     const rawMinutes = Math.max(0, usage.durationMinutes || 0);
-    // 1분 단위 올림 (Perun ProposeUsageUpdate 주기와 동일)
-    // 30초 이상이면 1분으로 올림, 그 미만이면 0 (이용 안 한 것)
-    // 무조건 올림(ceil) + 최소 1분 보장 — 1초라도 이용했으면 0.01 USDC 청구 (Perun 1분 주기 정합)
-    const minutes = Math.max(1, Math.ceil(rawMinutes));
-    // freeMinutes = 0이므로 그냥 전체 시간 과금
-    baseFare = minutes * policy.ratePerMinute;
+    // 실제 사용 시간을 소수 분 단위로 계산한다.
+    const minutes = rawMinutes;
+    // 아주 짧은 이용에는 최소 0.01 USDC만 적용한다.
+    baseFare = Math.max(policy.minimumFare || 0, minutes * policy.ratePerMinute);
 
     // 패널티 (종료 시 한번만 적용)
     if (usage.isLate && policy.penaltyLate) {

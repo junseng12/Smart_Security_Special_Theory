@@ -20,7 +20,11 @@ const SERVICE_META = {
   parking:     { label: "주차",         emoji: "🅿️", depositUsdc: 2.0 },
 };
 
-const RATE_PER_MIN = 0.01; // USDC/분 — 분당 0.01 USDC, 완성된 분 단위(floor)
+const RATE_PER_MIN = {
+  bicycle: 0.1,
+  parking: 0.02,
+  ev_charging: (7 * 0.25) / 60,
+};
 
 const SERVICE_TYPES = [
   { id: "bicycle",     label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0, deviceId: "BIKE-001" },
@@ -458,14 +462,13 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       }
 
       addLog("④ 예치 기록 중...", "info");
-      const resumeStartedAt = Date.now(); // deposit 완료 시점이 실제 서비스 시작
-      await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
+      const depositResult = await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
         channelId, userAddress: addr,
         operatorAddress: OPERATOR_ADDRESS,
         depositUsdc: String(svc.depositUsdc),
         holdDeadline, depositTxHash: proc.depositTxHash,
-        serviceStartedAt: resumeStartedAt,
       });
+      const resumeStartedAt = Number(depositResult.serviceStartedAt) || Date.now();
       addLog("✅ 예치 완료! 서비스 시작", "success");
       const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash: proc.depositTxHash,
         startedAt: resumeStartedAt, totalCharged: 0 };
@@ -517,14 +520,13 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "deposited", depositTxHash, startedAt: null });
 
       addLog("④ 예치 기록 중...", "info");
-      const serviceStartedAt = Date.now(); // ★ 실제 서비스 시작 시점 (MetaMask 서명 시간 제외)
-      await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
+      const depositResult = await apiCall(`/api/v1/sessions/${sessionId}/deposit`, "POST", {
         channelId, userAddress: addr,
         operatorAddress: OPERATOR_ADDRESS,
         depositUsdc: String(svc.depositUsdc),
         holdDeadline, depositTxHash,
-        serviceStartedAt, // 백엔드 DB started_at 동기화
       });
+      const serviceStartedAt = Number(depositResult.serviceStartedAt) || Date.now();
       addLog("✅ 예치 완료! 서비스 시작", "success");
 
       const sd = { sessionId, channelId, escrowId, holdDeadline, svc, status: "active", depositTxHash, startedAt: serviceStartedAt, totalCharged: 0 };
@@ -541,16 +543,14 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
   // ── Charge 자동 청구 ──────────────────────────────────────────────────────────
   // sessionDataRef 사용 → 의존성 배열 고정 → interval이 재생성되지 않음
-  // liveCharged — 분 단위 스텝 계산
-  // ProposeUsageUpdate(60초 1회)와 화면 표시를 일치시킴
-  // elapsed가 60초 넘을 때마다 0.01 USDC씩 계단식으로 올라감
-  const elapsedMinutes = Math.floor(elapsed / 60); // 완성된 분만 카운트
+  // liveCharged — 서버 정책과 동일한 소수 분 단위 계산
   const liveCharged = (() => {
     const sd = sessionDataRef.current;
     if (!sd) return totalCharged;
     const depositUsdc = parseFloat(sd.svc?.depositUsdc || 3.0);
+    const rate = RATE_PER_MIN[sd.svc?.serviceType] || RATE_PER_MIN.bicycle;
     return Math.min(
-      Math.floor(elapsedSec / 60) * RATE_PER_MIN, // 완성된 분 단위: 0.01, 0.02, 0.03...
+      Math.max(0.01, (elapsed / 60) * rate),
       depositUsdc
     );
   })();
@@ -565,12 +565,13 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       // 오프체인 누적 nonce 확인 (로그용)
       const activeSession = JSON.parse(localStorage.getItem("active_session") || "{}");
       const nonces = activeSession.chargedNonce || 0;
+      const finalElapsedSec = elapsed;
       addLog(`① 세션 종료 요청... (오프체인 서명 누적: ${nonces}회)`, "info");
       const res = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
         channelId:    sessionData.channelId,
         userAddress:  mmAddress || localStorage.getItem("mm_address"),
         userFinalSig: String(liveCharged.toFixed(6)),
-        // fareUsdc는 백엔드가 started_at 기준으로 직접 계산 — 프론트 값 전달 안 함
+        fareUsdc:     String(liveCharged.toFixed(6)), // 서버 계산 실패 시에만 사용하는 폴백
       });
       const fareUsdc   = res.fareUsdc   ?? res.fare   ?? "계산중...";
       const refundUsdc  = res.refundUsdc  ?? res.refund  ?? "계산중...";
@@ -579,7 +580,11 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       if (res.deferred) addLog(`⏳ 24시간 분쟁 대기 후 자동 정산됩니다`, "info");
 
       clearSession();
-      setSessionData({ ...sessionData, result: { ...res, fareUsdc, refundUsdc }, status: "ended" });
+      setSessionData({
+        ...sessionData,
+        result: { ...res, fareUsdc, refundUsdc, elapsedSec: finalElapsedSec },
+        status: "ended",
+      });
       setStep("ended");
       queryClient.invalidateQueries({ queryKey: ['sessions-history'] });
     } catch (err) {
@@ -792,14 +797,13 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
                   <div className="text-xs text-blue-200 mt-0.5">경과 시간</div>
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
-                  {/* 분 단위로 올라가는 요금 — ProposeUsageUpdate 주기와 일치 */}
+                  {/* 서버의 최종 요금 정책과 동일한 실제 사용 시간 기준 */}
                   <div className="text-xl font-bold">{liveCharged.toFixed(2)}</div>
                   <div className="text-xs text-blue-200 mt-0.5">
-                    USDC ({elapsedMinutes}분)
+                    USDC (분당 {RATE_PER_MIN[selectedSvc.serviceType]?.toFixed(3)})
                   </div>
-                  {/* 오프체인 서명 횟수 — 요금 스텝과 동기화 표시 */}
-                  {elapsedMinutes > 0 && (
-                    <div className="text-xs text-green-300 mt-1">🔏 서명 {elapsedMinutes}회</div>
+                  {elapsed > 0 && (
+                    <div className="text-xs text-green-300 mt-1">실시간 사용량 기준</div>
                   )}
                 </div>
                 <div className="bg-white/10 rounded-xl p-3">
@@ -884,7 +888,9 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
               </div>
               <div className="flex justify-between py-2 border-b border-gray-50">
                 <span className="text-gray-500">이용 시간</span>
-                <span className="font-mono text-gray-900">{formatTime(elapsed)}</span>
+                <span className="font-mono text-gray-900">
+                  {formatTime(sessionData.result.elapsedSec ?? elapsed)}
+                </span>
               </div>
               {/* 세션 ID — 환불 신청 시 필요 */}
               <div className="flex justify-between items-center py-2">

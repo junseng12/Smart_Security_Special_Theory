@@ -99,23 +99,36 @@ func (o *Orchestrator) ChargeUsage(ctx context.Context, req ChargeReq) (*ChargeR
 
 // EndRequest — ChargedUsdc 필드 추가
 // ★ 컨테이너 재시작 시 인메모리 세션 유실 대비
-//   Node.js 백엔드가 DB에서 읽은 charged_usdc를 user_final_sig 필드에 실어 전달하고
-//   transport/server.go에서 이를 ChargedUsdc로 매핑해 사용
+//
+//	Node.js 백엔드가 DB에서 읽은 charged_usdc를 user_final_sig 필드에 실어 전달하고
+//	transport/server.go에서 이를 ChargedUsdc로 매핑해 사용
 type EndRequest struct {
 	SessionID   string
 	ChannelID   string
 	UserAddress string
 	ChargedUsdc string // DB 폴백 값 (인메모리 미스 시 사용)
 }
-type EndResult struct{ FareUsdc, RefundUsdc string; SettledAt time.Time }
+type EndResult struct {
+	FareUsdc, RefundUsdc string
+	SettledAt            time.Time
+}
 
 func (o *Orchestrator) EndSessionAndSettle(ctx context.Context, req EndRequest) (*EndResult, error) {
-	// ★ 인메모리 세션에서 chargedUsdc 읽기 — 없으면 요청에서 전달된 값 사용
+	// Node.js 백엔드가 서버 시간으로 확정한 요금을 우선한다.
+	// 인메모리 누적값은 ProposeUsageUpdate 실패/재시작 시 일부 금액이 빠질 수 있다.
 	chargedUsdc := req.ChargedUsdc
+	depositUsdc := "0"
 	sess, sessErr := o.sessions.Get(req.SessionID)
 	if sessErr == nil {
-		chargedUsdc = sess.ChargedUsdc
-		o.log.WithField("session_id", req.SessionID).Info("[Orchestrator] session found in-memory")
+		depositUsdc = sess.DepositUsdc
+		if chargedUsdc == "" {
+			chargedUsdc = sess.ChargedUsdc
+		}
+		o.log.WithFields(logrus.Fields{
+			"session_id":         req.SessionID,
+			"authoritative_fare": chargedUsdc,
+			"in_memory_fare":     sess.ChargedUsdc,
+		}).Info("[Orchestrator] using authoritative final fare")
 	} else {
 		o.log.WithFields(logrus.Fields{
 			"session_id":   req.SessionID,
@@ -123,6 +136,11 @@ func (o *Orchestrator) EndSessionAndSettle(ctx context.Context, req EndRequest) 
 		}).Warn("[Orchestrator] session not in-memory, using provided chargedUsdc as fallback")
 		if chargedUsdc == "" {
 			chargedUsdc = "0"
+		}
+	}
+	if depositUsdc == "0" {
+		if handle, err := o.channels.get(req.ChannelID); err == nil {
+			depositUsdc = handle.DepositUsdc
 		}
 	}
 
@@ -144,17 +162,35 @@ func (o *Orchestrator) EndSessionAndSettle(ctx context.Context, req EndRequest) 
 	o.audit.Log(ctx, audit.ActionSettle, req.ChannelID, req.SessionID, closeRes)
 
 	return &EndResult{
-		FareUsdc:   closeRes.FinalFare,
-		RefundUsdc: closeRes.FinalRefund,
+		FareUsdc:   finalRes.TotalFareUsdc,
+		RefundUsdc: remainingUsdc(depositUsdc, finalRes.TotalFareUsdc),
 		SettledAt:  closeRes.SettledAt,
 	}, nil
 }
 
-func max64(a, b int64) int64 { if a > b { return a }; return b }
+func remainingUsdc(depositUsdc, fareUsdc string) string {
+	var deposit, fare float64
+	fmt.Sscanf(depositUsdc, "%f", &deposit)
+	fmt.Sscanf(fareUsdc, "%f", &fare)
+	remaining := deposit - fare
+	if remaining < 0 {
+		remaining = 0
+	}
+	return fmt.Sprintf("%.6f", remaining)
+}
+
+func max64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
 
 func simpleHash(s string) []byte {
 	h := make([]byte, 32)
-	for i, c := range []byte(s) { h[i%32] ^= c }
+	for i, c := range []byte(s) {
+		h[i%32] ^= c
+	}
 	return h
 }
 

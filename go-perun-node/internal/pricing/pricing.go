@@ -24,9 +24,9 @@ func (p *Policy) PolicyHash() string {
 }
 
 var DefaultPolicies = map[string]*Policy{
-	"bicycle":     {ServiceType: "bicycle",     Version: "v1.0.0", RatePerMin: 0.01,  MinChargeMin: 1, CapUsdc: 5.0},
-	"ev_charging": {ServiceType: "ev_charging", Version: "v1.0.0", RatePerKwh: 0.25,  MinChargeMin: 0, CapUsdc: 20.0},
-	"parking":     {ServiceType: "parking",     Version: "v1.0.0", RatePerMin: 0.005, MinChargeMin: 1, CapUsdc: 3.0},
+	"bicycle":     {ServiceType: "bicycle", Version: "v1.1.0", RatePerMin: 0.10, MinChargeMin: 0.1, CapUsdc: 5.0},
+	"ev_charging": {ServiceType: "ev_charging", Version: "v1.0.0", RatePerKwh: 0.25, MinChargeMin: 0, CapUsdc: 20.0},
+	"parking":     {ServiceType: "parking", Version: "v1.1.0", RatePerMin: 0.02, MinChargeMin: 0.5, CapUsdc: 3.0},
 }
 
 type Engine struct{ policies map[string]*Policy }
@@ -40,9 +40,9 @@ type UsageDelta struct {
 }
 
 type FareResult struct {
-	FareUsdc    string
-	FareWei     *big.Int
-	PolicyHash  string
+	FareUsdc   string
+	FareWei    *big.Int
+	PolicyHash string
 }
 
 func (e *Engine) CalculateFare(u UsageDelta) (*FareResult, error) {
@@ -54,12 +54,16 @@ func (e *Engine) CalculateFare(u UsageDelta) (*FareResult, error) {
 	switch u.ServiceType {
 	case "bicycle", "parking":
 		dur := u.DurationMinutes
-		if dur < p.MinChargeMin { dur = p.MinChargeMin }
+		if dur < p.MinChargeMin {
+			dur = p.MinChargeMin
+		}
 		raw = dur * p.RatePerMin
 	case "ev_charging":
 		raw = u.EnergyKwh * p.RatePerKwh
 	}
-	if p.CapUsdc > 0 && raw > p.CapUsdc { raw = p.CapUsdc }
+	if p.CapUsdc > 0 && raw > p.CapUsdc {
+		raw = p.CapUsdc
+	}
 	return &FareResult{
 		FareUsdc:   fmt.Sprintf("%.6f", raw),
 		FareWei:    usdcToWei(raw),
@@ -73,8 +77,12 @@ func FinalFare(totalChargedUsdc, creditUsdc string) (netUsdc string, creditWei *
 	var charged, credit float64
 	fmt.Sscanf(totalChargedUsdc, "%f", &charged)
 	fmt.Sscanf(creditUsdc, "%f", &credit)
-	if credit < 0 { credit = 0 }
-	if credit > charged { credit = charged }
+	if credit < 0 {
+		credit = 0
+	}
+	if credit > charged {
+		credit = charged
+	}
 	return fmt.Sprintf("%.6f", charged-credit), usdcToWei(credit)
 }
 
@@ -86,7 +94,9 @@ func usdcToWei(usdc float64) *big.Int {
 }
 
 func WeiToUsdc(wei *big.Int) string {
-	if wei == nil { return "0.000000" }
+	if wei == nil {
+		return "0.000000"
+	}
 	f := new(big.Float).SetPrec(128).SetInt(wei)
 	f.Quo(f, new(big.Float).SetPrec(128).SetInt64(1_000_000))
 	v, _ := f.Float64()

@@ -42,8 +42,8 @@ func TestPricingBicycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.FareUsdc != "0.050000" {
-		t.Errorf("bicycle 5min: got %s, want 0.050000", res.FareUsdc)
+	if res.FareUsdc != "0.500000" {
+		t.Errorf("bicycle 5min: got %s, want 0.500000", res.FareUsdc)
 	}
 	t.Logf("✅ bicycle 5min → %s USDC (policy: %s)", res.FareUsdc, res.PolicyHash[:10]+"...")
 }
@@ -76,8 +76,8 @@ func TestPricingParking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.FareUsdc != "0.150000" {
-		t.Errorf("parking 30min: got %s, want 0.150000", res.FareUsdc)
+	if res.FareUsdc != "0.600000" {
+		t.Errorf("parking 30min: got %s, want 0.600000", res.FareUsdc)
 	}
 	t.Logf("✅ parking 30min → %s USDC", res.FareUsdc)
 }
@@ -120,9 +120,9 @@ func TestPricingMinCharge(t *testing.T) {
 
 func TestFinalFare(t *testing.T) {
 	cases := []struct {
-		charged  string
-		credit   string
-		wantNet  string
+		charged string
+		credit  string
+		wantNet string
 	}{
 		{"1.000000", "0.200000", "0.800000"}, // 크레딧 20% 환급
 		{"0.500000", "0.000000", "0.500000"}, // 크레딧 없음
@@ -138,6 +138,23 @@ func TestFinalFare(t *testing.T) {
 	}
 }
 
+func TestRemainingUsdc(t *testing.T) {
+	cases := []struct {
+		deposit string
+		fare    string
+		want    string
+	}{
+		{"3.000000", "0.030000", "2.970000"},
+		{"3.000000", "3.000000", "0.000000"},
+		{"3.000000", "4.000000", "0.000000"},
+	}
+	for _, c := range cases {
+		if got := remainingUsdc(c.deposit, c.fare); got != c.want {
+			t.Errorf("remainingUsdc(%s, %s) = %s, want %s", c.deposit, c.fare, got, c.want)
+		}
+	}
+}
+
 // ── 4. WeiToUsdc 역변환 테스트 ───────────────────────────────────
 
 func TestWeiToUsdc(t *testing.T) {
@@ -146,9 +163,9 @@ func TestWeiToUsdc(t *testing.T) {
 		expected string
 	}{
 		{1_000_000, "1.000000"},
-		{500_000,   "0.500000"},
-		{1,         "0.000001"},
-		{0,         "0.000000"},
+		{500_000, "0.500000"},
+		{1, "0.000001"},
+		{0, "0.000000"},
 	}
 	for _, c := range cases {
 		got := pricing.WeiToUsdc(big.NewInt(c.wei))
@@ -164,8 +181,8 @@ func TestWeiToUsdc(t *testing.T) {
 func TestChannelFlowSimulation(t *testing.T) {
 	eng := pricing.NewEngine()
 	deposit := int64(2_000_000) // 2 USDC (wei)
-	userBal  := big.NewInt(deposit)
-	opBal    := big.NewInt(0)
+	userBal := big.NewInt(deposit)
+	opBal := big.NewInt(0)
 
 	services := []struct {
 		svc string

@@ -178,8 +178,9 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
               sessionId: req.params.id,
               serviceType: r0.service_type,
               usage: { durationMinutes },
-            }).catch(() => ({ fare: 0.01 }));
-            fareUsdc = String((fareResult.fare ?? 0.01).toFixed(6));
+            }).catch(() => ({ fareUsdc: '0.010000' }));
+            const calculatedFare = parseFloat(fareResult.fareUsdc ?? '0.010000');
+            fareUsdc = Math.min(Math.max(calculatedFare, 0.01), dep).toFixed(6);
             refundUsdc = String(Math.max(dep - parseFloat(fareUsdc), 0).toFixed(6));
           }
         } catch (_) {}
@@ -212,7 +213,7 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
 // ── POST /sessions/:id/deposit — 프론트 buyerDeposit 완료 후 DB 기록 ────────────
 router.post('/:id/deposit', async (req, res, next) => {
   try {
-    const { channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash, serviceStartedAt } = req.body;
+    const { channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash } = req.body;
 
     // 1) DB에 사용자 예치 기록
     const result = await escrowSvc.recordUserDeposit({
@@ -224,32 +225,6 @@ router.post('/:id/deposit', async (req, res, next) => {
       holdDeadline,
       depositTxHash,
     });
-
-    // 1-b) 실제 서비스 시작 시점(deposit 완료 시각) → DB + Redis 캐시 동기화
-    if (serviceStartedAt) {
-      const db      = require('../services/db');
-      const sessMgr = require('../services/sessionManager');
-      // DB 업데이트
-      await db.getPool().query(
-        `UPDATE sessions SET started_at = to_timestamp($1 / 1000.0) WHERE id = $2`,
-        [Number(serviceStartedAt), req.params.id]
-      ).catch(() => {});
-      // Redis 캐시 갱신 — getSession이 캐시 우선이므로 반드시 동기화
-      try {
-        const redis = require('../services/redisClient').getRedis();
-        if (redis) {
-          const SESSION_KEY = (id) => `session:${id}`;
-          const raw = await redis.get(SESSION_KEY(req.params.id));
-          if (raw) {
-            const cached = JSON.parse(raw);
-            cached.startedAt = Number(serviceStartedAt);
-            await redis.set(SESSION_KEY(req.params.id), JSON.stringify(cached), 'EX', 86400);
-          }
-        }
-      } catch(redisErr) {
-        require('../utils/logger').warn('Redis cache update failed (non-fatal)', { error: redisErr.message });
-      }
-    }
 
     // 2) operator 보증금 자동 예치
     // ★ await로 처리: Railway는 비동기 .then이 요청 완료 후 실행 보장 안 됨
@@ -297,7 +272,34 @@ router.post('/:id/deposit', async (req, res, next) => {
       logger.info('Mock TX detected — skip operatorDeposit', { sessionId: req.params.id, depositTxHash });
     }
 
-    res.json({ ok: true, data: { ...result, operatorDeposit: operatorDepositResult } });
+    // 모든 예치 처리가 끝나고 프론트가 이용 화면으로 전환되는 시점을 서버가 확정한다.
+    const serviceStartedAt = Date.now();
+    const db = require('../services/db');
+    await db.getPool().query(
+      `UPDATE sessions
+       SET started_at=to_timestamp($1 / 1000.0), updated_at=NOW()
+       WHERE id=$2`,
+      [serviceStartedAt, req.params.id]
+    );
+    try {
+      const redis = require('../services/redisClient').getRedis();
+      if (redis) {
+        const key = `session:${req.params.id}`;
+        const raw = await redis.get(key);
+        if (raw) {
+          const cached = JSON.parse(raw);
+          cached.startedAt = serviceStartedAt;
+          await redis.set(key, JSON.stringify(cached), 'EX', 86400);
+        }
+      }
+    } catch(redisErr) {
+      require('../utils/logger').warn('Redis cache update failed (non-fatal)', { error: redisErr.message });
+    }
+
+    res.json({
+      ok: true,
+      data: { ...result, operatorDeposit: operatorDepositResult, serviceStartedAt },
+    });
   } catch (err) { next(err); }
 });
 
