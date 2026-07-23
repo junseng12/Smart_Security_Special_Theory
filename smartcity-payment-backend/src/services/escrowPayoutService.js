@@ -205,7 +205,9 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
 //    세션 종료 시 호출 — holdDeadline 경과 후 settleAndRelease 실행
 //    서버 DB의 serviceStartedAt 기준으로 요금 재계산 (프론트 값 무시)
 // ─────────────────────────────────────────────────────────────────
-async function settleAndRelease({ sessionId, fareUsdc }) {
+const settlementTasks = new Map();
+
+async function settleAndReleaseInternal({ sessionId, fareUsdc }) {
   await ensureTable();
   const wallet   = getWallet();
   const escrow   = getEscrow(wallet);
@@ -488,6 +490,16 @@ async function forceRefundOnchain(sessionId) {
 
   logger.info('forceRefund OK', { sessionId, tx: r.hash });
   return { txHash: r.hash, confirmed: true, state: 'Refunded', mode: 'force_refund' };
+}
+
+async function settleAndRelease(params) {
+  const existing = settlementTasks.get(params.sessionId);
+  if (existing) return existing;
+
+  const task = settleAndReleaseInternal(params)
+    .finally(() => settlementTasks.delete(params.sessionId));
+  settlementTasks.set(params.sessionId, task);
+  return task;
 }
 
 // ─────────────────────────────────────────────────────────────────

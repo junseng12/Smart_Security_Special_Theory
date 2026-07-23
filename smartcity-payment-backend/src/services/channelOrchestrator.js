@@ -95,7 +95,7 @@ async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usa
       sessionId, serviceType, usage: { durationMinutes, energyKwh },
     }).catch(() => ({ fare: 0.01, breakdown: {} }));
 
-    const fare_usdc = String(fareResult.fare ?? 0.01);
+    const fare_usdc = String(fareResult.fareUsdc ?? fareResult.fare ?? 0.01);
     const nonce = Date.now(); // 폴백 nonce
     const state_hash = '0x' + Buffer.from(`${sessionId}:${nonce}`).toString('hex').slice(0, 64).padEnd(64, '0');
     res = { fare_usdc, policy_hash: 'fallback', new_nonce: nonce, state_hash, balance_user: '0' };
@@ -153,7 +153,7 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
   try {
     const db = require('./db');
     const row = await db.getPool().query(
-      `SELECT started_at, service_type, deposit_usdc, charged_usdc
+      `SELECT started_at, ended_at, service_type, deposit_usdc, charged_usdc
          FROM sessions WHERE id = $1`, [sessionId]
     );
     const sess = row.rows[0];
@@ -170,7 +170,9 @@ async function endSessionAndSettle({ sessionId, channelId, userAddress, userFina
       }
       if (!Number.isFinite(startMs) || startMs <= 0) throw new Error('invalid started_at');
 
-      const durationMin = Math.max(0, (Date.now() - startMs) / 60_000);
+      const frozenEndMs = sess.ended_at ? new Date(sess.ended_at).getTime() : Date.now();
+      if (!Number.isFinite(frozenEndMs) || frozenEndMs < startMs) throw new Error('invalid ended_at');
+      const durationMin = Math.max(0, (frozenEndMs - startMs) / 60_000);
       const fareResult = await fareEngine.calculateFare({
         sessionId,
         serviceType: sess.service_type,

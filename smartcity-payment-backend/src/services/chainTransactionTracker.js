@@ -96,7 +96,21 @@ async function getOnchainState(sessionId, provider = getProvider()) {
   const escrow = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, provider);
   const result = await escrow.getEscrowStatus(toEscrowId(sessionId));
   const state = Number(result[0]);
-  return { state, stateLabel: STATE_LABELS[state] || 'Unknown' };
+  return {
+    state,
+    stateLabel: STATE_LABELS[state] || 'Unknown',
+    fareAmount: ethers.formatUnits(result[3], 6),
+  };
+}
+
+async function waitForExpectedOnchainState(sessionId, expectedState, provider) {
+  let onchain = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    onchain = await getOnchainState(sessionId, provider);
+    if (onchain.state === expectedState) return onchain;
+    if (attempt < 5) await new Promise(resolve => setTimeout(resolve, 750));
+  }
+  return onchain;
 }
 
 async function invalidateSessionCache(sessionId, channelId) {
@@ -204,8 +218,8 @@ async function confirmTransaction(id, suppliedReceipt = null) {
     return { confirmed: false, reason: 'wrong_contract' };
   }
 
-  const onchain = await getOnchainState(record.session_id, provider);
   const expectedState = EXPECTED_STATE[record.action];
+  const onchain = await waitForExpectedOnchainState(record.session_id, expectedState, provider);
   if (onchain.state !== expectedState) {
     await markProblem(
       id,
@@ -231,17 +245,20 @@ async function confirmTransaction(id, suppliedReceipt = null) {
        WHERE id=$1`,
       [id, Number(receipt.blockNumber), JSON.stringify(receiptSnapshot(receipt))]
     );
+    const settledFare = record.action === 'SETTLE' ? onchain.fareAmount : null;
     await client.query(
       `UPDATE escrow_locks
-       SET state=$2, settle_tx=$3, settled_at=NOW(), last_error=NULL
+       SET state=$2, settle_tx=$3, settled_at=NOW(), last_error=NULL,
+           fare_amount=COALESCE($4::NUMERIC, fare_amount)
        WHERE session_id=$1`,
-      [record.session_id, onchain.stateLabel, receipt.hash]
+      [record.session_id, onchain.stateLabel, receipt.hash, settledFare]
     );
     await client.query(
       `UPDATE sessions
-       SET status='Settled', settled_at=NOW(), updated_at=NOW()
+       SET status='Settled', settled_at=NOW(), updated_at=NOW(),
+           charged_usdc=COALESCE($2::NUMERIC, charged_usdc)
        WHERE id=$1`,
-      [record.session_id]
+      [record.session_id, settledFare]
     );
     await client.query('COMMIT');
   } catch (err) {

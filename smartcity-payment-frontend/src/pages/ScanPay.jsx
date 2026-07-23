@@ -264,7 +264,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
   // holdDeadline 카운트다운 + 만료 시 자동 종료
   useEffect(() => {
-    if (sessionData?.holdDeadline) {
+    if (sessionData?.holdDeadline && step === "active") {
       const tick = () => {
         const left = sessionData.holdDeadline - Math.floor(Date.now() / 1000);
         setHoldCountdown(left > 0 ? left : 0);
@@ -278,7 +278,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       holdTimerRef.current = setInterval(tick, 1000);
     }
     return () => clearInterval(holdTimerRef.current);
-  }, [sessionData?.holdDeadline]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [sessionData?.holdDeadline, step]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const addLog = (msg, type = "info") =>
     setLog(prev => [...prev, { msg, type, ts: Date.now() }]);
@@ -791,24 +791,21 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
                   <span className="text-xs text-green-300 font-medium">이용 중</span>
                 </div>
               </div>
-              <div className="grid grid-cols-3 gap-3 text-center">
-                <div className="bg-white/10 rounded-xl p-3">
+              <div className="grid grid-cols-3 gap-2 text-center">
+                <div className="min-w-0 bg-white/10 rounded-xl px-2 py-3">
                   <div className="text-xl font-bold font-mono">{formatTime(elapsed)}</div>
-                  <div className="text-xs text-blue-200 mt-0.5">경과 시간</div>
+                  <div className="text-[11px] text-blue-200 mt-0.5 whitespace-nowrap">이용 시간</div>
                 </div>
-                <div className="bg-white/10 rounded-xl p-3">
+                <div className="min-w-0 bg-white/10 rounded-xl px-1 py-3">
                   {/* 서버의 최종 요금 정책과 동일한 실제 사용 시간 기준 */}
                   <div className="text-xl font-bold">{liveCharged.toFixed(2)}</div>
-                  <div className="text-xs text-blue-200 mt-0.5">
-                    USDC (분당 {RATE_PER_MIN[selectedSvc.serviceType]?.toFixed(3)})
+                  <div className="text-[11px] text-blue-200 mt-0.5 whitespace-nowrap">
+                    USDC · {RATE_PER_MIN[selectedSvc.serviceType]?.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}/분
                   </div>
-                  {elapsed > 0 && (
-                    <div className="text-xs text-green-300 mt-1">실시간 사용량 기준</div>
-                  )}
                 </div>
-                <div className="bg-white/10 rounded-xl p-3">
+                <div className="min-w-0 bg-white/10 rounded-xl px-2 py-3">
                   <div className="text-xl font-bold">{holdCountdown !== null ? (holdCountdown > 0 ? `${holdCountdown}s` : "✅") : "--"}</div>
-                  <div className="text-xs text-blue-200 mt-0.5">홀드 잔여</div>
+                  <div className="text-[11px] text-blue-200 mt-0.5 whitespace-nowrap">정산까지</div>
                 </div>
               </div>
             </div>

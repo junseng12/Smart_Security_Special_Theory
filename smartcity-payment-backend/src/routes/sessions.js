@@ -72,6 +72,15 @@ const chargeSchema = Joi.object({
 
 router.post('/:id/charge', validate(chargeSchema), async (req, res, next) => {
   try {
+    const { rows } = await require('../services/db').getPool().query(
+      'SELECT status FROM sessions WHERE id=$1 LIMIT 1',
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ ok: false, error: `Session not found: ${req.params.id}` });
+    if (rows[0].status !== 'Active') {
+      return res.status(409).json({ ok: false, error: `Session is already ${rows[0].status}` });
+    }
+
     const result = await orchestrator.chargeUsage({
       sessionId: req.params.id,
       ...req.body,
@@ -133,10 +142,34 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
     // ── 세션 존재 여부 사전 검증 ──────────────────────────────────────────────
     const _db = require('../services/db');
     const _sess = await _db.getPool().query(
-      `SELECT id, status FROM sessions WHERE id = $1`, [req.params.id]
+      `SELECT s.id, s.status, s.deposit_usdc, s.charged_usdc,
+              el.state AS escrow_state, el.fare_amount, el.user_deposit, el.settle_tx
+       FROM sessions s
+       LEFT JOIN escrow_locks el ON el.session_id=s.id
+       WHERE s.id = $1`, [req.params.id]
     ).catch(() => ({ rows: [] }));
     if (!_sess.rows[0]) {
       return res.status(404).json({ ok: false, error: `Session not found: ${req.params.id}` });
+    }
+    const existing = _sess.rows[0];
+    if (existing.status !== 'Active') {
+      const deposit = parseFloat(existing.user_deposit || existing.deposit_usdc || 0);
+      const escrowFare = parseFloat(existing.fare_amount || 0);
+      const fare = escrowFare > 0 ? escrowFare : parseFloat(existing.charged_usdc || 0);
+      const data = {
+        idempotent: true,
+        fareUsdc: fare.toFixed(6),
+        refundUsdc: Math.max(deposit - fare, 0).toFixed(6),
+        depositUsdc: deposit.toFixed(6),
+        txHash: existing.settle_tx || null,
+      };
+      if (['Released', 'Refunded'].includes(existing.escrow_state)) {
+        return res.json({ ok: true, data: { ...data, confirmed: true, status: 'completed' } });
+      }
+      return res.status(202).json({
+        ok: true,
+        data: { ...data, deferred: true, status: 'settling', message: '이미 종료 요청된 세션입니다.' },
+      });
     }
     // ──────────────────────────────────────────────────────────────────────────
 
