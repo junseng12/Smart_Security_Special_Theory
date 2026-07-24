@@ -247,65 +247,88 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
 router.post('/:id/deposit', async (req, res, next) => {
   try {
     const { channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash } = req.body;
+    const configuredOperator = operatorAddress || process.env.OPERATOR_ADDRESS;
+    const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
+    const isRealTx = /^0x[0-9a-fA-F]{64}$/.test(depositTxHash || '');
 
-    // 1) DB에 사용자 예치 기록
+    if (!isRealTx) {
+      return res.status(400).json({
+        ok: false,
+        error: 'A confirmed userDeposit transaction hash is required',
+      });
+    }
+    if (!configuredOperator) {
+      return res.status(503).json({ ok: false, error: 'Operator address is not configured' });
+    }
+
+    // 1) MetaMask의 직접 TX와 delegated/smart-account wrapper TX 모두
+    // 실제 Escrow의 UserDeposited 이벤트를 기준으로 검증한다.
+    let depositVerification;
+    try {
+      depositVerification = await escrowSvc.verifyUserDepositTransaction({
+        sessionId: req.params.id,
+        userAddress,
+        operatorAddress: configuredOperator,
+        depositUsdc,
+        holdDeadline,
+        depositTxHash,
+      });
+    } catch (verificationError) {
+      logger.warn('User deposit verification failed', {
+        sessionId: req.params.id,
+        depositTxHash,
+        error: verificationError.message,
+      });
+      return res.status(409).json({
+        ok: false,
+        error: `User deposit could not be verified: ${verificationError.message}`,
+      });
+    }
+
+    // 2) 검증된 사용자 예치만 DB에 기록한다.
     const result = await escrowSvc.recordUserDeposit({
       sessionId:       req.params.id,
       channelId,
       userAddress,
-      operatorAddress: operatorAddress || process.env.OPERATOR_ADDRESS,
+      operatorAddress: configuredOperator,
       depositUsdc,
       holdDeadline,
       depositTxHash,
     });
 
-    // 2) operator 보증금 자동 예치
-    // ★ await로 처리: Railway는 비동기 .then이 요청 완료 후 실행 보장 안 됨
-    // userDepositTxHash가 실제 TX인 경우만 온체인 operatorDeposit 실행
-    const canEscrow = process.env.ESCROW_CONTRACT_ADDRESS && process.env.OPERATOR_PRIVATE_KEY;
-    const isRealTx  = depositTxHash && !depositTxHash.startsWith('0xmock');
-
-    // ★ TX receipt 검증: userDeposit TX가 실제로 성공했는지 확인 후 operatorDeposit 실행
-    let userTxSuccess = true;
-    if (isRealTx) {
-      try {
-        const { ethers } = require('ethers');
-        const provider = new ethers.JsonRpcProvider(
-          process.env.BASE_RPC_URL || 'https://sepolia.base.org'
-        );
-        const receipt = await provider.getTransactionReceipt(depositTxHash);
-        if (!receipt) {
-          require('../utils/logger').warn('/deposit: TX not found (pending?)', { depositTxHash });
-          userTxSuccess = false;
-        } else if (receipt.status !== 1) {
-          require('../utils/logger').warn('/deposit: userDeposit TX REVERTED — skip operatorDeposit', {
-            depositTxHash, status: receipt.status
-          });
-          userTxSuccess = false;
-        }
-      } catch (rpcErr) {
-        require('../utils/logger').warn('/deposit: receipt 조회 실패 — operatorDeposit 시도는 계속', { error: rpcErr.message });
-        // RPC 오류 시 낙관적으로 진행
-      }
-    }
-
+    // 3) 운영자 예치는 직렬화된 단일 경로에서 정확히 한 번 실행한다.
     let operatorDepositResult = null;
-    if (canEscrow && isRealTx && userTxSuccess) {
+    if (canEscrow) {
       const opDepositUsdc = process.env.OPERATOR_DEPOSIT_USDC || '3.0';
       try {
         operatorDepositResult = await escrowSvc.operatorDeposit(req.params.id, opDepositUsdc, depositTxHash);
-        const logger = require('../utils/logger');
         logger.info('Operator deposit complete', { sessionId: req.params.id, result: JSON.stringify(operatorDepositResult) });
       } catch(err) {
-        const logger = require('../utils/logger');
-        logger.warn('Operator deposit failed (non-fatal)', { sessionId: req.params.id, error: err.message });
+        logger.error('Operator deposit failed', { sessionId: req.params.id, error: err.message });
+        return res.status(503).json({
+          ok: false,
+          error: `User deposit is confirmed, but operator deposit failed: ${err.message}`,
+          data: { depositVerification, userDeposit: result },
+        });
       }
-    } else if (canEscrow && !isRealTx) {
-      const logger = require('../utils/logger');
-      logger.info('Mock TX detected — skip operatorDeposit', { sessionId: req.params.id, depositTxHash });
+    } else {
+      return res.status(503).json({
+        ok: false,
+        error: 'Escrow operator is not configured',
+        data: { depositVerification, userDeposit: result },
+      });
     }
 
-    // 모든 예치 처리가 끝나고 프론트가 이용 화면으로 전환되는 시점을 서버가 확정한다.
+    const fundedStatus = await escrowSvc.getOnchainStatus(req.params.id);
+    if (!fundedStatus.isFullyFunded || fundedStatus.stateLabel !== 'FullyFunded') {
+      return res.status(503).json({
+        ok: false,
+        error: `Escrow is not fully funded (state=${fundedStatus.stateLabel})`,
+        data: { depositVerification, userDeposit: result, operatorDeposit: operatorDepositResult },
+      });
+    }
+
+    // 4) 두 예치가 모두 온체인에서 확인된 뒤에만 이용 시작 시각을 확정한다.
     const serviceStartedAt = Date.now();
     const db = require('../services/db');
     await db.getPool().query(
@@ -331,7 +354,13 @@ router.post('/:id/deposit', async (req, res, next) => {
 
     res.json({
       ok: true,
-      data: { ...result, operatorDeposit: operatorDepositResult, serviceStartedAt },
+      data: {
+        ...result,
+        state: fundedStatus.stateLabel,
+        depositVerification,
+        operatorDeposit: operatorDepositResult,
+        serviceStartedAt,
+      },
     });
   } catch (err) { next(err); }
 });

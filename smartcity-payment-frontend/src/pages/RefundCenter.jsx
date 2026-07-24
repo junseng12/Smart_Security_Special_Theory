@@ -148,11 +148,27 @@ export default function RefundCenter() {
       };
       const caseData = await apiCall("/api/v1/refunds", "POST", body);
 
+      // 동일 세션의 완료된 환불 신청은 새 케이스를 만들거나 다시 지급하지 않는다.
+      if (caseData.reused && caseData.status === "PAID") {
+        setSubmitted({
+          ...caseData,
+          paidOut: true,
+          payoutTxHash: null,
+          alreadyProcessed: true,
+        });
+        setLoading(false);
+        return;
+      }
+
       // 2) 자동 심사 요청 (백엔드 evaluate)
       let decision = null;
-      try {
-        decision = await apiCall(`/api/v1/refunds/${caseData.id}/evaluate`, "POST");
-      } catch {}
+      if (caseData.status === "APPROVED") {
+        decision = { decision: "auto_approved", reason: "Existing approved case resumed" };
+      } else {
+        try {
+          decision = await apiCall(`/api/v1/refunds/${caseData.id}/evaluate`, "POST");
+        } catch {}
+      }
 
       // 3) 자동 승인됐으면 → payout 요청 (세션ID 있는 경우 온체인 처리)
       let paidOut = false;
@@ -319,7 +335,11 @@ export default function RefundCenter() {
               {submitted.paidOut && (
                 <div className="bg-purple-50 border border-purple-100 rounded-xl p-4 text-sm text-purple-800 text-left">
                   <p className="font-semibold mb-2">온체인 환불 처리됨 ✅</p>
-                  <p className="mb-2">에스크로 컨트랙트에서 지갑으로 직접 전송되었습니다.</p>
+                  <p className="mb-2">
+                    {submitted.alreadyProcessed
+                      ? "이 세션은 이전 신청에서 이미 환불 완료되었습니다."
+                      : "에스크로 컨트랙트에서 지갑으로 직접 전송되었습니다."}
+                  </p>
                   {submitted.payoutTxHash && (
                     <a
                       href={`https://sepolia.basescan.org/tx/${submitted.payoutTxHash}`}

@@ -26,6 +26,7 @@ const BASE_RPC    = process.env.BASE_RPC_URL             || 'https://sepolia.bas
 
 // V3.2 ABI — 온체인 검증 완료
 const ESCROW_ABI = [
+  'event UserDeposited(bytes32 indexed escrowId, address indexed user, address indexed operator, uint256 amount, uint256 holdDeadline)',
   'function userDeposit(bytes32 escrowId, address operator, uint256 amount, uint256 holdDeadline) external',
   'function operatorDeposit(bytes32 escrowId, uint256 amount) external',
   'function settleAndRelease(bytes32 escrowId, uint256 fareAmount) external',
@@ -64,17 +65,37 @@ function getUsdc(sw)    { return new ethers.Contract(USDC_ADDR, ERC20_ABI, sw); 
 function toEscrowId(id) { return ethers.keccak256(ethers.toUtf8Bytes(id)); }
 function getPool()      { return require('./db').getPool(); }
 
+let operatorTxTail = Promise.resolve();
+
+function runOperatorTransaction(label, task) {
+  const queuedAt = Date.now();
+  const run = operatorTxTail
+    .catch(() => {})
+    .then(async () => {
+      logger.info('Operator transaction started', {
+        label,
+        queuedMs: Date.now() - queuedAt,
+      });
+      return task();
+    });
+
+  operatorTxTail = run.catch(() => {});
+  return run;
+}
+
 async function executeTrackedFinalTx({ sessionId, action, send }) {
   const tracking = await chainTx.queueTransaction({ sessionId, action });
   try {
-    const tx = await send();
-    await chainTx.markSubmitted(tracking.id, tx.hash);
-    const receipt = await tx.wait();
-    const verification = await chainTx.confirmTransaction(tracking.id, receipt);
-    if (!verification.confirmed) {
-      throw new Error(`On-chain ${action} verification failed: ${verification.reason}`);
-    }
-    return { receipt, verification };
+    return await runOperatorTransaction(`${action}:${sessionId}`, async () => {
+      const tx = await send();
+      await chainTx.markSubmitted(tracking.id, tx.hash);
+      const receipt = await tx.wait();
+      const verification = await chainTx.confirmTransaction(tracking.id, receipt);
+      if (!verification.confirmed) {
+        throw new Error(`On-chain ${action} verification failed: ${verification.reason}`);
+      }
+      return { receipt, verification };
+    });
   } catch (err) {
     const reverted = err?.code === 'CALL_EXCEPTION' || Number(err?.receipt?.status) === 0;
     await chainTx.markProblem(
@@ -84,6 +105,95 @@ async function executeTrackedFinalTx({ sessionId, action, send }) {
     ).catch(() => {});
     throw err;
   }
+}
+
+async function verifyUserDepositTransaction({
+  sessionId,
+  userAddress,
+  operatorAddress,
+  depositUsdc,
+  holdDeadline,
+  depositTxHash,
+}) {
+  if (!/^0x[0-9a-fA-F]{64}$/.test(depositTxHash || '')) {
+    throw new Error('Invalid user deposit transaction hash');
+  }
+
+  const provider = getProvider();
+  const receipt = await provider.waitForTransaction(depositTxHash, 1, 120000);
+  if (!receipt) throw new Error('User deposit transaction confirmation timed out');
+  if (Number(receipt.status) !== 1) throw new Error('User deposit transaction reverted');
+
+  const expectedEscrowId = toEscrowId(sessionId).toLowerCase();
+  const expectedUser = ethers.getAddress(userAddress);
+  const expectedOperator = ethers.getAddress(operatorAddress);
+  const expectedAmount = ethers.parseUnits(String(depositUsdc || '3'), 6);
+  const escrowInterface = new ethers.Interface(ESCROW_ABI);
+
+  let depositEvent = null;
+  for (const log of receipt.logs) {
+    if (log.address.toLowerCase() !== ESCROW_ADDR.toLowerCase()) continue;
+    try {
+      const parsed = escrowInterface.parseLog(log);
+      if (parsed?.name !== 'UserDeposited') continue;
+      if (String(parsed.args.escrowId).toLowerCase() !== expectedEscrowId) continue;
+      depositEvent = { parsed, log };
+      break;
+    } catch (_) {
+      // Other escrow events in the same receipt are intentionally ignored.
+    }
+  }
+
+  if (!depositEvent) {
+    throw new Error('UserDeposited event not found for this session');
+  }
+
+  const { parsed, log } = depositEvent;
+  if (ethers.getAddress(parsed.args.user) !== expectedUser) {
+    throw new Error('UserDeposited event user does not match the connected wallet');
+  }
+  if (ethers.getAddress(parsed.args.operator) !== expectedOperator) {
+    throw new Error('UserDeposited event operator does not match the configured operator');
+  }
+  if (parsed.args.amount !== expectedAmount) {
+    throw new Error('UserDeposited event amount does not match the requested deposit');
+  }
+  if (holdDeadline && Number(parsed.args.holdDeadline) !== Number(holdDeadline)) {
+    throw new Error('UserDeposited event hold deadline does not match the session');
+  }
+
+  const status = await getEscrow(provider).getEscrowStatus(expectedEscrowId);
+  const state = Number(status[0]);
+  if (state < 1 || state > 5) {
+    throw new Error(`Escrow did not record the user deposit (state=${state})`);
+  }
+  if (ethers.getAddress(status[4]) !== expectedUser) {
+    throw new Error('On-chain escrow user does not match the UserDeposited event');
+  }
+  // Released/Refunded escrows intentionally zero their deposit balances.
+  if (state < 4 && status[1] !== expectedAmount) {
+    throw new Error('On-chain escrow amount does not match the UserDeposited event');
+  }
+
+  logger.info('User deposit event verified', {
+    sessionId,
+    depositTxHash,
+    transactionTo: receipt.to,
+    logIndex: log.index,
+    state: STATE_LABELS[state],
+  });
+
+  return {
+    txHash: depositTxHash,
+    blockNumber: receipt.blockNumber,
+    transactionTo: receipt.to,
+    logIndex: log.index,
+    escrowId: expectedEscrowId,
+    user: expectedUser,
+    operator: expectedOperator,
+    amountUsdc: ethers.formatUnits(expectedAmount, 6),
+    state: STATE_LABELS[state],
+  };
 }
 
 async function ensureTable() {
@@ -124,57 +234,30 @@ async function ensureTable() {
 async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash }) {
   await ensureTable();
   const escrowId = toEscrowId(sessionId);
-  const wallet   = getWallet();
-  const escrow   = getEscrow(wallet);
-  const usdc     = getUsdc(wallet);
-  const amtWei   = ethers.parseUnits(String(depositUsdc || '3'), 6);
+  const escrow   = getEscrow(getProvider());
   const deadline = holdDeadline || (Math.floor(Date.now() / 1000) + HOLD_DEADLINE_SEC);
-  const operator = operatorAddress || wallet.address;
+  const operator = operatorAddress || process.env.OPERATOR_ADDRESS;
 
   // 온체인 상태 확인
   let onchainState = 0;
+  let onchainOperatorDeposit = '0';
   try {
     const s = await escrow.getEscrowStatus(escrowId);
     onchainState = Number(s[0]);
+    onchainOperatorDeposit = ethers.formatUnits(s[2], 6);
     logger.info('recordUserDeposit: 온체인 상태 확인', {
       sessionId, state: STATE_LABELS[onchainState], isFullyFunded: s[7]
     });
   } catch (e) {
-    logger.warn('getEscrowStatus 실패 (신규)', { sessionId });
+    throw new Error(`Escrow state lookup failed after user deposit: ${e.message}`);
   }
 
-  let userDepTx = depositTxHash;
-  // userDeposit은 반드시 사용자 MetaMask에서만 실행 — operator 대행 금지
-  // onchainState === 0이면 아직 사용자가 서명 안 한 것이므로 operatorDeposit도 스킵
-
-  // operatorDeposit — FullyFunded 전환
-  let opDepTx = null;
-  if (onchainState === 1) {
-    try {
-      const al = await usdc.allowance(wallet.address, ESCROW_ADDR);
-      if (al < amtWei) {
-        const atx = await usdc.approve(ESCROW_ADDR, amtWei * 20n, { gasLimit: 80000 });
-        await atx.wait();
-      }
-      const tx2 = await escrow.operatorDeposit(escrowId, amtWei, { gasLimit: 150000 });
-      const r2  = await tx2.wait();
-      opDepTx = r2.hash;
-      logger.info('operatorDeposit OK → FullyFunded', { sessionId, tx: r2.hash });
-    } catch (e) {
-      logger.warn('operatorDeposit 실패 (나중에 재시도)', { sessionId, error: e.message.slice(0, 200) });
-    }
+  if (onchainState < 1) {
+    throw new Error('Escrow is still in None state after the verified user deposit');
   }
 
-  // DB에는 추정값이 아니라 최종 온체인 상태를 기록한다.
-  let finalOnchainState = onchainState;
-  try {
-    const finalStatus = await escrow.getEscrowStatus(escrowId);
-    finalOnchainState = Number(finalStatus[0]);
-  } catch (e) {
-    logger.warn('recordUserDeposit: final state lookup failed', { sessionId, error: e.message });
-  }
-  const finalStateLabel = STATE_LABELS[finalOnchainState] || 'None';
-  const operatorDepositUsdc = finalOnchainState >= 2 ? (depositUsdc || '3') : '0';
+  // operatorDeposit is deliberately performed only by operatorDeposit().
+  const finalStateLabel = STATE_LABELS[onchainState] || 'None';
 
   await getPool().query(
     `INSERT INTO escrow_locks
@@ -191,13 +274,13 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
        operator_deposit_tx = COALESCE(EXCLUDED.operator_deposit_tx, escrow_locks.operator_deposit_tx),
        state               = EXCLUDED.state`,
     [sessionId, escrowId, channelId, userAddress, operator,
-     depositUsdc || '3', operatorDepositUsdc, deadline, userDepTx, opDepTx, finalStateLabel]
-  ).catch(e => logger.warn('DB upsert 오류', { error: e.message }));
+     depositUsdc || '3', onchainOperatorDeposit, deadline, depositTxHash, null, finalStateLabel]
+  );
 
   return {
     escrowId, sessionId, depositUsdc,
     holdDeadline: new Date(deadline * 1000).toISOString(),
-    userDepTx, opDepTx, state: finalStateLabel,
+    userDepTx: depositTxHash, opDepTx: null, state: finalStateLabel,
   };
 }
 
@@ -262,14 +345,20 @@ async function settleAndReleaseInternal({ sessionId, fareUsdc }) {
       const opDep = s2[2]; // operatorDeposit amount
       const usrDep = s2[1]; // userDeposit amount
       if (opDep === 0n) {
-        const usdc = getUsdc(wallet);
-        const al = await usdc.allowance(wallet.address, ESCROW_ADDR);
-        if (al < usrDep) {
-          await (await usdc.approve(ESCROW_ADDR, usrDep * 10n, { gasLimit: 80000 })).wait();
+        const opR = await runOperatorTransaction(`OPERATOR_DEPOSIT_RECOVERY:${sessionId}`, async () => {
+          const latest = await escrow.getEscrowStatus(escrowId);
+          if (latest[2] > 0n || Number(latest[0]) >= 2) return null;
+          const usdc = getUsdc(wallet);
+          const al = await usdc.allowance(wallet.address, ESCROW_ADDR);
+          if (al < usrDep) {
+            await (await usdc.approve(ESCROW_ADDR, usrDep * 10n, { gasLimit: 80000 })).wait();
+          }
+          const opTx = await escrow.operatorDeposit(escrowId, usrDep, { gasLimit: 150000 });
+          return opTx.wait();
+        });
+        if (opR) {
+          logger.info('operatorDeposit(보완) OK', { sessionId, tx: opR.hash });
         }
-        const opTx = await escrow.operatorDeposit(escrowId, usrDep, { gasLimit: 150000 });
-        const opR  = await opTx.wait();
-        logger.info('operatorDeposit(보완) OK', { sessionId, tx: opR.hash });
       }
       state = 2; // FullyFunded
     } catch (e) {
@@ -353,8 +442,10 @@ async function registerRefundIssue(sessionId, caseId, issueType, description, pe
   const num      = ISSUE_TYPE_MAP[issueType] ?? 5;
   const desc     = `${caseId}|${description}`.slice(0, 200);
 
-  const tx = await escrow.registerRefundIssue(escrowId, num, desc, penalizeOperator, { gasLimit: 200000 });
-  const r  = await tx.wait();
+  const r = await runOperatorTransaction(`REGISTER_REFUND:${sessionId}`, async () => {
+    const tx = await escrow.registerRefundIssue(escrowId, num, desc, penalizeOperator, { gasLimit: 200000 });
+    return tx.wait();
+  });
 
   await getPool().query(
     `UPDATE escrow_locks SET state='RefundIssue', case_id=$2 WHERE session_id=$1`,
@@ -416,10 +507,12 @@ async function refundToBuyer(sessionId, caseId) {
   // 현재 배포본은 UserDeposited/FullyFunded 모두 RefundIssue 등록 후 즉시 전액 환불 가능하다.
   if (state === 1 || state === 2) {
     try {
-      const rt = await escrow.registerRefundIssue(
-        escrowId, 5, `${caseId}|full_refund`, false, { gasLimit: 200000 }
-      );
-      await rt.wait();
+      await runOperatorTransaction(`REGISTER_REFUND:${sessionId}`, async () => {
+        const rt = await escrow.registerRefundIssue(
+          escrowId, 5, `${caseId}|full_refund`, false, { gasLimit: 200000 }
+        );
+        return rt.wait();
+      });
       logger.info('자동 registerRefundIssue OK', { sessionId });
     } catch (e) {
       logger.error('자동 registerRefundIssue 실패', { sessionId, error: e.message });
@@ -521,6 +614,13 @@ async function getOnchainStatus(sessionId) {
 // operatorDeposit (standalone) — deposit 라우트에서 직접 호출
 // ─────────────────────────────────────────────────────────────────
 async function operatorDeposit(sessionId, depositUsdc, userDepTxHash) {
+  return runOperatorTransaction(
+    `OPERATOR_DEPOSIT:${sessionId}`,
+    () => operatorDepositUnlocked(sessionId, depositUsdc, userDepTxHash)
+  );
+}
+
+async function operatorDepositUnlocked(sessionId, depositUsdc, userDepTxHash) {
   await ensureTable();
   const wallet   = getWallet();
   const escrow   = getEscrow(wallet);
@@ -615,6 +715,7 @@ async function claimSettlement(sessionId) {
 }
 
 module.exports = {
+  verifyUserDepositTransaction,
   recordUserDeposit,
   settleAndRelease,
   registerRefundIssue,

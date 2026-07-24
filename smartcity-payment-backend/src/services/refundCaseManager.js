@@ -78,17 +78,60 @@ async function createCase({ userAddress, sessionId, channelId, reason, requested
     throw new Error(`Invalid reason: ${reason}. Valid: ${REFUND_REASONS.join(', ')}`);
   }
 
-  const caseId = `case_${uuidv4().slice(0, 8)}`;
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  await getPool().query(
-    `INSERT INTO refund_cases
-     (id, session_id, channel_id, user_address, reason, requested_usdc, evidence)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [caseId, sessionId, channelId, userAddress, reason, requestedUsdc, JSON.stringify(evidence)]
-  );
+    if (sessionId) {
+      // Prevent two Railway requests from creating payout-capable cases for
+      // the same session at the same time.
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [sessionId]);
+      const existing = await client.query(
+        `SELECT id, status, user_address
+         FROM refund_cases
+         WHERE session_id=$1
+           AND status NOT IN ('REJECTED', 'CLOSED')
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [sessionId]
+      );
+      if (existing.rows[0]) {
+        if (existing.rows[0].user_address?.toLowerCase() !== userAddress.toLowerCase()) {
+          throw new Error('An active refund case for this session belongs to another wallet');
+        }
+        await client.query('COMMIT');
+        logger.info('Existing refund case reused', {
+          sessionId,
+          caseId: existing.rows[0].id,
+          status: existing.rows[0].status,
+        });
+        return {
+          id: existing.rows[0].id,
+          caseId: existing.rows[0].id,
+          status: existing.rows[0].status,
+          reused: true,
+        };
+      }
+    }
 
-  logger.info('Refund case created', { caseId, userAddress, reason, requestedUsdc });
-  return { id: caseId, caseId, status: CASE_STATES.RECEIVED };
+    const caseId = `case_${uuidv4().slice(0, 8)}`;
+    await client.query(
+      `INSERT INTO refund_cases
+       (id, session_id, channel_id, user_address, reason, requested_usdc, evidence)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [caseId, sessionId, channelId, userAddress, reason, requestedUsdc, JSON.stringify(evidence)]
+    );
+    await client.query('COMMIT');
+
+    logger.info('Refund case created', { caseId, userAddress, reason, requestedUsdc });
+    return { id: caseId, caseId, status: CASE_STATES.RECEIVED, reused: false };
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 // ── 상태 전이 ─────────────────────────────────────────────────────────────────
