@@ -11,16 +11,32 @@ const BACKEND = "https://payment-backend-production.up.railway.app";
 const STATUS_CONFIG = {
   ACTIVE:          { label: '이용 중',   color: 'bg-blue-100 text-blue-700'     },
   SETTLING:        { label: '정산 중',   color: 'bg-orange-100 text-orange-700' },
-  COMPLETED:       { label: '정산 완료', color: 'bg-green-100 text-green-700'   },
-  REFUNDED:        { label: '환불 완료', color: 'bg-emerald-100 text-emerald-700' },
+  COMPLETED:       { label: '정산 완료', color: 'bg-slate-100 text-slate-700'   },
+  REFUNDED:        { label: '환불 완료', color: 'bg-violet-100 text-violet-700 ring-1 ring-violet-200' },
   NEEDS_ATTENTION: { label: '확인 필요', color: 'bg-red-100 text-red-700'       },
+};
+
+const CHAIN_STATUS_KO = {
+  CONFIRMED: '확인 완료',
+  SUBMITTED: '확인 중',
+  QUEUED: '전송 대기',
+  REVERTED: '실패',
+  NEEDS_REVIEW: '확인 필요',
+};
+
+const ESCROW_STATUS_KO = {
+  Released: '정산 완료',
+  Refunded: '환불 완료',
+  PendingSettle: '정산 대기',
+  FullyFunded: '예치 완료',
+  RefundIssue: '환불 처리 중',
 };
 
 const FILTERS = [
   { key: 'all',             label: '전체'      },
   { key: 'ACTIVE',          label: '이용 중'   },
   { key: 'SETTLING',        label: '정산 중'   },
-  { key: 'COMPLETED',       label: '완료'      },
+  { key: 'COMPLETED',       label: '정산 완료' },
   { key: 'REFUNDED',        label: '환불 완료' },
   { key: 'NEEDS_ATTENTION', label: '확인 필요' },
 ];
@@ -55,8 +71,14 @@ export default function TransactionHistory() {
     s.txHash?.toLowerCase().includes(search.toLowerCase())
   );
 
-  const totalPaid   = sessions.reduce((a, s) => a + calcFare(s), 0);
-  const totalRefund = sessions.reduce((a, s) => a + calcRefund(s), 0);
+  const totalPaid = sessions.reduce(
+    (sum, s) => sum + (s.displayStatus === 'COMPLETED' ? calcFare(s) : 0),
+    0
+  );
+  const totalRefund = sessions.reduce(
+    (sum, s) => sum + (s.displayStatus === 'REFUNDED' ? calcRefund(s) : 0),
+    0
+  );
 
   const formatDate = (iso) => {
     if (!iso) return '-';
@@ -143,16 +165,21 @@ export default function TransactionHistory() {
               {sessions.map((s, i) => {
                 const status = STATUS_CONFIG[s.displayStatus] || STATUS_CONFIG.NEEDS_ATTENTION;
                 const isActive = s.displayStatus === 'ACTIVE';
+                const isRefunded = s.displayStatus === 'REFUNDED';
                 const isOpen = expanded === s.id;
                 return (
                   <motion.div key={s.id}
                     initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
                     transition={{ delay: i * 0.03 }}
-                    className="bg-white rounded-2xl shadow-sm overflow-hidden">
+                    className={`rounded-2xl shadow-sm overflow-hidden border ${
+                      isRefunded ? 'bg-violet-50/60 border-violet-200' : 'bg-white border-transparent'
+                    }`}>
                     {/* 헤더 행 */}
                     <button className="w-full flex items-center gap-3 p-4 text-left"
                       onClick={() => setExpanded(isOpen ? null : s.id)}>
-                      <div className="text-2xl flex-shrink-0">{s.serviceEmoji}</div>
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-2xl flex-shrink-0 ${
+                        isRefunded ? 'bg-violet-100' : 'bg-gray-50'
+                      }`}>{s.serviceEmoji}</div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <span className="font-semibold text-gray-900 text-sm">{s.serviceLabel}</span>
@@ -163,15 +190,21 @@ export default function TransactionHistory() {
                         <div className="text-xs text-gray-400 mt-0.5">{formatDate(s.startedAt)}</div>
                       </div>
                       <div className="text-right flex-shrink-0">
-                        <div className="font-bold text-gray-900 text-sm">
-                          {isActive ? `-${parseFloat(s.depositUsdc || 0).toFixed(2)}` : `-${calcFare(s).toFixed(4)}`}
+                        <div className={`font-bold text-sm ${isRefunded ? 'text-violet-700' : 'text-gray-900'}`}>
+                          {isRefunded
+                            ? `+${calcRefund(s).toFixed(4)}`
+                            : isActive
+                              ? `-${parseFloat(s.depositUsdc || 0).toFixed(2)}`
+                              : `-${calcFare(s).toFixed(4)}`}
                           <span className="text-xs text-gray-400 ml-0.5">USDC</span>
                         </div>
-                        {!isActive && calcRefund(s) > 0 && (
-                          <div className="text-xs text-green-600 font-medium">
-                            +{calcRefund(s).toFixed(4)} 환불
+                        {isRefunded ? (
+                          <div className="text-xs text-violet-600 font-semibold">전액 환불됨</div>
+                        ) : !isActive && calcRefund(s) > 0 ? (
+                          <div className="text-xs text-emerald-600 font-medium">
+                            +{calcRefund(s).toFixed(4)} 잔액 반환
                           </div>
-                        )}
+                        ) : null}
                       </div>
                       <ChevronDown className={`w-4 h-4 text-gray-300 flex-shrink-0 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
                     </button>
@@ -199,25 +232,38 @@ export default function TransactionHistory() {
                           <span>보증금</span>
                           <span className="text-gray-700">{parseFloat(s.depositUsdc || 0).toFixed(2)} USDC</span>
                         </div>
-                        {!isActive && calcFare(s) > 0 && (
+                        {isRefunded ? (
+                          <div className="rounded-xl bg-violet-100 border border-violet-200 px-3 py-2.5 space-y-1.5">
+                            <div className="flex justify-between text-violet-700">
+                              <span>결제 처리</span>
+                              <span className="font-semibold">전액 취소</span>
+                            </div>
+                            <div className="flex justify-between text-violet-700">
+                              <span>지갑 반환</span>
+                              <span className="font-bold">+{calcRefund(s).toFixed(4)} USDC</span>
+                            </div>
+                          </div>
+                        ) : !isActive && calcFare(s) > 0 && (
                           <div className="flex justify-between text-gray-500">
                             <span>이용 요금</span>
                             <span className="text-gray-700">{calcFare(s).toFixed(4)} USDC</span>
                           </div>
                         )}
-                        {!isActive && calcRefund(s) > 0 && (
+                        {!isRefunded && !isActive && calcRefund(s) > 0 && (
                           <div className="flex justify-between text-gray-500">
-                            <span>환불 금액</span>
-                            <span className="text-green-600 font-medium">{calcRefund(s).toFixed(4)} USDC</span>
+                            <span>잔액 반환</span>
+                            <span className="text-emerald-600 font-medium">{calcRefund(s).toFixed(4)} USDC</span>
                           </div>
                         )}
                         <div className="flex justify-between text-gray-500">
                           <span>에스크로 상태</span>
-                          <span className="text-gray-700">{s.escrowState || '-'}</span>
+                          <span className={isRefunded ? 'text-violet-700 font-semibold' : 'text-gray-700'}>
+                            {ESCROW_STATUS_KO[s.escrowState] || s.escrowState || '-'}
+                          </span>
                         </div>
                         <div className="flex justify-between text-gray-500">
                           <span>Base TX 상태</span>
-                          <span className="text-gray-700">{s.txStatus || '-'}</span>
+                          <span className="text-gray-700">{CHAIN_STATUS_KO[s.txStatus] || s.txStatus || '-'}</span>
                         </div>
                         {s.txError && (
                           <div className="rounded-lg bg-red-50 p-2 text-red-600 break-all">

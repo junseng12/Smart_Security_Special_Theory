@@ -386,7 +386,8 @@ router.get('/:id/escrow-status', async (req, res, next) => {
       } catch(e) {}
     }
 
-    const fareUsdc   = parseFloat(row.fare_amount || 0);
+    const isRefunded = row.state === 'Refunded' || onchain?.state === 'Refunded';
+    const fareUsdc   = isRefunded ? 0 : parseFloat(row.fare_amount || 0);
     const userDep    = parseFloat(row.user_deposit || 0);
     const refundUsdc = (userDep - fareUsdc).toFixed(6);
     const FINAL_STATES = new Set(['Released','Refunded']);
@@ -491,12 +492,12 @@ router.get('/', async (req, res, next) => {
          s.channel_id,
          s.status,
          s.deposit_usdc,
-         s.charged_usdc,
+         CASE WHEN el.state = 'Refunded' THEN 0 ELSE s.charged_usdc END AS charged_usdc,
          s.started_at,
          s.ended_at,
          s.settled_at,
          el.state         AS escrow_state,
-         el.fare_amount   AS fare_usdc,
+         CASE WHEN el.state = 'Refunded' THEN 0 ELSE el.fare_amount END AS fare_usdc,
          el.user_deposit,
          el.settle_tx,
          el.hold_deadline,
@@ -508,6 +509,8 @@ router.get('/', async (req, res, next) => {
          ct.last_error    AS chain_last_error,
          -- 환불 금액 계산
          CASE
+           WHEN el.state = 'Refunded' AND el.user_deposit IS NOT NULL
+           THEN el.user_deposit
            WHEN el.user_deposit IS NOT NULL AND el.fare_amount IS NOT NULL
            THEN (el.user_deposit - el.fare_amount)
            ELSE 0

@@ -14,6 +14,9 @@ const RATE_PER_MIN = {
  * 우선순위: ① DB fareUsdc > 0 → 그대로 / ② started_at+ended_at 기반 재계산
  */
 export function calcFare(s) {
+  // 환불 완료 세션은 결제가 취소된 것이므로 사용자 관점의 최종 이용 요금은 0이다.
+  if (s.displayStatus === 'REFUNDED' || s.escrowState === 'Refunded') return 0;
+
   const deposit = parseFloat(s.depositUsdc || 3.0);
   const fare    = parseFloat(s.fareUsdc || 0);
   if (fare > 0 && fare <= deposit) return fare;
@@ -41,8 +44,9 @@ export function calcFare(s) {
 export function calcRefund(s) {
   const deposit = parseFloat(s.depositUsdc || 3.0);
   const refund  = parseFloat(s.refundUsdc || 0);
-  // 정상 범위(0 < refund < deposit)면 그대로
-  if (refund > 0 && refund < deposit) return refund;
+  if (s.displayStatus === 'REFUNDED' || s.escrowState === 'Refunded') return deposit;
+  // 전액 환불을 포함한 정상 범위면 API 값을 그대로 사용한다.
+  if (refund > 0 && refund <= deposit) return refund;
   const fare = calcFare(s);
   return Math.max(0, parseFloat((deposit - fare).toFixed(6)));
 }

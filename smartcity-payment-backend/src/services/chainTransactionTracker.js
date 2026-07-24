@@ -245,7 +245,10 @@ async function confirmTransaction(id, suppliedReceipt = null) {
        WHERE id=$1`,
       [id, Number(receipt.blockNumber), JSON.stringify(receiptSnapshot(receipt))]
     );
-    const settledFare = record.action === 'SETTLE' ? onchain.fareAmount : null;
+    // 현재 환불 정책은 전액 환불이므로 REFUND 확정 시 최종 이용요금은 0이다.
+    const settledFare = record.action === 'SETTLE'
+      ? onchain.fareAmount
+      : record.action === 'REFUND' ? '0.000000' : null;
     await client.query(
       `UPDATE escrow_locks
        SET state=$2, settle_tx=$3, settled_at=NOW(), last_error=NULL,

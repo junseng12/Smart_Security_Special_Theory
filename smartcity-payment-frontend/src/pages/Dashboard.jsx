@@ -18,7 +18,7 @@ const SERVICE_EMOJI = { bicycle: '🚲', ev_charging: '⚡', parking: '🅿️' 
 const STATUS_COLOR  = {
   ACTIVE:          'text-blue-600',
   COMPLETED:       'text-green-600',
-  REFUNDED:        'text-emerald-600',
+  REFUNDED:        'text-violet-400',
   SETTLING:        'text-orange-600',
   NEEDS_ATTENTION: 'text-red-500',
 };
@@ -234,31 +234,48 @@ export default function Dashboard() {
               </div>
             ) : (
               <div className="space-y-2">
-                {recentSessions.map((s, i) => (
+                {recentSessions.map((s, i) => {
+                  const isRefunded = s.displayStatus === 'REFUNDED';
+                  return (
                   <motion.div key={s.id}
                     initial={{ opacity:0, x:-10 }} animate={{ opacity:1, x:0 }}
                     transition={{ delay: i * 0.05 }}
-                    className="bg-card border border-border rounded-xl flex items-center gap-3 p-3">
-                    <div className="w-10 h-10 bg-gray-100 rounded-xl flex items-center justify-center text-xl flex-shrink-0">
+                    className={`border rounded-xl flex items-center gap-3 p-3 ${
+                      isRefunded ? 'bg-violet-500/10 border-violet-400/30' : 'bg-card border-border'
+                    }`}>
+                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-xl flex-shrink-0 ${
+                      isRefunded ? 'bg-violet-400/20' : 'bg-white'
+                    }`}>
                       {s.serviceEmoji}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-sm font-semibold text-gray-900 truncate">{s.serviceLabel}</div>
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <div className="text-sm font-semibold text-foreground truncate">{s.serviceLabel}</div>
+                        {isRefunded && (
+                          <span className="shrink-0 rounded-full bg-violet-400/20 px-1.5 py-0.5 text-[10px] font-semibold text-violet-300">
+                            환불 완료
+                          </span>
+                        )}
+                      </div>
                       <div className="text-xs text-gray-400">{formatDate(s.startedAt)}</div>
                     </div>
                     <div className="text-right flex-shrink-0">
                       <div className={`text-sm font-bold ${STATUS_COLOR[s.displayStatus] || 'text-gray-700'}`}>
-                        {s.displayStatus === 'ACTIVE'
-                          ? `${parseFloat(s.depositUsdc||0).toFixed(2)} USDC`
-                          : `-${calcFare(s).toFixed(4)} USDC`
-                        }
+                        {isRefunded
+                          ? `+${calcRefund(s).toFixed(4)} USDC`
+                          : s.displayStatus === 'ACTIVE'
+                            ? `${parseFloat(s.depositUsdc||0).toFixed(2)} USDC`
+                            : `-${calcFare(s).toFixed(4)} USDC`}
                       </div>
-                      {s.displayStatus !== 'ACTIVE' && calcRefund(s) > 0 && (
-                        <div className="text-xs text-green-600">+{calcRefund(s).toFixed(4)} 환불</div>
-                      )}
+                      {isRefunded ? (
+                        <div className="text-xs font-medium text-violet-300">전액 환불됨</div>
+                      ) : s.displayStatus !== 'ACTIVE' && calcRefund(s) > 0 ? (
+                        <div className="text-xs text-emerald-500">+{calcRefund(s).toFixed(4)} 잔액 반환</div>
+                      ) : null}
                     </div>
                   </motion.div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
