@@ -30,7 +30,8 @@ const ESCROW_ABI = [
   'function operatorDeposit(bytes32 escrowId, uint256 amount) external',
   'function settleAndRelease(bytes32 escrowId, uint256 fareAmount) external',
   'function registerRefundIssue(bytes32 escrowId, uint8 issueType, string calldata description, bool penalizeOperator) external',
-  'function refundToBuyer(bytes32 escrowId, uint256 refundFare) external',
+  // 현재 0xa264... 배포본은 사용자 예치금 전액 환불형 1-argument ABI이다.
+  'function refundToBuyer(bytes32 escrowId) external',
   'function forceRefund(bytes32 escrowId) external',
   'function emergencyCancel(bytes32 escrowId) external',
   'function getEscrowStatus(bytes32 escrowId) external view returns (uint8 state, uint256 userDeposit, uint256 operatorDeposit, uint256 fareAmount, address user, address operator, uint256 holdDeadline, bool isFullyFunded, bool isDeadlinePassed)',
@@ -368,7 +369,7 @@ async function registerRefundIssue(sessionId, caseId, issueType, description, pe
 // 4. refundToBuyer
 //    환불 승인 시 호출 — RefundIssue → Refunded
 // ─────────────────────────────────────────────────────────────────
-async function refundToBuyer(sessionId, caseId, refundFare) {
+async function refundToBuyer(sessionId, caseId) {
   await ensureTable();
   const wallet   = getWallet();
   const escrow   = getEscrow(wallet);
@@ -392,57 +393,45 @@ async function refundToBuyer(sessionId, caseId, refundFare) {
     return { skipped: true, confirmed: false, reason: 'no_onchain_escrow' };
   }
 
-  if (state === 4 || state === 5) {
+  if (state === 5) {
     await chainTx.syncFinalState(sessionId, STATE_LABELS[state]);
     return {
       skipped: true,
       confirmed: true,
-      reason: 'already_settled',
+      reason: 'already_refunded',
       state: STATE_LABELS[state],
     };
   }
 
-  // FullyFunded(2) 상태 → 먼저 registerRefundIssue 필요
-  if (state === 2) {
+  if (state === 4) {
+    await chainTx.syncFinalState(sessionId, STATE_LABELS[state]);
+    return {
+      skipped: true,
+      confirmed: false,
+      reason: 'already_released',
+      state: STATE_LABELS[state],
+    };
+  }
+
+  // 현재 배포본은 UserDeposited/FullyFunded 모두 RefundIssue 등록 후 즉시 전액 환불 가능하다.
+  if (state === 1 || state === 2) {
     try {
       const rt = await escrow.registerRefundIssue(
-        escrowId, 5, `${caseId}|manual_refund`, false, { gasLimit: 200000 }
+        escrowId, 5, `${caseId}|full_refund`, false, { gasLimit: 200000 }
       );
       await rt.wait();
       logger.info('자동 registerRefundIssue OK', { sessionId });
     } catch (e) {
       logger.error('자동 registerRefundIssue 실패', { sessionId, error: e.message });
-    }
-  }
-
-  // UserDeposited(1) → forceRefund 직접 사용
-  if (state === 1) {
-    try {
-      const { receipt: fr } = await executeTrackedFinalTx({
-        sessionId,
-        action: 'REFUND',
-        send: () => escrow.forceRefund(escrowId, { gasLimit: 200000 }),
-      });
-      await getPool().query(
-        `UPDATE escrow_locks SET case_id=$2 WHERE session_id=$1`,
-        [sessionId, caseId]
-      ).catch(() => {});
-      logger.info('forceRefund OK (UserDeposited→Refunded)', { sessionId, tx: fr.hash });
-      return { txHash: fr.hash, confirmed: true, state: 'Refunded', mode: 'force_refund' };
-    } catch (e) {
-      logger.error('forceRefund 실패', { sessionId, error: e.message });
       throw e;
     }
   }
 
-  // RefundIssue(3) → refundToBuyer
-  const refundFareWei = refundFare != null
-    ? ethers.parseUnits(String(parseFloat(refundFare).toFixed(6)), 6)
-    : 0n;
+  // RefundIssue(3) → 현재 배포본의 refundToBuyer(bytes32): 사용자 예치금 전액 반환
   const { receipt: r } = await executeTrackedFinalTx({
     sessionId,
     action: 'REFUND',
-    send: () => escrow.refundToBuyer(escrowId, refundFareWei, { gasLimit: 200000 }),
+    send: () => escrow.refundToBuyer(escrowId, { gasLimit: 200000 }),
   });
 
   await getPool().query(
@@ -451,7 +440,7 @@ async function refundToBuyer(sessionId, caseId, refundFare) {
   ).catch(() => {});
 
   logger.info('refundToBuyer OK', { sessionId, tx: r.hash });
-  return { txHash: r.hash, confirmed: true, state: 'Refunded', mode: 'refund_to_buyer' };
+  return { txHash: r.hash, confirmed: true, state: 'Refunded', mode: 'full_refund_to_buyer' };
 }
 
 // ─────────────────────────────────────────────────────────────────

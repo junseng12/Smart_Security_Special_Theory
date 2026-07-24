@@ -6,7 +6,7 @@
  * POST /api/v1/refunds/:caseId/evaluate      자동 심사 실행
  * POST /api/v1/refunds/:caseId/approve       운영자 수동 승인
  * POST /api/v1/refunds/:caseId/reject        운영자 수동 거절
- * POST /api/v1/refunds/:caseId/payout        온체인 환불 실행 (V3.2 calcRefundFare 적용)
+ * POST /api/v1/refunds/:caseId/payout        온체인 전액 환불 실행
  * GET  /api/v1/refunds                       케이스 목록
  */
 
@@ -97,11 +97,9 @@ router.post('/:caseId/reject', validate(rejectSchema), async (req, res, next) =>
 });
 
 // ── POST /refunds/:caseId/payout ──────────────────────────────────────────────
-// V3.2: calcRefundFare() 기반 온체인 환불 실행
-// body: { sessionId }  — 승인된 케이스에 대한 에스크로 refundToBuyer 호출
+// 현재 0xa264... 배포본 정책: 승인된 케이스는 사용자 예치금 전액 환불
 const payoutSchema = Joi.object({
-  sessionId:          Joi.string().required(),
-  confirmedUsageFare: Joi.string().pattern(/^\d+(\.\d{1,6})?$/).optional(), // 수동 지정 시
+  sessionId: Joi.string().required(),
 });
 
 router.post('/:caseId/payout', validate(payoutSchema), async (req, res, next) => {
@@ -117,64 +115,40 @@ router.post('/:caseId/payout', validate(payoutSchema), async (req, res, next) =>
     }
 
     const { getPool } = require('../services/db');
-    const fareEngine   = require('../services/fareEngine');
-
-    // 2) DB에서 세션 실제 데이터 조회 (프론트 값 무시, 백엔드 기준 재계산)
-    let depositUsdc    = '3.0';
-    let backendFare    = null;
-
-    try {
-      const { rows } = await getPool().query(
-        `SELECT s.started_at, s.service_type, s.ended_at,
-                e.user_deposit
+    // 2) 세션 소유권과 예치금 확인
+    const { rows } = await getPool().query(
+        `SELECT s.user_address, s.deposit_usdc, e.user_deposit
          FROM sessions s
          LEFT JOIN escrow_locks e ON e.session_id = s.id
          WHERE s.id = $1 LIMIT 1`,
         [sessionId]
       );
-      if (rows[0]) {
-        const row = rows[0];
-        if (row.user_deposit) depositUsdc = row.user_deposit;
-
-        // unlock_failure / service_outage → 전액 환불, fare = 0
-        const fullRefundReasons = ['unlock_failure', 'service_outage'];
-        if (fullRefundReasons.includes(c.reason)) {
-          backendFare = '0';
-        } else if (row.started_at && row.service_type) {
-          // 그 외 케이스 → 백엔드 DB 기준 실제 사용 시간으로 재계산
-          const endTs   = row.ended_at ? new Date(row.ended_at) : new Date();
-          const startTs = new Date(row.started_at);
-          const durationMinutes = Math.max(0, (endTs - startTs) / 60_000);
-
-          const fareResult = await fareEngine.calculateFare({
-            sessionId,
-            serviceType: row.service_type,
-            usage: { durationMinutes },
-          }).catch(() => null);
-
-          if (fareResult?.fare != null) {
-            backendFare = String(fareResult.fare);
-          }
-        }
-      }
-    } catch (dbErr) {
-      logger.warn('payout: DB 세션 조회 실패, decisionEngine 폴백', { dbErr: dbErr.message });
+    if (!rows[0]) return res.status(404).json({ ok: false, error: 'Session not found' });
+    if (c.session_id && c.session_id !== sessionId) {
+      return res.status(400).json({ ok: false, error: 'Case session does not match payout session' });
     }
+    if (rows[0].user_address?.toLowerCase() !== c.user_address?.toLowerCase()) {
+      return res.status(403).json({ ok: false, error: 'Refund case owner does not match session owner' });
+    }
+    const depositUsdc = String(rows[0].user_deposit || rows[0].deposit_usdc || '0');
 
-    // 3) fare 최종 결정: DB 재계산 → decisionEngine 폴백
-    const refundFare = backendFare ??
-      decisionEngine.calcRefundFare(c.reason, '0', depositUsdc);
-
-    logger.info('Refund payout V3.2 (backend-recalculated)', {
-      caseId, sessionId, reason: c.reason,
-      depositUsdc, refundFare, approvedUsdc: c.approved_usdc,
-      source: backendFare != null ? 'db_recalc' : 'decision_engine_fallback',
+    logger.info('Full refund payout requested', {
+      caseId, sessionId, reason: c.reason, depositUsdc, approvedUsdc: c.approved_usdc,
     });
 
-    // 4) 온체인 refundToBuyer 실행
-    const result = await escrow.refundToBuyer(sessionId, caseId, refundFare);
+    // 3) 실제 배포 컨트랙트의 refundToBuyer(bytes32) 실행
+    const result = await escrow.refundToBuyer(sessionId, caseId);
+    if (!result.confirmed) {
+      return res.status(409).json({ ok: false, error: `Refund not executed: ${result.reason}` });
+    }
 
-    res.json({ ok: true, data: { ...result, refundFare, depositUsdc, caseId } });
+    // 4) 온체인 Refunded 상태가 확인된 뒤에만 케이스 지급 완료 처리
+    await caseMgr.markPaid(caseId);
+
+    res.json({
+      ok: true,
+      data: { ...result, refundFare: '0.000000', refundUsdc: depositUsdc, depositUsdc, caseId },
+    });
   } catch (err) { next(err); }
 });
 
