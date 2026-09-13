@@ -1,6 +1,8 @@
 # Stage 1: Build
 FROM node:20-alpine AS builder
 WORKDIR /app
+ARG VITE_ESCROW_CONTRACT_ADDRESS
+ENV VITE_ESCROW_CONTRACT_ADDRESS=$VITE_ESCROW_CONTRACT_ADDRESS
 COPY package*.json ./
 RUN npm install
 RUN echo 'cache bust: 1781694613'
