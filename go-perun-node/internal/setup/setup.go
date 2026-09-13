@@ -66,10 +66,10 @@ type PerunNode struct {
 // NewPerunNode — LocalBus 기반 초기화 (P2P 없음)
 func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	log.WithFields(logrus.Fields{
-		"rpc":          cfg.RPCURL,
-		"chain_id":     cfg.ChainID,
-		"adjudicator":  cfg.AdjudicatorAddr.Hex(),
-		"asset_holder": cfg.AssetHolderAddr.Hex(),
+		"rpc_configured": cfg.RPCURL != "",
+		"chain_id":       cfg.ChainID,
+		"adjudicator":    cfg.AdjudicatorAddr.Hex(),
+		"asset_holder":   cfg.AssetHolderAddr.Hex(),
 	}).Info("[Setup] Initializing go-perun node")
 
 	// Step 1: 개인키 + simple wallet
