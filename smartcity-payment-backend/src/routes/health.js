@@ -4,19 +4,21 @@ const router = Router();
 router.get('/', (req, res) => {
   const redis = require('../services/redisClient');
   const db = require('../services/db');
+  const perunClient = require('../services/perunClient');
 
   Promise.all([
     redis.getRedis().ping().then(() => 'ok').catch(() => 'error'),
     db.getPool().query('SELECT 1').then(() => 'ok').catch(() => 'error'),
-  ]).then(([redisStatus, dbStatus]) => {
+    perunClient.ping().catch(err => ({ connected: false, mode: perunClient.getMode(), error: err.message })),
+  ]).then(([redisStatus, dbStatus, perunStatus]) => {
     const perunHost = process.env.PERUN_GRPC_HOST;
     res.json({
       status: 'healthy',
       checks: {
         redis: redisStatus,
         db: dbStatus,
-        perun: perunHost ? `grpc:${perunHost}` : 'mock:mock',
-        perun_detail: { connected: !!perunHost, mode: perunHost ? 'grpc' : 'mock', host: perunHost || null },
+        perun: perunStatus.connected ? `grpc:${perunHost}` : `${perunStatus.mode}:unavailable`,
+        perun_detail: { ...perunStatus, host: perunHost || null },
       },
       ts: new Date().toISOString(),
     });
