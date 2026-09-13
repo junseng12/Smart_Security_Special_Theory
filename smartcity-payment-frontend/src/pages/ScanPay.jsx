@@ -12,7 +12,7 @@ import useMetaMaskProvider from '@/hooks/use-metamask-provider';
 
 const BACKEND          = "https://payment-backend-production.up.railway.app";
 const OPERATOR_ADDRESS  = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
-const ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"; // V3.2
+const ESCROW_V3_ADDRESS = import.meta.env.VITE_ESCROW_CONTRACT_ADDRESS; // V3.2
 
 const SERVICE_META = {
   bicycle:     { label: "공유 자전거", emoji: "🚲", depositUsdc: 3.0 },
@@ -455,7 +455,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
       if (stage !== "deposited") {
         addLog("③ MetaMask: 에스크로 예치 서명 요청...", "info");
-        const depositTxHash = await escrowUserDeposit(addr, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline);
+        const depositTxHash = await escrowUserDeposit(addr, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline, channelId);
         addLog(`✅ TX: ${depositTxHash.slice(0, 16)}...`, "success");
         saveProc({ ...proc, stage: "deposited", depositTxHash, startedAt: null });
         proc.depositTxHash = depositTxHash;
@@ -515,7 +515,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "approved", startedAt: null });
 
       addLog("③ MetaMask: 에스크로 예치 서명 요청...", "info");
-      const depositTxHash = await escrowUserDeposit(addr, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline);
+      const depositTxHash = await escrowUserDeposit(addr, escrowId, OPERATOR_ADDRESS, svc.depositUsdc, holdDeadline, channelId);
       addLog(`✅ TX: ${depositTxHash.slice(0, 16)}...`, "success");
       saveProc({ svc, addr, sessionId, channelId, escrowId, holdDeadline, stage: "deposited", depositTxHash, startedAt: null });
 

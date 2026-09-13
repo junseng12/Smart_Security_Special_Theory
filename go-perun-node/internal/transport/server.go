@@ -10,10 +10,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 
-	pb "smartcity/go-perun-node/proto"
 	"smartcity/go-perun-node/internal/audit"
 	"smartcity/go-perun-node/internal/channel"
 	"smartcity/go-perun-node/internal/refund"
+	pb "smartcity/go-perun-node/proto"
 )
 
 type Server struct {
@@ -39,10 +39,12 @@ func (s *Server) StartSession(ctx context.Context, req *pb.StartSessionRequest) 
 	}).Info("[Session] StartSession (fundCtx 3min)")
 
 	res, err := s.orch.StartSessionAndOpen(fundCtx, channel.StartRequest{
-		UserAddress: req.UserAddress,
-		ServiceID:   req.ServiceId,
-		DepositUsdc: req.DepositUsdc,
-		HoldSeconds: req.HoldSeconds,
+		ExternalSessionID: req.ExternalSessionId,
+		EscrowID:          req.EscrowId,
+		UserAddress:       req.UserAddress,
+		ServiceID:         req.ServiceId,
+		DepositUsdc:       req.DepositUsdc,
+		HoldSeconds:       req.HoldSeconds,
 	})
 	if err != nil {
 		s.log.WithError(err).Error("[Session] StartSession failed")
@@ -59,33 +61,32 @@ func (s *Server) StartSession(ctx context.Context, req *pb.StartSessionRequest) 
 	}, nil
 }
 
-// EndSession — 온체인 정산
-// ★ user_final_sig 필드에 chargedUsdc 값이 실려 옴 (Node.js DB 폴백)
-//   인메모리 세션이 없을 때(컨테이너 재시작 등) 이 값으로 FinalUpdate 수행
+// EndSession finalizes or restores the Perun channel, then exports the native proof.
 func (s *Server) EndSession(ctx context.Context, req *pb.EndSessionRequest) (*pb.EndSessionResponse, error) {
 	settleCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	s.log.WithFields(logrus.Fields{
-		"session_id":   req.SessionId,
-		"channel_id":   req.ChannelId,
-		"charged_usdc": req.UserFinalSig, // user_final_sig 필드에 chargedUsdc 값 전달
+		"session_id": req.SessionId,
+		"channel_id": req.ChannelId,
 	}).Info("[Session] EndSession")
 
 	res, err := s.orch.EndSessionAndSettle(settleCtx, channel.EndRequest{
 		SessionID:   req.SessionId,
 		ChannelID:   req.ChannelId,
 		UserAddress: req.UserAddress,
-		ChargedUsdc: req.UserFinalSig, // ★ 폴백: Node.js DB에서 읽은 charged_usdc
 	})
 	if err != nil {
 		s.log.WithError(err).Error("[Session] EndSession failed")
 		return &pb.EndSessionResponse{Ok: false, Error: err.Error()}, nil
 	}
-	return &pb.EndSessionResponse{Ok: true, FareUsdc: res.FareUsdc, RefundUsdc: res.RefundUsdc}, nil
+	return &pb.EndSessionResponse{Ok: true, FareUsdc: res.FareUsdc, RefundUsdc: res.RefundUsdc, ParamsAbi: res.Proof.ParamsABI, StateAbi: res.Proof.StateABI, Signatures: res.Proof.Signatures, StateHash: res.Proof.StateHash}, nil
 }
 
 func (s *Server) ProposeUsageUpdate(ctx context.Context, req *pb.ProposeUsageUpdateRequest) (*pb.ProposeUsageUpdateResponse, error) {
+	if req.UsageDelta == nil {
+		return &pb.ProposeUsageUpdateResponse{Ok: false, Error: "usage_delta required"}, nil
+	}
 	res, err := s.orch.ChargeUsage(ctx, channel.ChargeReq{
 		SessionID:       req.SessionId,
 		ChannelID:       req.ChannelId,

@@ -7,8 +7,8 @@ pragma solidity ^0.8.24;
  *
  * Core idea:
  * - The contract acts like a card-network-style intermediary.
- * - settleAndRelease() does NOT transfer funds immediately.
- * - It records a pending settlement and opens a 24-hour dispute window.
+ * - settleAndRelease() verifies a final Perun state before reserving funds.
+ * - It records a pending settlement and opens a dispute window.
  * - If there is no dispute, claimSettlement() transfers the reserved funds.
  * - If there is a dispute, registerRefundIssue() and refundToBuyer() handle refund.
  *
@@ -18,11 +18,12 @@ pragma solidity ^0.8.24;
  * - The user only receives the refundable portion of the user's own deposit.
  *
  * Backend ABI compatibility target:
- * - userDeposit(bytes32,address,uint256,uint256)
+ * - userDeposit(bytes32,address,uint256,uint256,bytes32)
  * - operatorDeposit(bytes32,uint256)
- * - settleAndRelease(bytes32,uint256)
+ * - settleAndRelease(bytes32,bytes,bytes,bytes[])
  * - registerRefundIssue(bytes32,uint8,string,bool)
  * - refundToBuyer(bytes32,uint256)
+ * - verifiedFare(bytes32,bytes,bytes,bytes[])
  * - forceRefund(bytes32)
  * - emergencyCancel(bytes32)
  * - getEscrowStatus(bytes32)
@@ -39,6 +40,10 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
+import "./PerunTypes.sol";
+import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+
 contract SmartCityEscrow is AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -50,7 +55,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
     // -------------------------------------------------------------------------
     // Time constants
     // -------------------------------------------------------------------------
-    uint256 public constant CLAIM_PERIOD = 4 minutes; // [TEST] 4분 분쟁 기간 (운영: 24 hours)
+    uint256 public constant CLAIM_PERIOD = 4 minutes; // Local-test dispute window; production can raise this to 24 hours.
     uint256 public constant FORCE_REFUND_GRACE_PERIOD = 1 hours;
 
     // -------------------------------------------------------------------------
@@ -85,7 +90,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         uint256 userDeposit;
         uint256 operatorDeposit;
 
-        // Final fare amount submitted by backend / Perun settlement result.
+        // Final fare extracted from verified Perun appData.
         uint256 fareAmount;
 
         // Original service deadline.
@@ -128,6 +133,19 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
     IERC20 public immutable usdc;
 
     mapping(bytes32 => EscrowRecord) private escrows;
+    mapping(bytes32 => bytes32) public perunChannelIDs;
+    mapping(bytes32 => bool) public usedPerunChannels;
+    error InvalidPerunProof();
+    event PerunChannelBound(bytes32 indexed escrowId, bytes32 indexed channelId);
+    event PerunSettlementVerified(bytes32 indexed escrowId, bytes32 indexed channelId, bytes32 stateHash, uint64 version);
+    struct PaymentData {
+        bytes32 escrowId;
+        uint256 fare;
+        uint256 chainId;
+        address escrowAddress;
+        address user;
+        uint256 deposit;
+    }
     mapping(bytes32 => IssueRecord) private issues;
 
     // -------------------------------------------------------------------------
@@ -258,7 +276,8 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         bytes32 escrowId,
         address operator,
         uint256 amount,
-        uint256 holdDeadline
+        uint256 holdDeadline,
+        bytes32 channelId
     ) external nonReentrant {
         if (escrows[escrowId].state != EscrowState.None) {
             revert EscrowAlreadyExists(escrowId);
@@ -286,6 +305,10 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
             settlementClaimed: false
         });
 
+        if (channelId == bytes32(0) || usedPerunChannels[channelId]) revert InvalidPerunProof();
+        perunChannelIDs[escrowId] = channelId;
+        usedPerunChannels[channelId] = true;
+        emit PerunChannelBound(escrowId, channelId);
         usdc.safeTransferFrom(msg.sender, address(this), amount);
 
         emit UserDeposited(escrowId, msg.sender, operator, amount, holdDeadline);
@@ -327,8 +350,13 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
      */
     function settleAndRelease(
         bytes32 escrowId,
-        uint256 fareAmount
+        bytes calldata paramsABI,
+        bytes calldata stateABI,
+        bytes[] calldata signatures
     ) external onlyRole(OPERATOR_ROLE) nonReentrant {
+        uint256 fareAmount = verifiedFare(escrowId, paramsABI, stateABI, signatures);
+        PerunTypes.State memory finalState = abi.decode(stateABI, (PerunTypes.State));
+        emit PerunSettlementVerified(escrowId, finalState.channelID, keccak256(stateABI), finalState.version);
         EscrowRecord storage rec = escrows[escrowId];
 
         if (rec.state == EscrowState.None) revert EscrowNotFound(escrowId);
@@ -382,6 +410,29 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
             userRefund,
             operatorRefund
         );
+    }
+
+    /// @notice Validate native Perun proof and return only its signed fare.
+    function verifiedFare(bytes32 escrowId, bytes calldata paramsABI, bytes calldata stateABI, bytes[] calldata signatures)
+        public view returns (uint256)
+    {
+        PerunTypes.Params memory p = abi.decode(paramsABI, (PerunTypes.Params));
+        PerunTypes.State memory s = abi.decode(stateABI, (PerunTypes.State));
+        if (keccak256(paramsABI) != keccak256(abi.encode(p)) || keccak256(stateABI) != keccak256(abi.encode(s))) revert InvalidPerunProof();
+        if (s.channelID == bytes32(0) || s.channelID != perunChannelIDs[escrowId] || s.channelID != keccak256(paramsABI)) revert InvalidPerunProof();
+        if (p.app != address(this) || !p.ledgerChannel || p.virtualChannel || !s.isFinal || s.version == 0) revert InvalidPerunProof();
+        if (p.participants.length != 2 || signatures.length != 2 || p.participants[0].ethAddress != escrows[escrowId].operator || p.participants[1].ethAddress == address(0) || p.participants[0].ethAddress == p.participants[1].ethAddress) revert InvalidPerunProof();
+        if (s.outcome.assets.length != 1 || s.outcome.backends.length != 1 || s.outcome.backends[0] != 1 || s.outcome.balances.length != 1 || s.outcome.balances[0].length != 2 || s.outcome.locked.length != 0) revert InvalidPerunProof();
+        if (s.outcome.assets[0].chainID != block.chainid || s.outcome.balances[0][0] != 0 || s.outcome.balances[0][1] != 0) revert InvalidPerunProof();
+        bytes32 digest = MessageHashUtils.toEthSignedMessageHash(keccak256(stateABI));
+        for (uint256 i; i < 2; ++i) {
+            if (signatures[i].length != 65 || ECDSA.recover(digest, signatures[i]) != p.participants[i].ethAddress) revert InvalidPerunProof();
+        }
+        if (s.appData.length != 192) revert InvalidPerunProof();
+        PaymentData memory d = abi.decode(s.appData, (PaymentData));
+        if (keccak256(s.appData) != keccak256(abi.encode(d)) || d.escrowId != escrowId || d.chainId != block.chainid || d.escrowAddress != address(this) || d.user != escrows[escrowId].user || d.deposit != escrows[escrowId].userDeposit) revert InvalidPerunProof();
+        if (d.fare > d.deposit) revert FareExceedsUserDeposit(d.fare, d.deposit);
+        return d.fare;
     }
 
     // -------------------------------------------------------------------------
@@ -515,8 +566,8 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
      *   Pass 0 for full refund cases (unlock failure, complete service outage).
      *   Pass the actual fare for partial-use cases (device fault mid-ride).
      *   Must not exceed fareClaimed (or userDeposit when no settlement was reserved).
-     * @dev The backend (channelOrchestrator) decides refundFare based on issueType
-     *      and confirmed usage data before calling this function.
+     * @dev Before settlement reservation, refundFare must be zero. After
+     *      reservation, refundFare cannot exceed the fare from verified Perun appData.
      */
     function refundToBuyer(
         bytes32 escrowId,
@@ -529,7 +580,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         if (msg.sender != rec.operator) revert NotEscrowOperator(escrowId, msg.sender);
 
         // refundFare must not exceed the maximum chargeable amount
-        uint256 maxFare = rec.claimableAfter > 0 ? rec.fareClaimed : rec.userDeposit;
+        uint256 maxFare = rec.claimableAfter > 0 ? rec.fareClaimed : 0;
         if (refundFare > maxFare) revert FareExceedsUserDeposit(refundFare, maxFare);
 
         _executeRefundToBuyer(escrowId, rec, refundFare);

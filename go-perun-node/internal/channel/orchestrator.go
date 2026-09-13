@@ -3,7 +3,13 @@ package channel
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"github.com/ethereum/go-ethereum/crypto"
+	"math/big"
+	"smartcity/go-perun-node/internal/paymentapp"
+	"smartcity/go-perun-node/internal/pricing"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
@@ -27,11 +33,13 @@ func NewOrchestrator(ch *Manager, sess *session.Manager, ref *refund.Manager, au
 }
 
 type StartRequest struct {
-	UserAddress  string
-	ServiceID    string
-	DepositUsdc  string
-	UserWireAddr interface{}
-	HoldSeconds  int64
+	ExternalSessionID string
+	EscrowID          string
+	UserAddress       string
+	ServiceID         string
+	DepositUsdc       string
+	UserWireAddr      interface{}
+	HoldSeconds       int64
 }
 
 type StartResult struct {
@@ -43,7 +51,12 @@ type StartResult struct {
 }
 
 func (o *Orchestrator) StartSessionAndOpen(ctx context.Context, req StartRequest) (*StartResult, error) {
-	sess, err := o.sessions.Start(ctx, req.UserAddress, req.ServiceID, req.DepositUsdc)
+	expected := crypto.Keccak256Hash([]byte(req.ExternalSessionID))
+	raw, err := hex.DecodeString(strings.TrimPrefix(req.EscrowID, "0x"))
+	if req.ExternalSessionID == "" || err != nil || len(raw) != 32 || !strings.EqualFold(req.EscrowID, expected.Hex()) {
+		return nil, fmt.Errorf("external session ID and canonical escrow ID required")
+	}
+	sess, err := o.sessions.Start(ctx, req.ExternalSessionID, req.UserAddress, req.ServiceID, req.DepositUsdc)
 	if err != nil {
 		return nil, errors.Wrap(err, "starting session")
 	}
@@ -52,6 +65,7 @@ func (o *Orchestrator) StartSessionAndOpen(ctx context.Context, req StartRequest
 
 	openRes, err := o.channels.OpenChannel(ctx, OpenParams{
 		SessionID:    sess.ID,
+		EscrowID:     expected,
 		UserAddress:  req.UserAddress,
 		DepositUsdc:  req.DepositUsdc,
 		HoldDeadline: holdDeadline,
@@ -60,7 +74,7 @@ func (o *Orchestrator) StartSessionAndOpen(ctx context.Context, req StartRequest
 		return nil, errors.Wrap(err, "opening channel")
 	}
 
-	escrowID := fmt.Sprintf("0x%x", simpleHash(sess.ID))
+	escrowID := expected.Hex()
 	o.sessions.LinkChannel(sess.ID, openRes.ChannelID, escrowID, holdDeadline) //nolint:errcheck
 	o.audit.Log(ctx, audit.ActionChannelOpen, openRes.ChannelID, sess.ID, map[string]any{
 		"deposit_usdc": req.DepositUsdc,
@@ -81,6 +95,13 @@ type ChargeReq struct {
 }
 
 func (o *Orchestrator) ChargeUsage(ctx context.Context, req ChargeReq) (*ChargeResult, error) {
+	h, err := o.channels.get(req.ChannelID)
+	if err != nil {
+		return nil, err
+	}
+	if h.SessionID != req.SessionID {
+		return nil, fmt.Errorf("session/channel mismatch")
+	}
 	res, err := o.channels.ChargeUsage(ctx, ChargeRequest{
 		ChannelID:       req.ChannelID,
 		ServiceType:     req.ServiceType,
@@ -97,75 +118,38 @@ func (o *Orchestrator) ChargeUsage(ctx context.Context, req ChargeReq) (*ChargeR
 	return res, nil
 }
 
-// EndRequest — ChargedUsdc 필드 추가
-// ★ 컨테이너 재시작 시 인메모리 세션 유실 대비
-//
-//	Node.js 백엔드가 DB에서 읽은 charged_usdc를 user_final_sig 필드에 실어 전달하고
-//	transport/server.go에서 이를 ChargedUsdc로 매핑해 사용
-type EndRequest struct {
-	SessionID   string
-	ChannelID   string
-	UserAddress string
-	ChargedUsdc string // DB 폴백 값 (인메모리 미스 시 사용)
-}
+type EndRequest struct{ SessionID, ChannelID, UserAddress string }
 type EndResult struct {
 	FareUsdc, RefundUsdc string
 	SettledAt            time.Time
+	Proof                *paymentapp.Proof
 }
 
 func (o *Orchestrator) EndSessionAndSettle(ctx context.Context, req EndRequest) (*EndResult, error) {
-	// Node.js 백엔드가 서버 시간으로 확정한 요금을 우선한다.
-	// 인메모리 누적값은 ProposeUsageUpdate 실패/재시작 시 일부 금액이 빠질 수 있다.
-	chargedUsdc := req.ChargedUsdc
-	depositUsdc := "0"
-	sess, sessErr := o.sessions.Get(req.SessionID)
-	if sessErr == nil {
-		depositUsdc = sess.DepositUsdc
-		if chargedUsdc == "" {
-			chargedUsdc = sess.ChargedUsdc
-		}
-		o.log.WithFields(logrus.Fields{
-			"session_id":         req.SessionID,
-			"authoritative_fare": chargedUsdc,
-			"in_memory_fare":     sess.ChargedUsdc,
-		}).Info("[Orchestrator] using authoritative final fare")
-	} else {
-		o.log.WithFields(logrus.Fields{
-			"session_id":   req.SessionID,
-			"charged_usdc": chargedUsdc,
-		}).Warn("[Orchestrator] session not in-memory, using provided chargedUsdc as fallback")
-		if chargedUsdc == "" {
-			chargedUsdc = "0"
-		}
-	}
-	if depositUsdc == "0" {
-		if handle, err := o.channels.get(req.ChannelID); err == nil {
-			depositUsdc = handle.DepositUsdc
-		}
-	}
-
-	creditUsdc := o.refunds.GetTotal(req.ChannelID)
-
-	finalRes, err := o.channels.FinalUpdateAndAdjust(ctx, req.ChannelID, chargedUsdc, creditUsdc)
+	proof, err := o.channels.ExportFinal(ctx, req.ChannelID)
 	if err != nil {
-		return nil, errors.Wrap(err, "final update")
+		h, e := o.channels.get(req.ChannelID)
+		if e != nil {
+			return nil, fmt.Errorf("no live channel or persisted final proof; refusing fare fallback: %w", e)
+		}
+		if h.SessionID != req.SessionID || !strings.EqualFold(h.UserAddress, req.UserAddress) {
+			return nil, fmt.Errorf("session/channel/user mismatch")
+		}
+		_, err = o.channels.FinalUpdateAndAdjust(ctx, req.ChannelID, o.refunds.GetTotal(req.ChannelID))
+		if err != nil {
+			return nil, err
+		}
+		proof, err = o.channels.ExportFinal(ctx, req.ChannelID)
+		if err != nil {
+			return nil, err
+		}
 	}
-	o.audit.Log(ctx, audit.ActionFinalUpdate, req.ChannelID, req.SessionID, finalRes)
-
-	o.sessions.SetStatus(req.SessionID, session.StatusSettling) //nolint:errcheck
-	closeRes, err := o.channels.CloseChannel(ctx, req.ChannelID)
-	if err != nil {
-		return nil, errors.Wrap(err, "closing channel")
+	if proof.Data.EscrowID != crypto.Keccak256Hash([]byte(req.SessionID)) || !strings.EqualFold(proof.Data.UserAddress.Hex(), req.UserAddress) {
+		return nil, fmt.Errorf("proof/session/user mismatch")
 	}
-	o.sessions.End(req.SessionID)                              //nolint:errcheck
-	o.sessions.SetStatus(req.SessionID, session.StatusSettled) //nolint:errcheck
-	o.audit.Log(ctx, audit.ActionSettle, req.ChannelID, req.SessionID, closeRes)
-
-	return &EndResult{
-		FareUsdc:   finalRes.TotalFareUsdc,
-		RefundUsdc: remainingUsdc(depositUsdc, finalRes.TotalFareUsdc),
-		SettledAt:  closeRes.SettledAt,
-	}, nil
+	o.sessions.End(req.SessionID)
+	o.sessions.SetStatus(req.SessionID, session.StatusSettling)
+	return &EndResult{FareUsdc: pricing.WeiToUsdc(proof.Data.FareWei), RefundUsdc: pricing.WeiToUsdc(new(big.Int).Sub(proof.Data.DepositWei, proof.Data.FareWei)), Proof: proof}, nil
 }
 
 func remainingUsdc(depositUsdc, fareUsdc string) string {
@@ -184,14 +168,6 @@ func max64(a, b int64) int64 {
 		return a
 	}
 	return b
-}
-
-func simpleHash(s string) []byte {
-	h := make([]byte, 32)
-	for i, c := range []byte(s) {
-		h[i%32] ^= c
-	}
-	return h
 }
 
 type StatusResult struct {

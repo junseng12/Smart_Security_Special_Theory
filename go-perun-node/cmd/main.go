@@ -44,6 +44,8 @@ func main() {
 
 	// ── 환경변수 로드 ────────────────────────────────────────────────
 	cfg := &setup.Config{
+		EscrowAddr:      common.HexToAddress(mustEnv("ESCROW_CONTRACT_ADDRESS")),
+		PersistencePath: mustEnv("PERUN_PERSISTENCE_PATH"),
 		RPCURL:          mustEnv("BASE_RPC_URL"),
 		ChainID:         mustEnvUint64("CHAIN_ID", 84532),
 		OperatorPrivKey: mustEnv("OPERATOR_PRIVKEY"),
@@ -80,8 +82,8 @@ func main() {
 	// ── 매니저 조립 ──────────────────────────────────────────────────
 	sessionMgr := session.NewManager(log)
 	channelMgr := channel.NewManager(node, cfg, log)
-	refundMgr  := refund.NewManager(log)
-	auditLog   := audit.NewLogger(log)
+	refundMgr := refund.NewManager(log)
+	auditLog := audit.NewLogger(log)
 
 	channelMgr.StartHandling()
 
@@ -125,21 +127,29 @@ func mustEnv(key string) string {
 }
 
 func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" { return v }
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
 	return def
 }
 
 func mustEnvUint64(key string, def uint64) uint64 {
 	v := os.Getenv(key)
-	if v == "" { return def }
+	if v == "" {
+		return def
+	}
 	n, err := strconv.ParseUint(v, 10, 64)
-	if err != nil { return def }
+	if err != nil {
+		return def
+	}
 	return n
 }
 
 func envInt(key string, def int) int {
 	v := os.Getenv(key)
-	if v == "" { return def }
+	if v == "" {
+		return def
+	}
 	n, _ := strconv.Atoi(v)
 	return n
 }

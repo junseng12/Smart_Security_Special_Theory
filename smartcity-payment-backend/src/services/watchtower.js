@@ -106,7 +106,7 @@ async function processPendingSettles() {
       try {
         const result = await escrowSvc.settleAndRelease({
           sessionId: row.session_id,
-          fareUsdc:  String(row.fare_amount || '0'),
+
         });
         logger.info('Watchtower: settle OK', { sessionId: row.session_id, result: JSON.stringify(result) });
       } catch (e) {
@@ -185,6 +185,8 @@ async function startLoop() {
   // PendingSettle 처리 (30초마다)
   processPendingSettles();
   setInterval(processPendingSettles, 30_000);
+  processClaimSettlements();
+  setInterval(processClaimSettlements, 30_000);
 
   // 현재 배포본(0xa264...)은 settleAndRelease가 최종 분배이며
   // claimSettlement 함수가 없으므로 별도 claim 루프를 실행하지 않는다.

@@ -10,17 +10,17 @@ const { ethers } = require('ethers');
 const logger = require('../utils/logger');
 const { getPool } = require('./db');
 
-const CHAIN_ID = 84532;
-const ESCROW_ADDR = process.env.ESCROW_CONTRACT_ADDRESS
-  || '0xa2642876a2Aa9F19D22a6e69379bbcA10556977f';
+const CHAIN_ID = Number(process.env.CHAIN_ID || 84532);
+const ESCROW_ADDR = process.env.ESCROW_CONTRACT_ADDRESS;
 const BASE_RPC = process.env.BASE_RPC_URL || 'https://sepolia.base.org';
 const REVIEW_AFTER_MS = Number(process.env.CHAIN_TX_REVIEW_AFTER_MS || 10 * 60 * 1000);
 
 const ESCROW_ABI = [
+  'function getSettlementClaim(bytes32) view returns (uint256,uint256,uint256,uint256,bool)',
   'function getEscrowStatus(bytes32 escrowId) external view returns (uint8 state, uint256 userDeposit, uint256 operatorDeposit, uint256 fareAmount, address user, address operator, uint256 holdDeadline, bool isFullyFunded, bool isDeadlinePassed)',
 ];
 const STATE_LABELS = ['None', 'UserDeposited', 'FullyFunded', 'RefundIssue', 'Released', 'Refunded'];
-const EXPECTED_STATE = { SETTLE: 4, REFUND: 5 };
+const EXPECTED_STATE = { SETTLE: 4, CLAIM: 4, REFUND: 5 };
 
 function getProvider() {
   return new ethers.JsonRpcProvider(BASE_RPC);
@@ -96,7 +96,10 @@ async function getOnchainState(sessionId, provider = getProvider()) {
   const escrow = new ethers.Contract(ESCROW_ADDR, ESCROW_ABI, provider);
   const result = await escrow.getEscrowStatus(toEscrowId(sessionId));
   const state = Number(result[0]);
+  const claim = state === 4 ? await escrow.getSettlementClaim(toEscrowId(sessionId)) : null;
   return {
+    settlementClaimed: claim ? claim[4] : state === 5,
+    claimableAfter: claim ? Number(claim[0]) : null,
     state,
     stateLabel: STATE_LABELS[state] || 'Unknown',
     fareAmount: ethers.formatUnits(result[3], 6),
@@ -126,6 +129,8 @@ async function invalidateSessionCache(sessionId, channelId) {
 }
 
 async function syncFinalState(sessionId, stateLabel, txHash = null) {
+  const actual = await getOnchainState(sessionId);
+  if (actual.stateLabel !== stateLabel || !actual.settlementClaimed) throw new Error('Escrow payout not completed');
   if (!['Released', 'Refunded'].includes(stateLabel)) {
     throw new Error(`Cannot sync non-final escrow state: ${stateLabel}`);
   }
@@ -229,6 +234,19 @@ async function confirmTransaction(id, suppliedReceipt = null) {
     return { confirmed: false, reason: 'state_mismatch', onchain };
   }
 
+  if (record.action === 'CLAIM' && !onchain.settlementClaimed) {
+    await markProblem(id,'NEEDS_REVIEW','claim_not_completed');
+    return {confirmed:false,reason:'claim_not_completed',onchain};
+  }
+  if (record.action === 'SETTLE' && !onchain.settlementClaimed) {
+    await getPool().query(`UPDATE chain_transactions SET status='CONFIRMED',block_number=$2,receipt=$3,confirmed_at=NOW(),last_error=NULL WHERE id=$1`,
+      [id,Number(receipt.blockNumber),JSON.stringify(receiptSnapshot(receipt))]);
+    await getPool().query(`UPDATE escrow_locks SET state='Released',settle_tx=$2,fare_amount=$3,claimable_after=to_timestamp($4) WHERE session_id=$1`,
+      [record.session_id,receipt.hash,onchain.fareAmount,onchain.claimableAfter]);
+    await getPool().query(`UPDATE sessions SET status='Settling',charged_usdc=$2,updated_at=NOW() WHERE id=$1`,[record.session_id,onchain.fareAmount]);
+    await invalidateSessionCache(record.session_id,null);
+    return {confirmed:true,reserved:true,txHash:receipt.hash,onchain};
+  }
   const client = await getPool().connect();
   let channelId = null;
   try {
@@ -246,7 +264,7 @@ async function confirmTransaction(id, suppliedReceipt = null) {
       [id, Number(receipt.blockNumber), JSON.stringify(receiptSnapshot(receipt))]
     );
     // 현재 환불 정책은 전액 환불이므로 REFUND 확정 시 최종 이용요금은 0이다.
-    const settledFare = record.action === 'SETTLE'
+    const settledFare = ['SETTLE','CLAIM'].includes(record.action)
       ? onchain.fareAmount
       : record.action === 'REFUND' ? '0.000000' : null;
     await client.query(

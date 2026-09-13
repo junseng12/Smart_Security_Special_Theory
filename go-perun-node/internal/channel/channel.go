@@ -1,17 +1,23 @@
 // Package channel은 perun-eth-backend 기반의 실제 채널 생명주기를 관리합니다.
 //
 // ★ Custodial 모드: 사용자 키쌍을 서버 내부에서 생성하여 P2P 피어 없이 동작
-//   OpenChannel  → 내부 UserNode 생성 → ProposeChannel + 자동 수락
-//   ChargeUsage  → ch.Update(TransferBalance) [오프체인 — 서명만, TX 없음]
-//   FinalUpdate  → ch.Update(IsFinal=true)    [credit 차감 + 채널 최종화]
-//   CloseChannel → ch.Settle()               [perun-eth-backend Adjudicator가 Withdraw]
-//   Dispute      → ch.ForceUpdate()           [수동 분쟁 트리거]
+//
+//	OpenChannel  → 내부 UserNode 생성 → ProposeChannel + 자동 수락
+//	ChargeUsage  → ch.Update(TransferBalance) [오프체인 — 서명만, TX 없음]
+//	FinalUpdate  → ch.Update(IsFinal=true)    [credit 차감 + 채널 최종화]
+//	CloseChannel → ch.Settle()               [perun-eth-backend Adjudicator가 Withdraw]
+//	Dispute      → ch.ForceUpdate()           [수동 분쟁 트리거]
 package channel
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"github.com/ethereum/go-ethereum/common"
+	ethchannel "github.com/perun-network/perun-eth-backend/channel"
 	"math/big"
+	"smartcity/go-perun-node/internal/paymentapp"
+	"strings"
 	"sync"
 	"time"
 
@@ -92,6 +98,7 @@ type Handle struct {
 // ────────────────────────────────────────────────────────────────────
 
 type OpenParams struct {
+	EscrowID     [32]byte
 	SessionID    string
 	UserAddress  string // MetaMask 주소 (참조/표시용)
 	DepositUsdc  string // 예치금 (운영자가 대신 예치)
@@ -99,9 +106,9 @@ type OpenParams struct {
 }
 
 type OpenResult struct {
-	ChannelID      string
-	StateHash      string
-	InitNonce      uint64
+	ChannelID         string
+	StateHash         string
+	InitNonce         uint64
 	UserCustodialAddr string // custodial 생성된 사용자 주소
 }
 
@@ -145,8 +152,8 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 	// ── Step 4: 채널 제안 ─────────────────────────────────────────────
 	challengeDuration := uint64(120)
 	peers := []map[wallet.BackendID]wire.Address{
-		m.node.WireAddress,      // operator (proposer, idx=0)
-		userNode.WireAddress,    // user custodial (idx=1)
+		m.node.WireAddress,   // operator (proposer, idx=0)
+		userNode.WireAddress, // user custodial (idx=1)
 	}
 
 	proposal, err := client.NewLedgerChannelProposal(
@@ -154,6 +161,7 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 		m.node.EthAddress,
 		initAlloc,
 		peers,
+		client.WithApp(m.node.PaymentApp, &paymentapp.Data{EscrowID: p.EscrowID, FareWei: big.NewInt(0), ChainID: new(big.Int).SetUint64(m.cfg.ChainID), EscrowAddress: m.cfg.EscrowAddr, UserAddress: common.HexToAddress(p.UserAddress), DepositWei: depositWei}),
 	)
 	if err != nil {
 		return nil, errors.Wrap(err, "creating channel proposal")
@@ -195,7 +203,7 @@ func (m *Manager) OpenChannel(ctx context.Context, p OpenParams) (*OpenResult, e
 	m.mu.Unlock()
 
 	m.log.WithFields(logrus.Fields{
-		"channel_id":    h.ChannelID,
+		"channel_id":     h.ChannelID,
 		"user_custodial": userNode.Address.Hex(),
 	}).Info("[Channel] ✅ opened (custodial)")
 
@@ -251,23 +259,22 @@ func (m *Manager) ChargeUsage(ctx context.Context, req ChargeRequest) (*ChargeRe
 	}
 
 	// ★ ch.Update — custodial이므로 userNode의 updateHandler가 자동 서명
+	if h.ch.State().IsFinal {
+		return nil, fmt.Errorf("channel already final")
+	}
 	err = h.ch.Update(ctx, func(state *channel.State) {
-		state.Allocation.TransferBalance(
-			channel.Index(0), // from: operator (custodial 구조에서 operator가 user 잔액 보유)
-			channel.Index(1), // to: user slot
-			m.node.USDCAsset,
-			fare.FareWei,
-		)
+		d := state.Data.(*paymentapp.Data)
+		d.FareWei.Add(d.FareWei, fare.FareWei)
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "ch.Update (off-chain charge)")
 	}
 
 	s := h.ch.State()
-	h.latestNonce     = uint64(s.Version)
+	h.latestNonce = uint64(s.Version)
 	h.latestStateHash = stateDigest(s)
-	h.balanceUser     = s.Allocation.Balance(0, m.node.USDCAsset)
-	h.balanceOp       = s.Allocation.Balance(1, m.node.USDCAsset)
+	h.balanceUser = new(big.Int).Sub(s.Data.(*paymentapp.Data).DepositWei, s.Data.(*paymentapp.Data).FareWei)
+	h.balanceOp = new(big.Int).Set(s.Data.(*paymentapp.Data).FareWei)
 
 	return &ChargeResult{
 		FareUsdc:    fare.FareUsdc,
@@ -291,57 +298,52 @@ type FinalUpdateResult struct {
 	TotalFareUsdc    string
 }
 
-func (m *Manager) FinalUpdateAndAdjust(ctx context.Context, channelID, totalChargedUsdc, creditUsdc string) (*FinalUpdateResult, error) {
+func (m *Manager) FinalUpdateAndAdjust(ctx context.Context, channelID, creditUsdc string) (*FinalUpdateResult, error) {
 	h, err := m.get(channelID)
 	if err != nil {
 		return nil, err
 	}
-
-	netUsdc, creditWei := pricing.FinalFare(totalChargedUsdc, creditUsdc)
-
-	m.log.WithFields(logrus.Fields{
-		"channel":  channelID,
-		"charged":  totalChargedUsdc,
-		"credit":   creditUsdc,
-		"net_fare": netUsdc,
-	}).Info("[Channel] FinalUpdateAndAdjust")
-
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
-	err = h.ch.Update(ctx, func(state *channel.State) {
-		if creditWei != nil && creditWei.Sign() > 0 {
-			state.Allocation.TransferBalance(
-				channel.Index(1),
-				channel.Index(0),
-				m.node.USDCAsset,
-				creditWei,
-			)
+	if !h.ch.State().IsFinal {
+		credit := usdcToWei(creditUsdc)
+		if credit.Sign() < 0 {
+			return nil, fmt.Errorf("negative credit")
 		}
-		state.IsFinal = true
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, "ch.Update (final + IsFinal=true)")
+		err = h.ch.Update(ctx, func(state *channel.State) {
+			d := state.Data.(*paymentapp.Data)
+			if credit.Cmp(d.FareWei) > 0 {
+				credit.Set(d.FareWei)
+			}
+			d.FareWei.Sub(d.FareWei, credit)
+			state.IsFinal = true
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
-
 	s := h.ch.State()
-	h.latestNonce     = uint64(s.Version)
-	h.latestStateHash = stateDigest(s)
-	h.balanceUser     = s.Allocation.Balance(0, m.node.USDCAsset)
-	h.balanceOp       = s.Allocation.Balance(1, m.node.USDCAsset)
-
-	return &FinalUpdateResult{
-		FinalStateHash:   h.latestStateHash,
-		FinalNonce:       h.latestNonce,
-		FinalBalanceUser: pricing.WeiToUsdc(h.balanceUser),
-		FinalBalanceOp:   pricing.WeiToUsdc(h.balanceOp),
-		TotalFareUsdc:    netUsdc,
-	}, nil
+	d := s.Data.(*paymentapp.Data)
+	return &FinalUpdateResult{FinalStateHash: stateDigest(s), FinalNonce: s.Version, FinalBalanceUser: pricing.WeiToUsdc(new(big.Int).Sub(d.DepositWei, d.FareWei)), FinalBalanceOp: pricing.WeiToUsdc(d.FareWei), TotalFareUsdc: pricing.WeiToUsdc(d.FareWei)}, nil
 }
 
-// ────────────────────────────────────────────────────────────────────
-// CloseChannel — 온체인 정산 (변경 없음)
-// ────────────────────────────────────────────────────────────────────
+// ExportFinal reads the native fully signed transaction, including after restart.
+func (m *Manager) ExportFinal(ctx context.Context, channelID string) (*paymentapp.Proof, error) {
+	if len(channelID) != 66 || !strings.HasPrefix(channelID, "0x") {
+		return nil, fmt.Errorf("invalid channel ID")
+	}
+	raw, err := hex.DecodeString(channelID[2:])
+	if err != nil {
+		return nil, err
+	}
+	var id channel.ID
+	copy(id[:], raw)
+	saved, err := m.node.Persistence.RestoreChannel(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return paymentapp.Export(saved)
+}
 
 type CloseResult struct {
 	ChannelID   string
@@ -351,55 +353,17 @@ type CloseResult struct {
 }
 
 func (m *Manager) CloseChannel(ctx context.Context, channelID string) (*CloseResult, error) {
-	h, err := m.get(channelID)
+	proof, err := m.ExportFinal(ctx, channelID)
 	if err != nil {
 		return nil, err
 	}
-
-	m.log.WithField("channel_id", channelID).Info("[Channel] CloseChannel → ch.Settle()")
-
-	if err := h.ch.Settle(ctx, false); err != nil {
-		return nil, errors.Wrap(err, "ch.Settle")
-	}
-	h.ch.Close()
-
-	fare   := pricing.WeiToUsdc(h.balanceOp)
-	refund := pricing.WeiToUsdc(h.balanceUser)
-
-	m.mu.Lock()
-	delete(m.channels, channelID)
-	m.mu.Unlock()
-
-	m.log.WithFields(logrus.Fields{
-		"channel_id": channelID,
-		"fare":       fare,
-		"refund":     refund,
-	}).Info("[Channel] ✅ settled")
-
-	return &CloseResult{
-		ChannelID:   channelID,
-		FinalFare:   fare,
-		FinalRefund: refund,
-		SettledAt:   time.Now(),
-	}, nil
+	return &CloseResult{ChannelID: channelID, FinalFare: pricing.WeiToUsdc(proof.Data.FareWei), FinalRefund: pricing.WeiToUsdc(new(big.Int).Sub(proof.Data.DepositWei, proof.Data.FareWei)), SettledAt: time.Now()}, nil
 }
-
-// ────────────────────────────────────────────────────────────────────
-// InitiateDispute (변경 없음)
-// ────────────────────────────────────────────────────────────────────
 
 func (m *Manager) InitiateDispute(ctx context.Context, channelID string) error {
-	h, err := m.get(channelID)
-	if err != nil {
-		return err
-	}
-	return errors.Wrap(
-		h.ch.ForceUpdate(ctx, func(state *channel.State) { state.IsFinal = true }),
-		"ForceUpdate (dispute register)",
-	)
+	return fmt.Errorf("use SmartCityEscrow refund/dispute window; unilateral Perun states cannot settle")
 }
 
-// GetStatus — 채널 상태 조회
 func (m *Manager) GetStatus(channelID string) (*Handle, error) {
 	return m.get(channelID)
 }
@@ -434,7 +398,7 @@ type updateHandler struct {
 func (h *updateHandler) HandleUpdate(cur *channel.State, next client.ChannelUpdate, r *client.UpdateResponder) {
 	err := func() error {
 		receiverIdx := channel.Index(1 - int(next.ActorIdx))
-		curBal  := cur.Allocation.Balance(receiverIdx, cur.Assets[0])
+		curBal := cur.Allocation.Balance(receiverIdx, cur.Assets[0])
 		nextBal := next.State.Allocation.Balance(receiverIdx, cur.Assets[0])
 		if nextBal.Cmp(curBal) < 0 {
 			return fmt.Errorf("balance decreased: %s → %s", curBal, nextBal)
@@ -518,7 +482,7 @@ func (m *Manager) get(id string) (*Handle, error) {
 }
 
 func stateDigest(s *channel.State) string {
-	return fmt.Sprintf("0x%x_v%d", s.ID, s.Version)
+	return fmt.Sprintf("0x%x", ethchannel.HashState(s))
 }
 
 func usdcToWei(usdc string) *big.Int {
@@ -530,5 +494,3 @@ func usdcToWei(usdc string) *big.Int {
 	result, _ := bf.Int(nil)
 	return result
 }
-
-

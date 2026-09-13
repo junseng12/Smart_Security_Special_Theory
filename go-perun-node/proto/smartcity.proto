@@ -20,6 +20,8 @@ message StartSessionRequest {
   string deposit_usdc  = 3;
   string user_wire_addr = 4; // P2P 주소 (libp2p multiaddr)
   int64  hold_seconds  = 5;
+  string external_session_id = 6;
+  string escrow_id = 7;
 }
 message StartSessionResponse {
   bool   ok           = 1;
@@ -35,13 +37,17 @@ message EndSessionRequest {
   string session_id      = 1;
   string channel_id      = 2;
   string user_address    = 3;
-  string user_final_sig  = 4;
+  reserved 4; // no backend fare override
 }
 message EndSessionResponse {
   bool   ok          = 1;
   string fare_usdc   = 2;
   string refund_usdc = 3;
   string error       = 4;
+  bytes params_abi = 5;
+  bytes state_abi = 6;
+  repeated bytes signatures = 7;
+  string state_hash = 8;
 }
 
 message UsageDelta {

@@ -1,6 +1,6 @@
 // walletUtils [1781686426]
 export const USDC_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
-export const ESCROW_V3_ADDRESS = "0xa2642876a2Aa9F19D22a6e69379bbcA10556977f"; // SmartCityEscrow V3.2 (Base Sepolia 배포 확정)
+export const ESCROW_V3_ADDRESS = import.meta.env.VITE_ESCROW_CONTRACT_ADDRESS; // SmartCityEscrow V3.2 (Base Sepolia 배포 확정)
 export const OPERATOR_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"; // 컨트랙트 OPERATOR_ROLE
 export const SERVICE_PROVIDER_ADDRESS = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7"; // 요금 수취 = operator 동일
 const RPC_LIST = [
@@ -246,15 +246,17 @@ async function toBytes32Hex(str) {
 /**
  * 에스크로 V3 userDeposit 호출
  */
-export async function userDeposit(fromAddress, escrowId, operator, amountUsdc, holdDeadline) {
+export async function userDeposit(fromAddress, escrowId, operator, amountUsdc, holdDeadline, channelId) {
   const provider = await waitForMetaMaskProvider();
   if (!provider) throw new Error("MetaMask가 필요합니다");
-  const selector        = "0x6ec5bc17"; // keccak256("userDeposit(bytes32,address,uint256,uint256)")
+  const selector        = "0x714db3e3"; // keccak256("userDeposit(bytes32,address,uint256,uint256,bytes32)")
   const escrowIdHex     = await toBytes32Hex(escrowId);
   const operatorHex     = operator.replace("0x", "").toLowerCase().padStart(64, "0");
   const amountHex       = BigInt(Math.round(amountUsdc * 1e6)).toString(16).padStart(64, "0");
   const holdDeadlineHex = BigInt(holdDeadline).toString(16).padStart(64, "0");
-  const data = selector + escrowIdHex + operatorHex + amountHex + holdDeadlineHex;
+  if (!/^0x[0-9a-fA-F]{64}$/.test(channelId || "") || !/^0x[0-9a-fA-F]{64}$/.test(escrowId || "")) throw new Error("Verified Perun channel and escrow IDs required");
+  if (!/^0x[0-9a-fA-F]{40}$/.test(ESCROW_V3_ADDRESS || "")) throw new Error("State-bound escrow address is not configured");
+  const data = selector + escrowIdHex + operatorHex + amountHex + holdDeadlineHex + channelId.slice(2);
   return await provider.request({
     method: "eth_sendTransaction",
     params: [{ from: fromAddress, to: ESCROW_V3_ADDRESS, data, gas: "0x49910" }], // 300,000

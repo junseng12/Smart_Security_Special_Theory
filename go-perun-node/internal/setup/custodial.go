@@ -11,9 +11,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	ethchannel "github.com/perun-network/perun-eth-backend/channel"
-	ethwallet  "github.com/perun-network/perun-eth-backend/wallet"
-	ethwire    "github.com/perun-network/perun-eth-backend/wire"
-	swallet    "github.com/perun-network/perun-eth-backend/wallet/simple"
+	ethwallet "github.com/perun-network/perun-eth-backend/wallet"
+	swallet "github.com/perun-network/perun-eth-backend/wallet/simple"
+	ethwire "github.com/perun-network/perun-eth-backend/wire"
 	"perun.network/go-perun/client"
 	"perun.network/go-perun/wallet"
 	"perun.network/go-perun/watcher/local"
@@ -38,7 +38,7 @@ func NewUserNode(cfg *Config, bus *wire.LocalBus) (*UserNode, error) {
 	userAddr := crypto.PubkeyToAddress(privKey.PublicKey)
 
 	// 2. simple wallet
-	w   := swallet.NewWallet(privKey)
+	w := swallet.NewWallet(privKey)
 	acc := accounts.Account{Address: userAddr}
 	eaddr := ethwallet.AsWalletAddr(userAddr)
 
@@ -49,7 +49,7 @@ func NewUserNode(cfg *Config, bus *wire.LocalBus) (*UserNode, error) {
 	}
 
 	// 4. Funder
-	funder    := ethchannel.NewFunder(cb)
+	funder := ethchannel.NewFunder(cb)
 	usdcAsset := ethchannel.NewAsset(new(big.Int).SetUint64(cfg.ChainID), cfg.AssetHolderAddr)
 	funder.RegisterAsset(*usdcAsset, ethchannel.NewERC20Depositor(cfg.USDCTokenAddr, 300_000), acc)
 
@@ -70,11 +70,11 @@ func NewUserNode(cfg *Config, bus *wire.LocalBus) (*UserNode, error) {
 	userEthWireAddr := ethwallet.AsWalletAddr(crypto.PubkeyToAddress(userWireKey.PublicKey))
 	userWireAddr := &ethwire.Address{Address: userEthWireAddr}
 	wireAddrs := map[wallet.BackendID]wire.Address{ethwallet.BackendID: userWireAddr}
-	eAddrs    := map[wallet.BackendID]wallet.Address{ethwallet.BackendID: eaddr}
+	eAddrs := map[wallet.BackendID]wallet.Address{ethwallet.BackendID: eaddr}
 
 	// 8. go-perun Client — shared bus 사용
 	wallets := map[wallet.BackendID]wallet.Wallet{ethwallet.BackendID: w}
-	signer  := types.NewLondonSigner(new(big.Int).SetUint64(cfg.ChainID))
+	signer := types.NewLondonSigner(new(big.Int).SetUint64(cfg.ChainID))
 	_ = signer
 
 	perunClient, err := client.New(wireAddrs, bus, funder, adj, wallets, watcher)

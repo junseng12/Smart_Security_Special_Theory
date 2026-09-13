@@ -6,6 +6,10 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"perun.network/go-perun/channel/persistence"
+	"perun.network/go-perun/channel/persistence/keyvalue"
+	"polycry.pt/poly-go/sortedkv/leveldb"
+	"smartcity/go-perun-node/internal/paymentapp"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -16,9 +20,9 @@ import (
 	"github.com/sirupsen/logrus"
 
 	ethchannel "github.com/perun-network/perun-eth-backend/channel"
-	ethwallet  "github.com/perun-network/perun-eth-backend/wallet"
-	ethwire    "github.com/perun-network/perun-eth-backend/wire"
-	swallet    "github.com/perun-network/perun-eth-backend/wallet/simple"
+	ethwallet "github.com/perun-network/perun-eth-backend/wallet"
+	swallet "github.com/perun-network/perun-eth-backend/wallet/simple"
+	ethwire "github.com/perun-network/perun-eth-backend/wire"
 
 	"perun.network/go-perun/channel"
 	"perun.network/go-perun/client"
@@ -29,6 +33,8 @@ import (
 
 // Config — 환경변수에서 로드
 type Config struct {
+	EscrowAddr      common.Address
+	PersistencePath string
 	RPCURL          string
 	ChainID         uint64
 	OperatorPrivKey string
@@ -41,8 +47,10 @@ type Config struct {
 
 // PerunNode — 초기화 완료된 go-perun 노드
 type PerunNode struct {
+	PaymentApp      *paymentapp.App
+	Persistence     persistence.PersistRestorer
 	Client          *client.Client
-	Bus             *wire.LocalBus        // ★ shared local bus (custodial user도 사용)
+	Bus             *wire.LocalBus // ★ shared local bus (custodial user도 사용)
 	OperatorAddr    common.Address
 	OperatorAccount accounts.Account
 	WireAddress     map[wallet.BackendID]wire.Address
@@ -69,10 +77,10 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parsing operator private key: %w", err)
 	}
-	w            := swallet.NewWallet(privKey)
+	w := swallet.NewWallet(privKey)
 	operatorAddr := crypto.PubkeyToAddress(privKey.PublicKey)
-	operatorAcc  := accounts.Account{Address: operatorAddr}
-	eaddr        := ethwallet.AsWalletAddr(operatorAddr)
+	operatorAcc := accounts.Account{Address: operatorAddr}
+	eaddr := ethwallet.AsWalletAddr(operatorAddr)
 	log.WithField("operator", operatorAddr.Hex()).Info("[Setup] ✓ wallet loaded")
 
 	// Step 2: ContractBackend
@@ -95,7 +103,7 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	log.Info("[Setup] ✓ contracts validated")
 
 	// Step 4: Funder + ERC20Depositor
-	funder    := ethchannel.NewFunder(cb)
+	funder := ethchannel.NewFunder(cb)
 	usdcAsset := ethchannel.NewAsset(new(big.Int).SetUint64(cfg.ChainID), cfg.AssetHolderAddr)
 	funder.RegisterAsset(*usdcAsset, ethchannel.NewERC20Depositor(cfg.USDCTokenAddr, 300_000), operatorAcc)
 	log.WithField("asset", cfg.AssetHolderAddr.Hex()).Info("[Setup] ✓ ERC20 funder registered")
@@ -126,7 +134,7 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 
 	// Step 9: go-perun Client 조립
 	wallets := map[wallet.BackendID]wallet.Wallet{ethwallet.BackendID: w}
-	eAddrs  := map[wallet.BackendID]wallet.Address{ethwallet.BackendID: eaddr}
+	eAddrs := map[wallet.BackendID]wallet.Address{ethwallet.BackendID: eaddr}
 
 	perunClient, err := client.New(wireAddrs, bus, funder, adj, wallets, watcher)
 	if err != nil {
@@ -134,7 +142,20 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	}
 	log.Info("[Setup] ✅ go-perun client ready")
 
+	if cfg.EscrowAddr == (common.Address{}) || cfg.PersistencePath == "" {
+		return nil, fmt.Errorf("ESCROW_CONTRACT_ADDRESS and PERUN_PERSISTENCE_PATH required")
+	}
+	app := paymentapp.New(cfg.EscrowAddr)
+	channel.RegisterApp(app)
+	db, err := leveldb.LoadDatabase(cfg.PersistencePath)
+	if err != nil {
+		return nil, fmt.Errorf("opening persistence: %w", err)
+	}
+	pr := keyvalue.NewPersistRestorer(db)
+	perunClient.EnablePersistence(pr)
+
 	return &PerunNode{
+		PaymentApp: app, Persistence: pr,
 		Client:          perunClient,
 		Bus:             bus,
 		OperatorAddr:    operatorAddr,
@@ -158,17 +179,23 @@ type DeployedAddrs struct {
 
 func DeployContracts(ctx context.Context, cfg *Config, log *logrus.Logger) (*DeployedAddrs, error) {
 	privKey, _ := crypto.HexToECDSA(cfg.OperatorPrivKey)
-	w          := swallet.NewWallet(privKey)
-	deployer   := accounts.Account{Address: crypto.PubkeyToAddress(privKey.PublicKey)}
-	cb, err    := newContractBackend(cfg.RPCURL, cfg.ChainID, w)
-	if err != nil { return nil, err }
+	w := swallet.NewWallet(privKey)
+	deployer := accounts.Account{Address: crypto.PubkeyToAddress(privKey.PublicKey)}
+	cb, err := newContractBackend(cfg.RPCURL, cfg.ChainID, w)
+	if err != nil {
+		return nil, err
+	}
 
 	adjAddr, err := ethchannel.DeployAdjudicator(ctx, cb, deployer)
-	if err != nil { return nil, fmt.Errorf("Adjudicator 배포 실패: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("Adjudicator 배포 실패: %w", err)
+	}
 	log.WithField("addr", adjAddr.Hex()).Info("[Deploy] ✓ Adjudicator deployed")
 
 	assetAddr, err := ethchannel.DeployERC20Assetholder(ctx, cb, adjAddr, cfg.USDCTokenAddr, deployer)
-	if err != nil { return nil, fmt.Errorf("AssetHolderERC20 배포 실패: %w", err) }
+	if err != nil {
+		return nil, fmt.Errorf("AssetHolderERC20 배포 실패: %w", err)
+	}
 	log.WithField("addr", assetAddr.Hex()).Info("[Deploy] ✓ AssetHolderERC20 deployed")
 
 	return &DeployedAddrs{AdjudicatorAddr: adjAddr, AssetHolderAddr: assetAddr}, nil
@@ -176,15 +203,16 @@ func DeployContracts(ctx context.Context, cfg *Config, log *logrus.Logger) (*Dep
 
 // newContractBackend — ethclient + swallet.Transactor → ContractBackend
 // ★ backgroundChainReader로 래핑: SubscribeNewHead가 gRPC deadline에 의해
-//    취소되지 않도록 context를 Background()로 고정
+//
+//	취소되지 않도록 context를 Background()로 고정
 func newContractBackend(rpcURL string, chainID uint64, w *swallet.Wallet) (ethchannel.ContractBackend, error) {
 	ec, err := ethclient.Dial(rpcURL)
 	if err != nil {
 		return ethchannel.ContractBackend{}, fmt.Errorf("ethclient.Dial: %w", err)
 	}
 	bgClient := &backgroundChainReader{Client: ec}
-	signer   := types.NewLondonSigner(new(big.Int).SetUint64(chainID))
-	tr       := swallet.NewTransactor(w, signer)
-	cid      := ethchannel.MakeChainID(new(big.Int).SetUint64(chainID))
+	signer := types.NewLondonSigner(new(big.Int).SetUint64(chainID))
+	tr := swallet.NewTransactor(w, signer)
+	cid := ethchannel.MakeChainID(new(big.Int).SetUint64(chainID))
 	return ethchannel.NewContractBackend(bgClient, cid, tr, 1), nil
 }

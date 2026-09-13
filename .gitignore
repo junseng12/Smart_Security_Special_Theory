@@ -1,1 +1,10 @@
 .agents/.env
+
+# Local state-bound settlement build/test outputs
+.cache/
+.worktrees/
+smartcontract/artifacts/
+smartcontract/cache/
+smartcontract/node_modules/
+smartcity-payment-backend/node_modules/
+smartcity-payment-backend/logs/

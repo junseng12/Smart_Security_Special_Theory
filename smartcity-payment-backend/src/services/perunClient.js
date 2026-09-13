@@ -57,11 +57,6 @@ const mock = {
       escrow_id: `escrow_${sessionId}`, hold_deadline: String(Math.floor(Date.now()/1000)+(req.hold_seconds||240)),
       state_hash: `0x${Buffer.from('init').toString('hex').padEnd(64,'0')}` };
   },
-  EndSession(req) {
-    // user_final_sig 필드에 chargedUsdc 값이 실려 옴 (orchestrator 폴백)
-    const chargedUsdc = parseFloat(req.user_final_sig || '0') || 0.05;
-    return { ok: true, fare_usdc: String(chargedUsdc.toFixed(6)), refund_usdc: '0.0', tx_hash: '0xmock_settle' };
-  },
   ProposeUsageUpdate(req) {
     return { ok: true, fare_usdc: '0.01', policy_hash: '0xpolicy', new_nonce: 1,
       state_hash: '0xstatehash', balance_user: String(parseFloat(req.deposit_usdc||'1')-0.01) };
@@ -77,33 +72,25 @@ function runMock(method, req) {
   return Promise.reject(new Error(`Mock not implemented: ${method}`));
 }
 
-async function startSession({ userAddress, serviceId, depositUsdc, userWireAddr='', holdSeconds=120 }) {
-  const req = { user_address: userAddress, service_id: serviceId, deposit_usdc: depositUsdc,
-    user_wire_addr: userWireAddr, hold_seconds: holdSeconds };
-  if (_mode === 'mock') return runMock('StartSession', req);
-  return call('StartSession', req, 120_000);
+async function startSession({ userAddress, serviceId, depositUsdc, externalSessionId, escrowId, userWireAddr='', holdSeconds=120 }) {
+  if (_mode !== 'grpc') throw new Error('Native Perun node required for state-bound escrow');
+  return call('StartSession', { user_address:userAddress, service_id:serviceId, deposit_usdc:depositUsdc,
+    external_session_id:externalSessionId, escrow_id:escrowId, user_wire_addr:userWireAddr, hold_seconds:holdSeconds }, 120_000);
 }
 
-/**
- * 세션 종료 + 채널 정산
- * ★ chargedUsdc: 컨테이너 재시작 시 go-perun 인메모리 세션 유실 대비 폴백
- *   user_final_sig 필드에 chargedUsdc 값을 실어서 go-perun에 전달
- */
-async function endSession({ sessionId, channelId, userAddress, userFinalSig='', chargedUsdc='' }) {
-  const req = {
-    session_id:     sessionId,
-    channel_id:     channelId,
-    user_address:   userAddress,
-    user_final_sig: chargedUsdc || userFinalSig,
-  };
-  if (_mode === 'mock') return runMock('EndSession', req);
-  return call('EndSession', req, 60_000);
+async function endSession({ sessionId, channelId, userAddress }) {
+  if (_mode !== 'grpc') throw new Error('Native signed final state required; mock settlement disabled');
+  const res = await call('EndSession', { session_id:sessionId, channel_id:channelId, user_address:userAddress },60_000);
+  if (!res.params_abi?.length || !res.state_abi?.length || res.signatures?.length !== 2 || res.signatures.some(s => s.length !== 65)) {
+    throw new Error('Incomplete native Perun settlement proof');
+  }
+  return res;
 }
 
 async function proposeUsageUpdate({ sessionId, channelId, serviceType, durationMinutes, energyKwh=0 }) {
   const req = { session_id: sessionId, channel_id: channelId,
     usage_delta: { service_type: serviceType, duration_minutes: durationMinutes, energy_kwh: energyKwh } };
-  if (_mode === 'mock') return runMock('ProposeUsageUpdate', req);
+  if (_mode !== 'grpc') throw new Error('Native Perun usage update required');
   return call('ProposeUsageUpdate', req, 10_000);
 }
 

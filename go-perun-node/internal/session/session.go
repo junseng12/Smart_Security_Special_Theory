@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
 type Status string
+
 const (
 	StatusActive   Status = "ACTIVE"
 	StatusEnded    Status = "ENDED"
@@ -21,7 +21,7 @@ const (
 )
 
 type Session struct {
-	mu sync.RWMutex
+	mu           sync.RWMutex
 	ID           string
 	UserAddress  string
 	ServiceID    string
@@ -46,9 +46,9 @@ func NewManager(log *logrus.Logger) *Manager {
 	return &Manager{sessions: make(map[string]*Session), log: log}
 }
 
-func (m *Manager) Start(ctx context.Context, userAddress, serviceID, depositUsdc string) (*Session, error) {
+func (m *Manager) Start(ctx context.Context, externalID, userAddress, serviceID, depositUsdc string) (*Session, error) {
 	s := &Session{
-		ID:          uuid.New().String(),
+		ID:          externalID,
 		UserAddress: userAddress,
 		ServiceID:   serviceID,
 		DepositUsdc: depositUsdc,
@@ -58,6 +58,10 @@ func (m *Manager) Start(ctx context.Context, userAddress, serviceID, depositUsdc
 		StartedAt:   time.Now(),
 	}
 	m.mu.Lock()
+	if _, exists := m.sessions[s.ID]; exists {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("session already exists: %s", s.ID)
+	}
 	m.sessions[s.ID] = s
 	m.mu.Unlock()
 	m.log.WithField("session_id", s.ID).Info("[Session] started")
@@ -70,8 +74,8 @@ func (m *Manager) LinkChannel(sessionID, channelID, escrowID string, holdDeadlin
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 	s.mu.Lock()
-	s.ChannelID    = channelID
-	s.EscrowID     = escrowID
+	s.ChannelID = channelID
+	s.EscrowID = escrowID
 	s.HoldDeadline = holdDeadline
 	s.mu.Unlock()
 	return nil
@@ -95,7 +99,7 @@ func (m *Manager) End(sessionID string) error {
 	}
 	s.mu.Lock()
 	now := time.Now()
-	s.Status  = StatusEnded
+	s.Status = StatusEnded
 	s.EndedAt = &now
 	s.mu.Unlock()
 	return nil
