@@ -292,15 +292,15 @@ async function main() {
   await test('에스크로 잠금 생성 (Held)', async () => {
     await pool.query(
       `INSERT INTO escrow_locks
-       (session_id, escrow_id_bytes, channel_id, case_id, user_address, seller_address,
-        amount_usdc, hold_deadline, create_tx, state)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+       (session_id, escrow_id_bytes, channel_id, case_id, user_address, operator_address,
+        user_deposit, operator_deposit, hold_deadline, user_deposit_tx, state)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10)`,
       [sessionId, escrowBytes, channelId, caseId, userAddr, opAddr,
-       '3.000000', holdDeadline, '0xCreateEscrowTx', 'Held']
+       '3.000000', holdDeadline, '0xCreateEscrowTx', 'UserDeposited']
     );
     const res = await pool.query('SELECT state FROM escrow_locks WHERE session_id = $1', [sessionId]);
-    if (res.rows[0].state !== 'Held') throw new Error('초기 state 오류');
-    ok('에스크로 잠금 생성 — state: Held');
+    if (res.rows[0].state !== 'UserDeposited') throw new Error('초기 state 오류');
+    ok('에스크로 잠금 생성 — state: UserDeposited');
   });
 
   await test('에스크로 Held → RefundIssue', async () => {
@@ -312,12 +312,12 @@ async function main() {
 
   await test('에스크로 RefundIssue → Refunded (Buyer 환불)', async () => {
     await pool.query(
-      `UPDATE escrow_locks SET state = 'Refunded', release_tx = $2, released_at = NOW() WHERE session_id = $1`,
+      `UPDATE escrow_locks SET state = 'Refunded', settle_tx = $2, settled_at = NOW() WHERE session_id = $1`,
       [sessionId, '0xRefundToBuyerTx']
     );
-    const res = await pool.query('SELECT state, release_tx FROM escrow_locks WHERE session_id = $1', [sessionId]);
+    const res = await pool.query('SELECT state, settle_tx FROM escrow_locks WHERE session_id = $1', [sessionId]);
     if (res.rows[0].state !== 'Refunded') throw new Error('전이 실패');
-    ok(`에스크로 상태 → Refunded, tx: ${res.rows[0].release_tx}`);
+    ok(`에스크로 상태 → Refunded, tx: ${res.rows[0].settle_tx}`);
   });
 
   // ── 11. 전체 흐름 통합 확인 ───────────────────────────────────────────────────
@@ -331,7 +331,7 @@ async function main() {
         st.status      AS settlement_status,
         st.operator_earn_usdc,
         el.state       AS escrow_state,
-        el.amount_usdc AS escrow_amount,
+        el.user_deposit AS escrow_amount,
         rc.status      AS case_status,
         rc.approved_usdc
       FROM sessions s

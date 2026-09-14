@@ -7,7 +7,8 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "watchtower": "node src/services/watchtower.js",
-    "test": "jest --runInBand"
+    "test": "jest --runInBand",
+    "test:escrow-schema": "jest --runInBand --runTestsByPath test/escrowSchema.integration.test.js"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.10.0",
@@ -30,6 +31,7 @@
     "@openzeppelin/contracts": "^5.6.1",
     "jest": "^29.7.0",
     "nodemon": "^3.0.2",
+    "pg-mem": "^3.0.5",
     "solc": "^0.8.35",
     "supertest": "^6.3.4"
   }

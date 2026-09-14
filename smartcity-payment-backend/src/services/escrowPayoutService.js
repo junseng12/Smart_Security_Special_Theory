@@ -19,6 +19,7 @@
 const { ethers } = require('ethers');
 const logger     = require('../utils/logger');
 const chainTx    = require('./chainTransactionTracker');
+const escrowLocks = require('./escrowLockRepository');
 
 const ESCROW_ADDR = process.env.ESCROW_CONTRACT_ADDRESS;
 const USDC_ADDR   = process.env.USDC_CONTRACT_ADDRESS   || '0x036CbD53842c5426634e7929541eC2318f3dCF7e';
@@ -200,44 +201,12 @@ async function verifyUserDepositTransaction({
   };
 }
 
-async function ensureTable() {
-  await getPool().query(`
-    CREATE TABLE IF NOT EXISTS escrow_locks (
-      id                  SERIAL PRIMARY KEY,
-      session_id          TEXT UNIQUE NOT NULL,
-      escrow_id_bytes     TEXT,
-      channel_id          TEXT,
-      case_id             TEXT,
-      user_address        TEXT,
-      operator_address    TEXT,
-      amount_usdc         NUMERIC(18,6),
-      hold_deadline       TIMESTAMPTZ,
-      user_deposit_tx     TEXT,
-      operator_deposit_tx TEXT,
-      settle_tx           TEXT,
-      state               TEXT DEFAULT 'None',
-      locked_at           TIMESTAMPTZ DEFAULT NOW(),
-      settled_at          TIMESTAMPTZ,
-      claimable_after     TIMESTAMPTZ,
-      user_deposit        NUMERIC(18,6) DEFAULT 0,
-      operator_deposit    NUMERIC(18,6) DEFAULT 0,
-      fare_amount         NUMERIC(18,6) DEFAULT 0,
-      retry_count         INTEGER DEFAULT 0,
-      last_error          TEXT
-    );
-    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS perun_proof JSONB;
-    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0;
-    ALTER TABLE escrow_locks ADD COLUMN IF NOT EXISTS last_error TEXT;
-  `).catch(() => {});
-}
-
 // ─────────────────────────────────────────────────────────────────
 // 1. recordUserDeposit
 //    프론트에서 MetaMask로 userDeposit 온체인 TX 완료 후 호출
 //    → Operator도 바로 operatorDeposit 실행 (FullyFunded 전환)
 // ─────────────────────────────────────────────────────────────────
 async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAddress, depositUsdc, holdDeadline, depositTxHash }) {
-  await ensureTable();
   const escrowId = toEscrowId(sessionId);
   const escrow   = getEscrow(getProvider());
   const deadline = holdDeadline || (Math.floor(Date.now() / 1000) + HOLD_DEADLINE_SEC);
@@ -264,23 +233,18 @@ async function recordUserDeposit({ sessionId, channelId, userAddress, operatorAd
   // operatorDeposit is deliberately performed only by operatorDeposit().
   const finalStateLabel = STATE_LABELS[onchainState] || 'None';
 
-  await getPool().query(
-    `INSERT INTO escrow_locks
-       (session_id, escrow_id_bytes, channel_id, user_address, operator_address,
-        user_deposit, operator_deposit, amount_usdc, hold_deadline,
-        user_deposit_tx, operator_deposit_tx, state)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$6,to_timestamp($8),$9,$10,$11)
-     ON CONFLICT (session_id) DO UPDATE SET
-       user_deposit        = EXCLUDED.user_deposit,
-       operator_deposit    = EXCLUDED.operator_deposit,
-       amount_usdc         = EXCLUDED.amount_usdc,
-       hold_deadline       = EXCLUDED.hold_deadline,
-       user_deposit_tx     = COALESCE(EXCLUDED.user_deposit_tx, escrow_locks.user_deposit_tx),
-       operator_deposit_tx = COALESCE(EXCLUDED.operator_deposit_tx, escrow_locks.operator_deposit_tx),
-       state               = EXCLUDED.state`,
-    [sessionId, escrowId, channelId, userAddress, operator,
-     depositUsdc || '3', onchainOperatorDeposit, deadline, depositTxHash, null, finalStateLabel]
-  );
+  await escrowLocks.upsertUserDeposit(getPool(), {
+    sessionId,
+    escrowId,
+    channelId,
+    userAddress,
+    operatorAddress: operator,
+    userDeposit: depositUsdc || '3',
+    operatorDeposit: onchainOperatorDeposit,
+    holdDeadline: deadline,
+    userDepositTx: depositTxHash,
+    state: finalStateLabel,
+  });
 
   return {
     escrowId, sessionId, depositUsdc,
@@ -305,7 +269,6 @@ function validateProof(proof) {
 }
 
 async function settleAndReleaseInternal({sessionId,proof}) {
-  await ensureTable();
   if (!proof) {
     const {rows} = await getPool().query('SELECT perun_proof FROM escrow_locks WHERE session_id=$1',[sessionId]);
     proof = rows[0]?.perun_proof;
@@ -333,7 +296,6 @@ async function settleAndReleaseInternal({sessionId,proof}) {
 }
 
 async function registerRefundIssue(sessionId, caseId, issueType, description, penalizeOperator = false) {
-  await ensureTable();
   const wallet   = getWallet();
   const escrow   = getEscrow(wallet);
   const escrowId = toEscrowId(sessionId);
@@ -359,7 +321,6 @@ async function registerRefundIssue(sessionId, caseId, issueType, description, pe
 //    환불 승인 시 호출 — RefundIssue → Refunded
 // ─────────────────────────────────────────────────────────────────
 async function refundToBuyer(sessionId, caseId) {
-  await ensureTable();
   const wallet   = getWallet();
   const escrow   = getEscrow(wallet);
   const escrowId = toEscrowId(sessionId);
@@ -430,7 +391,6 @@ async function refundToBuyer(sessionId, caseId) {
 // 5. forceRefundOnchain — 긴급 환불 (관리자용)
 // ─────────────────────────────────────────────────────────────────
 async function forceRefundOnchain(sessionId) {
-  await ensureTable();
   const wallet   = getWallet();
   const escrow   = getEscrow(wallet);
   const escrowId = toEscrowId(sessionId);
@@ -511,7 +471,6 @@ async function operatorDeposit(sessionId, depositUsdc, userDepTxHash) {
 }
 
 async function operatorDepositUnlocked(sessionId, depositUsdc, userDepTxHash) {
-  await ensureTable();
   const wallet   = getWallet();
   const escrow   = getEscrow(wallet);
   const usdc     = getUsdc(wallet);
@@ -579,7 +538,6 @@ async function operatorDepositUnlocked(sessionId, depositUsdc, userDepTxHash) {
 // watchtower 호환성을 위해 stub으로 유지 (Released 상태 확인 후 skip)
 // ─────────────────────────────────────────────────────────────────
 async function claimSettlement(sessionId) {
-  await ensureTable();
   const escrow = getEscrow(getWallet());
   const escrowId = toEscrowId(sessionId);
   const status = await escrow.getEscrowStatus(escrowId);
