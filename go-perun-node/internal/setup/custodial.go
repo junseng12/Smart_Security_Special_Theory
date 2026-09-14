@@ -5,6 +5,7 @@ package setup
 import (
 	"fmt"
 	"math/big"
+	"smartcity/go-perun-node/internal/funding"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -49,9 +50,10 @@ func NewUserNode(cfg *Config, bus *wire.LocalBus) (*UserNode, error) {
 	}
 
 	// 4. Funder
-	funder := ethchannel.NewFunder(cb)
+	ethFunder := ethchannel.NewFunder(cb)
 	usdcAsset := ethchannel.NewAsset(new(big.Int).SetUint64(cfg.ChainID), cfg.AssetHolderAddr)
-	funder.RegisterAsset(*usdcAsset, ethchannel.NewERC20Depositor(cfg.USDCTokenAddr, 300_000), acc)
+	ethFunder.RegisterAsset(*usdcAsset, ethchannel.NewERC20Depositor(cfg.USDCTokenAddr, 300_000), acc)
+	funder := funding.NewZeroSkippingFunder(ethFunder)
 
 	// 5. Adjudicator
 	adj := ethchannel.NewAdjudicator(cb, cfg.AdjudicatorAddr, cfg.ReceiverAddr, acc, 1_000_000)

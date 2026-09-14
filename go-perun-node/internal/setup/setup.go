@@ -9,6 +9,7 @@ import (
 	"perun.network/go-perun/channel/persistence"
 	"perun.network/go-perun/channel/persistence/keyvalue"
 	"polycry.pt/poly-go/sortedkv/leveldb"
+	"smartcity/go-perun-node/internal/funding"
 	"smartcity/go-perun-node/internal/paymentapp"
 
 	"github.com/ethereum/go-ethereum/accounts"
@@ -103,9 +104,10 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 	log.Info("[Setup] ✓ contracts validated")
 
 	// Step 4: Funder + ERC20Depositor
-	funder := ethchannel.NewFunder(cb)
+	ethFunder := ethchannel.NewFunder(cb)
 	usdcAsset := ethchannel.NewAsset(new(big.Int).SetUint64(cfg.ChainID), cfg.AssetHolderAddr)
-	funder.RegisterAsset(*usdcAsset, ethchannel.NewERC20Depositor(cfg.USDCTokenAddr, 300_000), operatorAcc)
+	ethFunder.RegisterAsset(*usdcAsset, ethchannel.NewERC20Depositor(cfg.USDCTokenAddr, 300_000), operatorAcc)
+	funder := funding.NewZeroSkippingFunder(ethFunder)
 	log.WithField("asset", cfg.AssetHolderAddr.Hex()).Info("[Setup] ✓ ERC20 funder registered")
 
 	// Step 5: Adjudicator
@@ -164,7 +166,7 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 		EthAddress:      eAddrs,
 		USDCAsset:       usdcAsset,
 		ContractBackend: cb,
-		Funder:          funder,
+		Funder:          ethFunder,
 		Adjudicator:     adj,
 		Cfg:             cfg,
 		Log:             log,

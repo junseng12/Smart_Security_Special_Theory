@@ -94,7 +94,7 @@ type Handle struct {
 //   2. userNode.Client.Handle(autoAcceptHandler) → 고루틴으로 수락 대기
 //   3. m.node.Client.ProposeChannel() → 내부 P2P로 userNode에 제안
 //   4. userNode가 자동 수락 → 채널 개설
-//   5. Funder.Fund() → USDC approve+deposit TX (운영자 측만, 사용자 예치는 0)
+//   5. Funder.Fund() → zero agreement fast path (AssetHolder TX/event subscription 없음)
 // ────────────────────────────────────────────────────────────────────
 
 type OpenParams struct {
