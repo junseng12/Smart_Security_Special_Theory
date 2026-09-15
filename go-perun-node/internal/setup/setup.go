@@ -66,6 +66,8 @@ type PerunNode struct {
 
 // NewPerunNode — LocalBus 기반 초기화 (P2P 없음)
 func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
+	configureEthereumWireAddressDecoder()
+
 	log.WithFields(logrus.Fields{
 		"rpc_configured": cfg.RPCURL != "",
 		"chain_id":       cfg.ChainID,
@@ -171,6 +173,15 @@ func NewPerunNode(cfg *Config, log *logrus.Logger) (*PerunNode, error) {
 		Cfg:             cfg,
 		Log:             log,
 	}, nil
+}
+
+// perun-eth-backend v0.6.0's wire.NewAddress returns a wrapper whose embedded
+// wallet address is nil. Persistence decoding calls UnmarshalBinary on that
+// embedded value, so allocate the official Ethereum wallet address explicitly.
+func configureEthereumWireAddressDecoder() {
+	wire.SetNewAddressFunc(func() wire.Address {
+		return &ethwire.Address{Address: new(ethwallet.Address)}
+	})
 }
 
 // DeployContracts — 최초 1회 배포

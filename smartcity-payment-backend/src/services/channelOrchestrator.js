@@ -106,11 +106,20 @@ async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usa
  *  4) DB는 온체인 검증 결과만 기록
  */
 async function endSessionAndSettle({ sessionId, channelId, userAddress }) {
+  // Freeze billing before any network call. A Perun/RPC outage must never leave
+  // a user's session Active and accumulating additional usage charges.
+  const session = await sessionMgr.getSession(sessionId);
+  if (!session) throw new Error(`Session ${sessionId} not found`);
+  if (session.status === 'Active') {
+    await sessionMgr.endSession(sessionId);
+  } else if (!['Ended', 'Settling'].includes(session.status)) {
+    throw new Error(`Session ${sessionId} cannot be ended from ${session.status}`);
+  }
+
   const perunRes = await perun.endSession({ sessionId, channelId, userAddress });
   // Keep native bytes and signatures intact. Amounts are read from verified on-chain data.
   const proof = { paramsABI:ethers.hexlify(perunRes.params_abi), stateABI:ethers.hexlify(perunRes.state_abi),
     signatures:perunRes.signatures.map(s => ethers.hexlify(s)) };
-  await sessionMgr.endSession(sessionId);
   await sessionMgr.markSettling(sessionId);
   const escrow = await escrowSvc.settleAndRelease({sessionId,proof});
   if (escrow.deferred || !escrow.confirmed) return { ...escrow, status:'settling', escrow };

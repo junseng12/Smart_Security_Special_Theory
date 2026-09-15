@@ -328,7 +328,13 @@ func (m *Manager) FinalUpdateAndAdjust(ctx context.Context, channelID, creditUsd
 }
 
 // ExportFinal reads the native fully signed transaction, including after restart.
-func (m *Manager) ExportFinal(ctx context.Context, channelID string) (*paymentapp.Proof, error) {
+func (m *Manager) ExportFinal(ctx context.Context, channelID string) (proof *paymentapp.Proof, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			proof = nil
+			err = fmt.Errorf("restoring persisted channel: %v", recovered)
+		}
+	}()
 	if len(channelID) != 66 || !strings.HasPrefix(channelID, "0x") {
 		return nil, fmt.Errorf("invalid channel ID")
 	}

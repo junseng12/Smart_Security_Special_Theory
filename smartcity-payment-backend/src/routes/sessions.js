@@ -152,7 +152,9 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
       return res.status(404).json({ ok: false, error: `Session not found: ${req.params.id}` });
     }
     const existing = _sess.rows[0];
-    if (existing.status !== 'Active') {
+    // Ended means billing is already frozen but settlement may be retried after
+    // a transient Perun/RPC failure. Other non-active states are idempotent.
+    if (!['Active', 'Ended'].includes(existing.status)) {
       const deposit = parseFloat(existing.user_deposit || existing.deposit_usdc || 0);
       const escrowFare = parseFloat(existing.fare_amount || 0);
       const fare = escrowFare > 0 ? escrowFare : parseFloat(existing.charged_usdc || 0);
