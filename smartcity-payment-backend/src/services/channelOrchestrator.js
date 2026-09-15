@@ -19,113 +19,275 @@ function computeEscrowId(sessionId) {
   return ethers.keccak256(ethers.toUtf8Bytes(sessionId));
 }
 
-async function startSessionAndOpenChannel({ userAddress, serviceType, depositUsdc, userWireAddr = '' }) {
-  const dbSession = await sessionMgr.startSession({ userAddress, serviceType, depositUsdc });
-  const holdSeconds = parseInt(process.env.PERUN_HOLD_SECONDS || '240'); // [TEST] 4분 — 운영: 86400(24h)
+async function startSessionAndOpenChannel({
+  userAddress,
+  serviceType,
+  depositUsdc,
+  userWireAddr = '',
+}) {
+  const dbSession = await sessionMgr.startSession({
+    userAddress,
+    serviceType,
+    depositUsdc,
+  });
 
-  // ★ escrowId는 백엔드에서 직접 계산 (프론트/백엔드 일치 보장)
+  const holdSeconds = parseInt(
+    process.env.PERUN_HOLD_SECONDS || '240'
+  );
+
   const escrowId = computeEscrowId(dbSession.id);
 
-  logger.info('[Orchestrator] calling go-perun StartSession via gRPC', {
-    userAddress, serviceType, depositUsdc, mode: perun.getMode(), escrowId,
-  });
+  logger.info(
+    '[Orchestrator] calling go-perun StartSession via gRPC',
+    {
+      userAddress,
+      serviceType,
+      depositUsdc,
+      mode: perun.getMode(),
+      escrowId,
+    }
+  );
 
   const perunRes = await perun.startSession({
-    userAddress, serviceId:serviceType, depositUsdc, userWireAddr, holdSeconds,
-    externalSessionId:dbSession.id, escrowId,
+    userAddress,
+    serviceId: serviceType,
+    depositUsdc,
+    userWireAddr,
+    holdSeconds,
+    externalSessionId: dbSession.id,
+    escrowId,
   });
-  if (perunRes.session_id !== dbSession.id || perunRes.escrow_id?.toLowerCase() !== escrowId.toLowerCase()) {
+
+  if (
+    perunRes.session_id !== dbSession.id ||
+    perunRes.escrow_id?.toLowerCase() !== escrowId.toLowerCase()
+  ) {
     throw new Error('Perun canonical session identity mismatch');
   }
 
-  await sessionMgr.linkChannel(dbSession.id, perunRes.channel_id).catch(() => {});
+  await sessionMgr
+    .linkChannel(dbSession.id, perunRes.channel_id)
+    .catch(() => {});
 
   logger.info('[Orchestrator] startSessionAndOpenChannel OK', {
-    dbSessionId: dbSession.id, perunSession: perunRes.session_id,
-    channelId: perunRes.channel_id, escrowId, fallback: !!perunRes._fallback,
+    dbSessionId: dbSession.id,
+    perunSession: perunRes.session_id,
+    channelId: perunRes.channel_id,
+    escrowId,
+    fallback: !!perunRes._fallback,
   });
 
   return {
-    sessionId:    dbSession.id,
+    sessionId: dbSession.id,
     perunSession: perunRes.session_id,
-    channelId:    perunRes.channel_id,
+    channelId: perunRes.channel_id,
     escrowId,
     holdDeadline: perunRes.hold_deadline,
-    stateHash:    perunRes.state_hash,
-    fallback:     !!perunRes._fallback,
+    stateHash: perunRes.state_hash,
+    fallback: !!perunRes._fallback,
   };
 }
 
-async function chargeUsage({ sessionId, channelId, userAddress, serviceType, usage = {} }) {
+async function chargeUsage({
+  sessionId,
+  channelId,
+  userAddress,
+  serviceType,
+  usage = {},
+}) {
   const durationMinutes = usage.durationMinutes ?? 1;
-  const energyKwh       = usage.energyKwh       ?? 0;
-  const fareEngine      = require('./fareEngine');
+  const energyKwh = usage.energyKwh ?? 0;
 
   const usedFallback = false;
-  const res = await perun.proposeUsageUpdate({sessionId,channelId,serviceType,durationMinutes,energyKwh});
+
+  const res = await perun.proposeUsageUpdate({
+    sessionId,
+    channelId,
+    serviceType,
+    durationMinutes,
+    energyKwh,
+  });
 
   try {
     const db = require('./db');
-    // ① sessions.charged_usdc 누적
+
     await db.getPool().query(
-      `UPDATE sessions SET charged_usdc = COALESCE(charged_usdc, 0) + $1::NUMERIC WHERE id = $2`,
+      `UPDATE sessions
+       SET charged_usdc = COALESCE(charged_usdc, 0) + $1::NUMERIC
+       WHERE id = $2`,
       [res.fare_usdc, sessionId]
     );
+
     if (!usedFallback) {
-      // ② channel_states에 오프체인 서명 상태 기록 (분쟁 증거)
       await db.getPool().query(
         `INSERT INTO channel_states
-           (channel_id, session_id, nonce, state_hash, fare_usdc, recorded_at)
+           (
+             channel_id,
+             session_id,
+             nonce,
+             state_hash,
+             fare_usdc,
+             recorded_at
+           )
          VALUES ($1, $2, $3, $4, $5, NOW())
          ON CONFLICT (channel_id, nonce) DO NOTHING`,
-        [channelId, sessionId,
-         Number(res.new_nonce), res.state_hash, res.fare_usdc]
+        [
+          channelId,
+          sessionId,
+          Number(res.new_nonce),
+          res.state_hash,
+          res.fare_usdc,
+        ]
       ).catch(() => {});
     }
-  } catch { /* DB 없어도 go-perun 상태에 영향 없음 */ }
+  } catch {
+    // DB 기록 실패가 실제 go-perun 상태 갱신을 되돌리지는 않는다.
+  }
 
   return {
-    fare: { fareUsdc: res.fare_usdc, policyHash: res.policy_hash },
-    updatedState: {
-      nonce:    Number(res.new_nonce),
-      stateHash: res.state_hash,
-      balances:  { user: res.balance_user },
+    fare: {
+      fareUsdc: res.fare_usdc,
+      policyHash: res.policy_hash,
     },
-    signatureRequest: { stateHash: res.state_hash, nonce: Number(res.new_nonce) },
+    updatedState: {
+      nonce: Number(res.new_nonce),
+      stateHash: res.state_hash,
+      balances: {
+        user: res.balance_user,
+      },
+    },
+    signatureRequest: {
+      stateHash: res.state_hash,
+      nonce: Number(res.new_nonce),
+    },
     fallback: usedFallback,
   };
 }
 
 /**
- * 세션 종료 → go-perun EndSession → 에스크로 컨트랙트 settleAndRelease
+ * 세션 종료 → go-perun EndSession → SmartCityEscrow settlement
  *
- * 흐름:
- *  1) go-perun EndSession gRPC 호출로 final Perun proof 수령
- *  2) proof bytes/signatures를 그대로 SmartCityEscrow에 relay
- *  3) 컨트랙트가 verifiedFare()로 fare를 추출하고 정산 예약
- *  4) DB는 온체인 검증 결과만 기록
+ * 가장 중요한 규칙:
+ *
+ * 1. 서비스 종료/과금 중단은 Perun 정산보다 먼저 수행한다.
+ * 2. 이후 Perun 또는 RPC 장애가 발생해도 세션을 Active로 되돌리지 않는다.
+ * 3. native Perun proof가 없으면 임의 요금 정산을 하지 않는다.
+ * 4. proof 생성 실패는 recovery_pending으로 반환하여
+ *    scheduler의 자동 환불/복구 경로에 맡긴다.
  */
-async function endSessionAndSettle({ sessionId, channelId, userAddress }) {
-  // Freeze billing before any network call. A Perun/RPC outage must never leave
-  // a user's session Active and accumulating additional usage charges.
+async function endSessionAndSettle({
+  sessionId,
+  channelId,
+  userAddress,
+}) {
   const session = await sessionMgr.getSession(sessionId);
-  if (!session) throw new Error(`Session ${sessionId} not found`);
-  if (session.status === 'Active') {
-    await sessionMgr.endSession(sessionId);
-  } else if (!['Ended', 'Settling'].includes(session.status)) {
-    throw new Error(`Session ${sessionId} cannot be ended from ${session.status}`);
+
+  if (!session) {
+    throw new Error(`Session ${sessionId} not found`);
   }
 
-  const perunRes = await perun.endSession({ sessionId, channelId, userAddress });
-  // Keep native bytes and signatures intact. Amounts are read from verified on-chain data.
-  const proof = { paramsABI:ethers.hexlify(perunRes.params_abi), stateABI:ethers.hexlify(perunRes.state_abi),
-    signatures:perunRes.signatures.map(s => ethers.hexlify(s)) };
+  // ─────────────────────────────────────────────────────────────
+  // 1. 과금부터 확실히 중단
+  // ─────────────────────────────────────────────────────────────
+  if (session.status === 'Active') {
+    await sessionMgr.endSession(sessionId);
+
+    logger.info(
+      '[Orchestrator] billing stopped before Perun finalization',
+      {
+        sessionId,
+        channelId,
+      }
+    );
+  } else if (
+    !['Ended', 'Settling'].includes(session.status)
+  ) {
+    throw new Error(
+      `Session ${sessionId} cannot be ended from ${session.status}`
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 2. Native Perun final proof 생성
+  // ─────────────────────────────────────────────────────────────
+  let perunRes;
+
+  try {
+    perunRes = await perun.endSession({
+      sessionId,
+      channelId,
+      userAddress,
+    });
+  } catch (err) {
+    // 중요:
+    // 서비스는 이미 Ended 상태이다.
+    // Perun 장애 때문에 절대로 Active로 되돌리면 안 된다.
+    logger.error(
+      '[Orchestrator] Perun finalization failed after billing stopped',
+      {
+        sessionId,
+        channelId,
+        error: err.message,
+      }
+    );
+
+    return {
+      deferred: true,
+      confirmed: false,
+      billingStopped: true,
+      recoveryPending: true,
+      status: 'recovery_pending',
+      message:
+        '서비스 이용은 종료되었습니다. Perun 최종 증명 생성 실패로 정산 복구 또는 자동 환불을 대기합니다.',
+      error: err.message,
+    };
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // 3. Native proof 그대로 relay
+  // ─────────────────────────────────────────────────────────────
+  const proof = {
+    paramsABI: ethers.hexlify(perunRes.params_abi),
+    stateABI: ethers.hexlify(perunRes.state_abi),
+    signatures: perunRes.signatures.map(
+      (signature) => ethers.hexlify(signature)
+    ),
+  };
+
   await sessionMgr.markSettling(sessionId);
-  const escrow = await escrowSvc.settleAndRelease({sessionId,proof});
-  if (escrow.deferred || !escrow.confirmed) return { ...escrow, status:'settling', escrow };
-  await settleMgr.recordSettlement({sessionId,channelId,userAddress,txHash:escrow.txHash,
-    fareUsdc:escrow.fareUsdc,refundUsdc:escrow.refundUsdc,confirmed:true});
-  return {...escrow,escrow};
+
+  // ─────────────────────────────────────────────────────────────
+  // 4. SmartCityEscrow가 native Perun proof 직접 검증
+  // ─────────────────────────────────────────────────────────────
+  const escrow = await escrowSvc.settleAndRelease({
+    sessionId,
+    proof,
+  });
+
+  if (escrow.deferred || !escrow.confirmed) {
+    return {
+      ...escrow,
+      billingStopped: true,
+      status: 'settling',
+      escrow,
+    };
+  }
+
+  await settleMgr.recordSettlement({
+    sessionId,
+    channelId,
+    userAddress,
+    txHash: escrow.txHash,
+    fareUsdc: escrow.fareUsdc,
+    refundUsdc: escrow.refundUsdc,
+    confirmed: true,
+  });
+
+  return {
+    ...escrow,
+    billingStopped: true,
+    escrow,
+  };
 }
 
 async function disputeChannel({ channelId }) {
@@ -143,6 +305,3 @@ module.exports = {
   disputeChannel,
   getChannelStatus,
 };
-
-
-

@@ -132,8 +132,8 @@ router.post('/:id/sign', validate(signSchema), async (req, res, next) => {
 const endSchema = Joi.object({
   channelId:    Joi.string().required(),
   userAddress:  ethAddress().required(),
-  userFinalSig: Joi.string().required(),
-  fareUsdc:     Joi.string().optional(),   // charge에서 받은 요금 직접 전달
+  userFinalSig: Joi.string().optional(),
+  fareUsdc:     Joi.string().optional(),   // 레거시 호환 — 정산 금액은 proof에서 검증
   adjustment:   Joi.object({ creditUsdc: usdcAmount() }).optional(),
 });
 
@@ -183,8 +183,6 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
           sessionId:    req.params.id,
           channelId:    req.body.channelId,
           userAddress:  req.body.userAddress,
-          userFinalSig: req.body.userFinalSig,
-          fareUsdc:     req.body.fareUsdc,
           adjustment:   req.body.adjustment,
         }),
         new Promise((_, reject) => setTimeout(() => reject(new Error('SETTLE_DEFERRED')), 8000)),

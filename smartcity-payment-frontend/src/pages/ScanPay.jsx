@@ -164,6 +164,7 @@ export default function ScanPay() {
   const jsQrRef         = useRef(null);  // jsQR 라이브러리 동적 로드
   const scannedRef      = useRef(false); // QR 중복 감지 방지 플래그
   const sessionDataRef  = useRef(null);  // liveCharged 계산용 최신 sessionData
+  const endingRef       = useRef(false); // state 업데이트 전 중복 종료 요청 차단
   // lastChargeRef 제거 — doCharge 방식 삭제로 불필요
   const resumePaymentRef = useRef(null);  // 항상 최신 resumePayment 참조
 const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
@@ -209,14 +210,29 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
       } catch { return null; }
     };
 
-    // home/ended 단계 → 모든 타이머 중지
-    if (step === "home" || step === "ended") {
+    // home에서는 초기화, ending/ended에서는 마지막 이용시간을 그대로 고정한다.
+    if (step === "home") {
       clearInterval(timerRef.current);
       clearInterval(chargeIntervalRef.current);
+      clearInterval(holdTimerRef.current);
       setElapsed(0);
+
       return () => {
         clearInterval(timerRef.current);
         clearInterval(chargeIntervalRef.current);
+        clearInterval(holdTimerRef.current);
+      };
+    }
+
+    if (step === "ending" || step === "ended") {
+      clearInterval(timerRef.current);
+      clearInterval(chargeIntervalRef.current);
+      clearInterval(holdTimerRef.current);
+
+      return () => {
+        clearInterval(timerRef.current);
+        clearInterval(chargeIntervalRef.current);
+        clearInterval(holdTimerRef.current);
       };
     }
 
@@ -557,40 +573,194 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
   // ── 세션 종료 ─────────────────────────────────────────────────────────────────
   const endSession = async () => {
-    if (!sessionData || ending) return;
+    if (!sessionData || ending || endingRef.current) return;
+    endingRef.current = true;
+
+    // 종료 버튼을 누른 시점의 값을 고정한다.
+    // 이후 정산이 지연되더라도 UI 요금/시간이 증가하면 안 된다.
+    const finalElapsedSec = elapsed;
+    const frozenFare = liveCharged;
+
+    clearInterval(timerRef.current);
+    clearInterval(chargeIntervalRef.current);
+    clearInterval(holdTimerRef.current);
+
     setEnding(true);
     setStep("ending");
     setLog([]);
+
+    // 브라우저 로컬 상태도 더 이상 active로 취급하지 않는다.
+    saveSession({
+      ...sessionData,
+      status: "ending",
+      stoppedAt: Date.now(),
+      finalElapsedSec,
+      frozenFare,
+    });
+
     try {
-      // 오프체인 누적 nonce 확인 (로그용)
-      const activeSession = JSON.parse(localStorage.getItem("active_session") || "{}");
+      const activeSession = JSON.parse(
+        localStorage.getItem("active_session") || "{}"
+      );
       const nonces = activeSession.chargedNonce || 0;
-      const finalElapsedSec = elapsed;
-      addLog(`① 세션 종료 요청... (오프체인 서명 누적: ${nonces}회)`, "info");
-      const res = await apiCall(`/api/v1/sessions/${sessionData.sessionId}/end`, "POST", {
-        channelId:    sessionData.channelId,
-        userAddress:  mmAddress || localStorage.getItem("mm_address"),
-        userFinalSig: String(liveCharged.toFixed(6)),
-        fareUsdc:     String(liveCharged.toFixed(6)), // 서버 계산 실패 시에만 사용하는 폴백
-      });
-      const fareUsdc   = res.fareUsdc   ?? res.fare   ?? "계산중...";
-      const refundUsdc  = res.refundUsdc  ?? res.refund  ?? "계산중...";
-      addLog(`✅ 요금: ${fareUsdc} USDC`, "success");
-      addLog(`✅ 환불: ${refundUsdc} USDC`, "success");
-      if (res.deferred) addLog(`⏳ 24시간 분쟁 대기 후 자동 정산됩니다`, "info");
+
+      addLog(
+        `① 서비스 종료 요청... (오프체인 서명 누적: ${nonces}회)`,
+        "info"
+      );
+
+      const endRequest = apiCall(
+        `/api/v1/sessions/${sessionData.sessionId}/end`,
+        "POST",
+        {
+          channelId: sessionData.channelId,
+          userAddress:
+            mmAddress || localStorage.getItem("mm_address"),
+          fareUsdc: String(frozenFare.toFixed(6)),
+        }
+      );
+      const res = await Promise.race([
+        endRequest,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error("종료 요청 시간 초과: 서버 상태를 확인합니다.")),
+          12_000
+        )),
+      ]);
+
+      const recoveryPending =
+        Boolean(res.recoveryPending) ||
+        res.status === "recovery_pending";
+
+      const deferred = Boolean(res.deferred);
+
+      const fareUsdc =
+        res.fareUsdc ??
+        res.fare ??
+        (recoveryPending ? "확인 중" : frozenFare.toFixed(6));
+
+      const refundUsdc =
+        res.refundUsdc ??
+        res.refund ??
+        (
+          recoveryPending
+            ? "확인 중"
+            : Math.max(
+                Number(sessionData.svc?.depositUsdc || 0) - frozenFare,
+                0
+              ).toFixed(6)
+        );
+
+      addLog("✅ 서비스 이용이 종료되었습니다.", "success");
+
+      if (recoveryPending) {
+        addLog(
+          "⚠️ Perun 최종 증명 생성에 실패하여 정산 복구 또는 자동 환불을 대기합니다.",
+          "error"
+        );
+      } else if (deferred) {
+        addLog(
+          "⏳ 서비스는 종료되었으며 온체인 정산을 진행 중입니다.",
+          "info"
+        );
+      } else {
+        addLog(`✅ 요금: ${fareUsdc} USDC`, "success");
+        addLog(`✅ 환불: ${refundUsdc} USDC`, "success");
+      }
 
       clearSession();
+
       setSessionData({
         ...sessionData,
-        result: { ...res, fareUsdc, refundUsdc, elapsedSec: finalElapsedSec },
-        status: "ended",
+        status: recoveryPending
+          ? "recovery_pending"
+          : deferred
+            ? "settling"
+            : "ended",
+        result: {
+          ...res,
+          fareUsdc,
+          refundUsdc,
+          elapsedSec: finalElapsedSec,
+          deferred,
+          recoveryPending,
+          billingStopped: true,
+        },
       });
+
       setStep("ended");
-      queryClient.invalidateQueries({ queryKey: ['sessions-history'] });
+
+      queryClient.invalidateQueries({
+        queryKey: ["sessions-history"],
+      });
+
     } catch (err) {
-      addLog(`❌ ${err.message}`, "error");
-      setStep("active");
+      // 네트워크/API 오류가 발생했더라도 Backend에서 실제로 세션이
+      // 종료됐는지 다시 확인한다.
+      // Backend가 Ended/Settling이면 절대로 active 화면으로 복귀시키지 않는다.
+      let backendStatus = null;
+
+      try {
+        const statusRes = await apiCall(
+          `/api/v1/sessions/${sessionData.sessionId}/status`
+        );
+
+        backendStatus = statusRes?.session?.status || null;
+      } catch (_) {
+        // 상태 확인 자체도 실패한 경우 아래에서 재시도 가능 상태로 처리
+      }
+
+      if (
+        backendStatus &&
+        backendStatus !== "Active"
+      ) {
+        addLog("✅ 서비스 이용은 종료되었습니다.", "success");
+        addLog(
+          `⚠️ 정산 처리 지연: ${err.message}`,
+          "error"
+        );
+        addLog(
+          "정산 복구 또는 자동 환불을 진행합니다.",
+          "info"
+        );
+
+        clearSession();
+
+        setSessionData({
+          ...sessionData,
+          status: "recovery_pending",
+          result: {
+            deferred: true,
+            recoveryPending: true,
+            billingStopped: true,
+            fareUsdc: "확인 중",
+            refundUsdc: "확인 중",
+            elapsedSec: finalElapsedSec,
+            error: err.message,
+          },
+        });
+
+        setStep("ended");
+      } else {
+        // Backend에서도 여전히 Active로 확인되거나 상태 확인이 불가능한 경우에만
+        // 사용자가 종료를 다시 시도할 수 있도록 active로 복귀한다.
+        addLog(
+          `❌ 서비스 종료 요청을 확인하지 못했습니다: ${err.message}`,
+          "error"
+        );
+        addLog(
+          "다시 '서비스 종료 및 정산' 버튼을 눌러주세요.",
+          "info"
+        );
+
+        saveSession({
+          ...sessionData,
+          status: "active",
+        });
+
+        setStep("active");
+      }
     } finally {
+      endingRef.current = false;
       setEnding(false);
     }
   };
@@ -606,6 +776,7 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     setElapsed(0);
     setTotalCharged(0);
     setLog([]);
+    endingRef.current = false;
     setEnding(false);
   };
 
@@ -870,8 +1041,21 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7"/>
                 </svg>
               </div>
-              <h2 className="text-xl font-bold text-gray-900 mb-1">결제 완료 ✅</h2>
-              <p className="text-xs text-gray-400">환불 신청 시 세션 ID를 복사해 두세요 👆</p>
+              <h2 className="text-xl font-bold text-gray-900 mb-1">
+                {sessionData.result.recoveryPending
+                  ? "서비스 종료 완료 · 정산 복구 대기"
+                  : sessionData.result.deferred
+                    ? "서비스 종료 완료 · 정산 진행 중"
+                    : "결제 완료 ✅"}
+              </h2>
+
+              <p className="text-xs text-gray-400">
+                {sessionData.result.recoveryPending
+                  ? "추가 과금은 중지되었습니다. 정산 복구 또는 자동 환불을 진행합니다."
+                  : sessionData.result.deferred
+                    ? "추가 과금은 중지되었습니다. 온체인 정산을 진행하고 있습니다."
+                    : "환불 신청 시 세션 ID를 복사해 두세요 👆"}
+              </p>
             </div>
 
             <div className="bg-white rounded-2xl p-5 shadow-sm space-y-3 text-sm">
