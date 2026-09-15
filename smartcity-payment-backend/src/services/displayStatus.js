@@ -6,10 +6,22 @@ const DISPLAY_STATUS = Object.freeze({
   NEEDS_ATTENTION: 'NEEDS_ATTENTION',
 });
 
-function deriveDisplayStatus({ sessionStatus, escrowState, txStatus, startedAt }) {
+function deriveDisplayStatus({
+  sessionStatus,
+  escrowState,
+  txStatus,
+  txAction,
+  settlementClaimed = false,
+  startedAt,
+}) {
   // Final on-chain states are authoritative.
   if (escrowState === 'Refunded') return DISPLAY_STATUS.REFUNDED;
-  if (escrowState === 'Released') return DISPLAY_STATUS.COMPLETED;
+  if (escrowState === 'Released') {
+    const claimConfirmed = txAction === 'CLAIM' && txStatus === 'CONFIRMED';
+    return settlementClaimed || claimConfirmed
+      ? DISPLAY_STATUS.COMPLETED
+      : DISPLAY_STATUS.SETTLING;
+  }
 
   if (
     ['SettleFailed', 'RefundIssue'].includes(escrowState)

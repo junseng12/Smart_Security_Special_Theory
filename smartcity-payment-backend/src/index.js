@@ -147,6 +147,33 @@ async function bootstrap() {
           }).catch(e => logger.error('Scheduler: settle fail', { sessionId: row.session_id, error: e.message }));
         }
 
+        // settleAndRelease only reserves the payout. Once the dispute window
+        // expires, claimSettlement performs the actual USDC distribution.
+        const { rows: claimRows } = await db.getPool().query(
+          `SELECT el.session_id
+           FROM escrow_locks el
+           JOIN sessions s ON s.id = el.session_id
+           WHERE el.state = 'Released'
+             AND s.status = 'Settling'
+             AND el.claimable_after IS NOT NULL
+             AND el.claimable_after <= NOW()
+           LIMIT 5`
+        ).catch(() => ({ rows: [] }));
+
+        for (const row of claimRows) {
+          logger.info('[Scheduler] claimSettlement executing', { sessionId: row.session_id });
+          await escrowSvc.claimSettlement(row.session_id)
+            .then(result => logger.info('[Scheduler] claimSettlement complete', {
+              sessionId: row.session_id,
+              txHash: result.txHash || null,
+              skipped: Boolean(result.skipped),
+            }))
+            .catch(e => logger.error('Scheduler: claim failed', {
+              sessionId: row.session_id,
+              error: e.message,
+            }));
+        }
+
       } catch (e) {
         logger.error('Scheduler error', { error: e.message });
       } finally {

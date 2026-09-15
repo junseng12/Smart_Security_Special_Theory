@@ -385,7 +385,12 @@ router.get('/:id/escrow-status', async (req, res, next) => {
     // DB 상태
     const row = await db.getPool().query(
       `SELECT el.state, el.fare_amount, el.user_deposit, el.operator_deposit,
-              el.settle_tx, el.settled_at, el.hold_deadline
+              el.settle_tx, el.settled_at, el.hold_deadline,
+              EXISTS (
+                SELECT 1 FROM chain_transactions ct
+                WHERE ct.session_id = el.session_id
+                  AND ct.action = 'CLAIM' AND ct.status = 'CONFIRMED'
+              ) AS claim_confirmed
        FROM escrow_locks el WHERE el.session_id = $1`,
       [sessionId]
     ).then(r => r.rows[0]);
@@ -400,7 +405,10 @@ router.get('/:id/escrow-status', async (req, res, next) => {
       try {
         const { ethers } = require('ethers');
         const provider = new ethers.JsonRpcProvider(process.env.BASE_RPC_URL || 'https://sepolia.base.org');
-        const ESCROW_ABI = ['function getEscrowStatus(bytes32) view returns (uint8,uint256,uint256,uint256,address,address,uint256,bool,bool)'];
+        const ESCROW_ABI = [
+          'function getEscrowStatus(bytes32) view returns (uint8,uint256,uint256,uint256,address,address,uint256,bool,bool)',
+          'function getSettlementClaim(bytes32) view returns (uint256,uint256,uint256,uint256,bool)',
+        ];
         const escrow = new ethers.Contract(process.env.ESCROW_CONTRACT_ADDRESS, ESCROW_ABI, provider);
         const escrowId = ethers.keccak256(ethers.toUtf8Bytes(sessionId));
         const s = await escrow.getEscrowStatus(escrowId);
@@ -412,6 +420,11 @@ router.get('/:id/escrow-status', async (req, res, next) => {
           holdDeadline: Number(s[6]),
           dlPassed:     Boolean(s[8]),
         };
+        if (Number(s[0]) === 4) {
+          const claim = await escrow.getSettlementClaim(escrowId);
+          onchain.claimableAfter = Number(claim[0]);
+          onchain.settlementClaimed = Boolean(claim[4]);
+        }
       } catch(e) {}
     }
 
@@ -419,8 +432,8 @@ router.get('/:id/escrow-status', async (req, res, next) => {
     const fareUsdc   = isRefunded ? 0 : parseFloat(row.fare_amount || 0);
     const userDep    = parseFloat(row.user_deposit || 0);
     const refundUsdc = (userDep - fareUsdc).toFixed(6);
-    const FINAL_STATES = new Set(['Released','Refunded']);
-    const settled    = FINAL_STATES.has(row.state) || FINAL_STATES.has(onchain?.state);
+    const settlementClaimed = Boolean(onchain?.settlementClaimed || row.claim_confirmed);
+    const settled    = isRefunded || settlementClaimed;
 
     res.json({
       ok: true,
@@ -433,6 +446,7 @@ router.get('/:id/escrow-status', async (req, res, next) => {
         userDeposit: String(userDep),
         settleTx:   row.settle_tx,
         settledAt:  row.settled_at,
+        settlementClaimed,
         settled,
       }
     });
@@ -448,7 +462,12 @@ router.get('/:id/status', async (req, res, next) => {
     const db = require('../services/db');
     const stateResult = await db.getPool().query(
       `SELECT el.state AS escrow_state, ct.status AS tx_status, ct.action AS tx_action,
-              ct.tx_hash, ct.last_error
+              ct.tx_hash, ct.last_error,
+              EXISTS (
+                SELECT 1 FROM chain_transactions claim_tx
+                WHERE claim_tx.session_id = s.id
+                  AND claim_tx.action = 'CLAIM' AND claim_tx.status = 'CONFIRMED'
+              ) AS claim_confirmed
        FROM sessions s
        LEFT JOIN escrow_locks el ON el.session_id=s.id
        LEFT JOIN LATERAL (
@@ -461,10 +480,26 @@ router.get('/:id/status', async (req, res, next) => {
       [req.params.id]
     );
     const facts = stateResult.rows[0] || {};
+    let settlementClaimed = Boolean(facts.claim_confirmed);
+    let claimableAfter = null;
+    if (facts.escrow_state === 'Released') {
+      try {
+        const onchain = await require('../services/chainTransactionTracker').getOnchainState(req.params.id);
+        settlementClaimed = settlementClaimed || Boolean(onchain.settlementClaimed);
+        claimableAfter = onchain.claimableAfter;
+      } catch (err) {
+        logger.warn('Could not verify settlement claim while reading session status', {
+          sessionId: req.params.id,
+          error: err.message,
+        });
+      }
+    }
     const displayStatus = deriveDisplayStatus({
       sessionStatus: session.status,
       escrowState: facts.escrow_state,
       txStatus: facts.tx_status,
+      txAction: facts.tx_action,
+      settlementClaimed,
       startedAt: session.startedAt || session.started_at,
     });
     const stage = {
@@ -487,6 +522,8 @@ router.get('/:id/status', async (req, res, next) => {
         txAction: facts.tx_action || null,
         txHash: facts.tx_hash || settlement?.tx_hash || null,
         txError: facts.last_error || null,
+        settlementClaimed,
+        claimableAfter,
       },
     });
   } catch (err) { next(err); }
@@ -536,6 +573,11 @@ router.get('/', async (req, res, next) => {
          ct.submitted_at  AS chain_submitted_at,
          ct.confirmed_at  AS chain_confirmed_at,
          ct.last_error    AS chain_last_error,
+         EXISTS (
+           SELECT 1 FROM chain_transactions claim_tx
+           WHERE claim_tx.session_id = s.id
+             AND claim_tx.action = 'CLAIM' AND claim_tx.status = 'CONFIRMED'
+         )                AS claim_confirmed,
          -- 환불 금액 계산
          CASE
            WHEN el.state = 'Refunded' AND el.user_deposit IS NOT NULL
@@ -570,6 +612,8 @@ router.get('/', async (req, res, next) => {
         sessionStatus: r.status,
         escrowState: r.escrow_state,
         txStatus: r.chain_tx_status,
+        txAction: r.chain_action,
+        settlementClaimed: Boolean(r.claim_confirmed),
         startedAt: r.started_at,
       });
       return {
