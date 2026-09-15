@@ -19,6 +19,10 @@ const requestValidator = require('./middleware/requestValidator');
 
 const app = express();
 
+// Railway terminates HTTPS at one reverse-proxy hop. Trust that hop so
+// express-rate-limit identifies clients by their forwarded address.
+app.set('trust proxy', 1);
+
 app.use(helmet());
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS
