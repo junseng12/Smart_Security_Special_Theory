@@ -102,6 +102,7 @@ async function bootstrap() {
   try {
     const escrowSvc = require('./services/escrowPayoutService');
     const chainTx = require('./services/chainTransactionTracker');
+    const { recoveryAction } = require('./services/settlementRecovery');
     await chainTx.ensureTable();
     let schedulerRunning = false;
     async function runPendingSettles() {
@@ -115,7 +116,7 @@ async function bootstrap() {
 
         // ① holdDeadline 지난 PendingSettle → settleAndRelease (돈 잠금)
         const { rows: pendingRows } = await db.getPool().query(
-          `SELECT el.session_id, el.fare_amount
+          `SELECT el.session_id, el.fare_amount, el.perun_proof, el.hold_deadline
            FROM escrow_locks el
            JOIN sessions s ON s.id = el.session_id
            WHERE el.state IN ('PendingSettle','FullyFunded','UserDeposited')
@@ -126,6 +127,19 @@ async function bootstrap() {
         ).catch(() => ({ rows: [] }));
 
         for (const row of pendingRows) {
+          const action = recoveryAction({
+            perunProof: row.perun_proof,
+            holdDeadline: row.hold_deadline,
+          });
+          if (action === 'wait') continue;
+          if (action === 'refund') {
+            logger.warn('[Scheduler] missing Perun proof after grace period; forcing full refund', {
+              sessionId: row.session_id,
+            });
+            await escrowSvc.forceRefundOnchain(row.session_id)
+              .catch(e => logger.error('Scheduler: force refund failed', { sessionId: row.session_id, error: e.message }));
+            continue;
+          }
           logger.info('[Scheduler] settleAndRelease 실행', { sessionId: row.session_id });
           await escrowSvc.settleAndRelease({
             sessionId: row.session_id,
