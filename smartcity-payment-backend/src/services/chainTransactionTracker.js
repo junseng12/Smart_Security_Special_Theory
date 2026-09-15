@@ -9,6 +9,7 @@
 const { ethers } = require('ethers');
 const logger = require('../utils/logger');
 const { getPool } = require('./db');
+const escrowLocks = require('./escrowLockRepository');
 
 const CHAIN_ID = Number(process.env.CHAIN_ID || 84532);
 const ESCROW_ADDR = process.env.ESCROW_CONTRACT_ADDRESS;
@@ -102,8 +103,28 @@ async function getOnchainState(sessionId, provider = getProvider()) {
     claimableAfter: claim ? Number(claim[0]) : null,
     state,
     stateLabel: STATE_LABELS[state] || 'Unknown',
+    userDeposit: ethers.formatUnits(result[1], 6),
+    operatorDeposit: ethers.formatUnits(result[2], 6),
     fareAmount: ethers.formatUnits(result[3], 6),
+    userAddress: result[4],
+    operatorAddress: result[5],
+    holdDeadline: Number(result[6]),
   };
+}
+
+async function ensureEscrowLockFromChain(queryable, sessionId, channelId, onchain) {
+  await escrowLocks.ensureOnchainRecord(queryable, {
+    sessionId,
+    escrowId: toEscrowId(sessionId),
+    channelId,
+    userAddress: onchain.userAddress,
+    operatorAddress: onchain.operatorAddress,
+    userDeposit: onchain.userDeposit,
+    operatorDeposit: onchain.operatorDeposit,
+    fareAmount: onchain.fareAmount,
+    holdDeadline: onchain.holdDeadline,
+    state: onchain.stateLabel,
+  });
 }
 
 async function waitForExpectedOnchainState(sessionId, expectedState, provider) {
@@ -144,6 +165,8 @@ async function syncFinalState(sessionId, stateLabel, txHash = null) {
       [sessionId]
     );
     channelId = sessionResult.rows[0]?.channel_id || null;
+
+    await ensureEscrowLockFromChain(client, sessionId, channelId, actual);
 
     await client.query(
       `UPDATE escrow_locks
@@ -256,6 +279,7 @@ async function confirmTransaction(id, suppliedReceipt = null) {
       [record.session_id]
     );
     channelId = sessionResult.rows[0]?.channel_id || null;
+    await ensureEscrowLockFromChain(client, record.session_id, channelId, onchain);
     await client.query(
       `UPDATE chain_transactions
        SET status='CONFIRMED', block_number=$2, receipt=$3,

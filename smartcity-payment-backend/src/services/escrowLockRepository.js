@@ -33,4 +33,29 @@ async function upsertUserDeposit(queryable, {
   return result.rows[0];
 }
 
-module.exports = { upsertUserDeposit };
+async function ensureOnchainRecord(queryable, {
+  sessionId,
+  escrowId,
+  channelId,
+  userAddress,
+  operatorAddress,
+  userDeposit,
+  operatorDeposit,
+  fareAmount,
+  holdDeadline,
+  state,
+}) {
+  const result = await queryable.query(
+    `INSERT INTO escrow_locks
+       (session_id, escrow_id_bytes, channel_id, user_address, operator_address,
+        user_deposit, operator_deposit, fare_amount, hold_deadline, state)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,to_timestamp($9),$10)
+     ON CONFLICT (session_id) DO NOTHING
+     RETURNING *`,
+    [sessionId, escrowId, channelId, userAddress, operatorAddress,
+      userDeposit, operatorDeposit, fareAmount, holdDeadline, state]
+  );
+  return result.rows[0] || null;
+}
+
+module.exports = { upsertUserDeposit, ensureOnchainRecord };

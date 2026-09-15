@@ -3,7 +3,7 @@
 const { Client: PgClient } = require('pg');
 const { newDb, DataType } = require('pg-mem');
 const { runMigrations } = require('../src/services/db');
-const { upsertUserDeposit } = require('../src/services/escrowLockRepository');
+const { upsertUserDeposit, ensureOnchainRecord } = require('../src/services/escrowLockRepository');
 
 const connectionString = process.env.TEST_DATABASE_URL || process.env.DATABASE_PUBLIC_URL;
 const connectionConfig = connectionString
@@ -117,6 +117,43 @@ describe('escrow_locks schema compatibility', () => {
       operator_deposit: 0,
       user_deposit_tx: deposit.userDepositTx,
       state: 'UserDeposited',
+    });
+  });
+
+  test('a chain-confirmed refund reconstructs a missing escrow row', async () => {
+    const recovered = {
+      sessionId: 'chain-only-refund-session',
+      escrowId: `0x${'ab'.repeat(32)}`,
+      channelId: `0x${'cd'.repeat(32)}`,
+      userAddress: `0x${'11'.repeat(20)}`,
+      operatorAddress: `0x${'22'.repeat(20)}`,
+      userDeposit: '3.0',
+      operatorDeposit: '0.0',
+      fareAmount: '0.0',
+      holdDeadline: Math.floor(Date.now() / 1000) - 3600,
+      state: 'Refunded',
+    };
+
+    await ensureOnchainRecord(client, recovered);
+    await ensureOnchainRecord(client, recovered);
+
+    const { rows } = await client.query(
+      `SELECT state, channel_id, user_deposit, operator_deposit, fare_amount
+       FROM escrow_locks WHERE session_id=$1`,
+      [recovered.sessionId]
+    );
+    expect(rows).toHaveLength(1);
+    expect({
+      ...rows[0],
+      user_deposit: Number(rows[0].user_deposit),
+      operator_deposit: Number(rows[0].operator_deposit),
+      fare_amount: Number(rows[0].fare_amount),
+    }).toMatchObject({
+      state: 'Refunded',
+      channel_id: recovered.channelId,
+      user_deposit: 3,
+      operator_deposit: 0,
+      fare_amount: 0,
     });
   });
 });
