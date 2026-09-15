@@ -247,29 +247,25 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     tick();
     timerRef.current = setInterval(tick, 1000);
 
-    // ── ProposeUsageUpdate: step=active일 때만 60초마다 오프체인 서명 누적 ──
+    // 백엔드가 1분 단위 Perun 업데이트를 수행하고, 프론트는 실제 nonce만 표시한다.
     if (step === "active") {
-      chargeIntervalRef.current = setInterval(async () => {
+      const syncPerunUpdates = async () => {
         const sd = sessionDataRef.current;
         if (!sd?.sessionId || !sd?.channelId) return;
         try {
-          await apiCall(`/api/v1/sessions/${sd.sessionId}/charge`, "POST", {
-            channelId:   sd.channelId,
-            userAddress: localStorage.getItem("mm_address") || "",
-            serviceType: sd.svc?.serviceType || "bicycle",
-            usage: { durationMinutes: 1 },
-          });
-          // 성공 시 localStorage charged_usdc 누적 (화면 표시는 liveCharged가 담당)
-          try {
-            const s = JSON.parse(localStorage.getItem("active_session") || "{}");
-            s.chargedNonce = (s.chargedNonce || 0) + 1;
-            localStorage.setItem("active_session", JSON.stringify(s));
-          } catch {}
+          const status = await apiCall(`/api/v1/sessions/${sd.sessionId}/status`);
+          if (endingRef.current || sessionDataRef.current?.status !== "active") return;
+          const chargedNonce = Number(status.offchainUpdateCount || 0);
+          const next = { ...sessionDataRef.current, chargedNonce };
+          sessionDataRef.current = next;
+          setSessionData(next);
+          saveSession(next);
         } catch (e) {
-          // 오프체인 서명 실패는 치명적이지 않음 — fareEngine 폴백으로 정산 가능
-          console.warn("[ProposeUsageUpdate] 오프체인 서명 실패:", e.message);
+          console.warn("[PerunStatus] 상태 동기화 실패:", e.message);
         }
-      }, 60_000); // 60초마다
+      };
+      syncPerunUpdates();
+      chargeIntervalRef.current = setInterval(syncPerunUpdates, 5_000);
     }
 
     return () => {
@@ -590,22 +586,22 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
     setLog([]);
 
     // 브라우저 로컬 상태도 더 이상 active로 취급하지 않는다.
-    saveSession({
+    const sessionSnapshot = {
+      ...(loadSession() || {}),
       ...sessionData,
       status: "ending",
       stoppedAt: Date.now(),
       finalElapsedSec,
       frozenFare,
-    });
+    };
+    sessionDataRef.current = sessionSnapshot;
+    saveSession(sessionSnapshot);
 
     try {
-      const activeSession = JSON.parse(
-        localStorage.getItem("active_session") || "{}"
-      );
-      const nonces = activeSession.chargedNonce || 0;
+      const nonces = Number(sessionSnapshot.chargedNonce || 0);
 
       addLog(
-        `① 서비스 종료 요청... (오프체인 서명 누적: ${nonces}회)`,
+        `① 서비스 종료 요청... (Perun 상태 업데이트: ${nonces}회)`,
         "info"
       );
 
@@ -626,6 +622,11 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
           12_000
         )),
       ]);
+
+      const confirmedUpdates = Number(res.offchainUpdateCount ?? nonces);
+      if (confirmedUpdates !== nonces) {
+        addLog(`✅ 서버 확인 Perun 상태 업데이트: ${confirmedUpdates}회`, "success");
+      }
 
       const recoveryPending =
         Boolean(res.recoveryPending) ||

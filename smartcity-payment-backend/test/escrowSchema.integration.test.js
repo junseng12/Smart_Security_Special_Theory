@@ -120,6 +120,20 @@ describe('escrow_locks schema compatibility', () => {
     });
   });
 
+  test('migration supplies Perun usage audit columns', async () => {
+    const { rows } = await client.query(
+      `SELECT column_name
+       FROM information_schema.columns
+       WHERE table_schema=$1 AND table_name='channel_states'`,
+      [tableSchema]
+    );
+    const columns = new Set(rows.map(row => row.column_name));
+    expect([...columns]).toEqual(expect.arrayContaining([
+      'session_id', 'nonce', 'state_hash', 'fare_usdc', 'recorded_at',
+      'balance_user', 'balance_operator',
+    ]));
+  });
+
   test('a chain-confirmed refund reconstructs a missing escrow row', async () => {
     const recovered = {
       sessionId: 'chain-only-refund-session',

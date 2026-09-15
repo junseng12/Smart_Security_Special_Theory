@@ -18,6 +18,7 @@ const { isValidAddress } = require('../services/walletService');
 const { getSettlement } = require('../services/settlementManager');
 const { deriveDisplayStatus, DISPLAY_STATUS } = require('../services/displayStatus');
 const escrowSvc = require('../services/escrowPayoutService');
+const usageBilling = require('../services/usageBillingService');
 const sseClients = require('../utils/sseClients');
 const logger = require('../utils/logger');
 
@@ -81,10 +82,13 @@ router.post('/:id/charge', validate(chargeSchema), async (req, res, next) => {
       return res.status(409).json({ ok: false, error: `Session is already ${rows[0].status}` });
     }
 
-    const result = await orchestrator.chargeUsage({
-      sessionId: req.params.id,
-      ...req.body,
-    });
+    const billing = await usageBilling.catchUpSession(req.params.id);
+    const result = billing.latest || {
+      fare: { fareUsdc: '0.000000', policyHash: null },
+      updatedState: { nonce: billing.nonce, stateHash: null, balances: {} },
+      signatureRequest: { stateHash: null, nonce: billing.nonce },
+      updated: billing.updated,
+    };
 
     // SSE 알림 — 서명 필요 (signatureRequest가 있을 때만)
     if (result.signatureRequest?.stateHash) {
@@ -176,6 +180,16 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
     // ──────────────────────────────────────────────────────────────────────────
 
     // 세션 종료 + 정산 (비동기 처리 — deferred 시 즉시 202 반환)
+    let usageState = null;
+    try {
+      usageState = await usageBilling.catchUpSession(req.params.id);
+    } catch (billingErr) {
+      logger.error('Final due Perun usage update failed before billing stop', {
+        sessionId: req.params.id,
+        error: billingErr.message,
+      });
+    }
+
     let result;
     try {
       result = await Promise.race([
@@ -223,6 +237,7 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
             deferred: true, status: 'settling',
             message: 'holdDeadline 대기 중, 자동 정산 예약됨',
             fareUsdc, refundUsdc, depositUsdc,
+            offchainUpdateCount: usageState?.nonce ?? null,
           }
         });
       }
@@ -230,7 +245,10 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
     }
 
     if (result?.deferred) {
-      return res.status(202).json({ ok: true, data: result });
+      return res.status(202).json({
+        ok: true,
+        data: { ...result, offchainUpdateCount: usageState?.nonce ?? null },
+      });
     }
 
     sseClients.broadcast(req.body.userAddress, {
@@ -239,7 +257,10 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
       txHash: result.txHash,
     });
 
-    res.json({ ok: true, data: result });
+    res.json({
+      ok: true,
+      data: { ...result, offchainUpdateCount: usageState?.nonce ?? null },
+    });
   } catch (err) { next(err); }
 });
 
@@ -463,6 +484,8 @@ router.get('/:id/status', async (req, res, next) => {
     const stateResult = await db.getPool().query(
       `SELECT el.state AS escrow_state, ct.status AS tx_status, ct.action AS tx_action,
               ct.tx_hash, ct.last_error,
+              COALESCE(c.latest_nonce, 0) AS offchain_update_count,
+              c.latest_state AS offchain_state,
               EXISTS (
                 SELECT 1 FROM chain_transactions claim_tx
                 WHERE claim_tx.session_id = s.id
@@ -470,6 +493,7 @@ router.get('/:id/status', async (req, res, next) => {
               ) AS claim_confirmed
        FROM sessions s
        LEFT JOIN escrow_locks el ON el.session_id=s.id
+       LEFT JOIN channels c ON c.id=s.channel_id
        LEFT JOIN LATERAL (
          SELECT status, action, tx_hash, last_error
          FROM chain_transactions
@@ -524,6 +548,8 @@ router.get('/:id/status', async (req, res, next) => {
         txError: facts.last_error || null,
         settlementClaimed,
         claimableAfter,
+        offchainUpdateCount: Number(facts.offchain_update_count || 0),
+        offchainState: facts.offchain_state || null,
       },
     });
   } catch (err) { next(err); }
@@ -567,6 +593,7 @@ router.get('/', async (req, res, next) => {
          el.user_deposit,
          el.settle_tx,
          el.hold_deadline,
+         COALESCE(c.latest_nonce, 0) AS offchain_update_count,
          ct.action        AS chain_action,
          ct.status        AS chain_tx_status,
          ct.tx_hash       AS chain_tx_hash,
@@ -588,6 +615,7 @@ router.get('/', async (req, res, next) => {
          END              AS refund_usdc
        FROM sessions s
        LEFT JOIN escrow_locks el ON el.session_id = s.id
+       LEFT JOIN channels c ON c.id = s.channel_id
        LEFT JOIN LATERAL (
          SELECT action, status, tx_hash, submitted_at, confirmed_at, last_error
          FROM chain_transactions
@@ -638,6 +666,7 @@ router.get('/', async (req, res, next) => {
         txSubmittedAt:  r.chain_submitted_at,
         txConfirmedAt:  r.chain_confirmed_at,
         holdDeadline:   r.hold_deadline ? new Date(r.hold_deadline).getTime() : null,
+        offchainUpdateCount: Number(r.offchain_update_count || 0),
       };
     });
 

@@ -56,6 +56,10 @@ async function runMigrations(queryable = pool) {
       operator_sig     TEXT,
       created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE channel_states ADD COLUMN IF NOT EXISTS session_id  TEXT;
+    ALTER TABLE channel_states ADD COLUMN IF NOT EXISTS state_hash  TEXT;
+    ALTER TABLE channel_states ADD COLUMN IF NOT EXISTS fare_usdc   NUMERIC;
+    ALTER TABLE channel_states ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ;
 
     -- ── 세션 ──────────────────────────────────────────────────────────────
     CREATE TABLE IF NOT EXISTS sessions (
@@ -250,7 +254,13 @@ async function runMigrations(queryable = pool) {
 async function createChannelRecord({ id, userAddress, operatorAddress, depositUsdc, openedTx }) {
   const result = await getPool().query(
     `INSERT INTO channels (id, user_address, operator_address, deposit_usdc, opened_tx)
-     VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (id) DO UPDATE SET
+       user_address=EXCLUDED.user_address,
+       operator_address=EXCLUDED.operator_address,
+       deposit_usdc=EXCLUDED.deposit_usdc,
+       updated_at=NOW()
+     RETURNING *`,
     [id, userAddress, operatorAddress, depositUsdc, openedTx]
   );
   return result.rows[0];

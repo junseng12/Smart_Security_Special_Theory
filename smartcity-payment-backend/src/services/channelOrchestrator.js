@@ -65,6 +65,15 @@ async function startSessionAndOpenChannel({
     throw new Error('Perun canonical session identity mismatch');
   }
 
+  const db = require('./db');
+  await db.createChannelRecord({
+    id: perunRes.channel_id,
+    userAddress,
+    operatorAddress: process.env.OPERATOR_ADDRESS,
+    depositUsdc,
+    openedTx: null,
+  });
+
   await sessionMgr
     .linkChannel(dbSession.id, perunRes.channel_id)
     .catch(() => {});
@@ -108,18 +117,21 @@ async function chargeUsage({
     energyKwh,
   });
 
+  const db = require('./db');
+  const client = await db.getPool().connect();
   try {
-    const db = require('./db');
-
-    await db.getPool().query(
+    await client.query('BEGIN');
+    const charged = await client.query(
       `UPDATE sessions
        SET charged_usdc = COALESCE(charged_usdc, 0) + $1::NUMERIC
-       WHERE id = $2`,
+       WHERE id = $2
+       RETURNING charged_usdc`,
       [res.fare_usdc, sessionId]
     );
+    if (!charged.rows[0]) throw new Error(`Session not found after Perun update: ${sessionId}`);
 
     if (!usedFallback) {
-      await db.getPool().query(
+      await client.query(
         `INSERT INTO channel_states
            (
              channel_id,
@@ -127,21 +139,45 @@ async function chargeUsage({
              nonce,
              state_hash,
              fare_usdc,
-             recorded_at
+             recorded_at,
+             balance_user,
+             balance_operator
            )
-         VALUES ($1, $2, $3, $4, $5, NOW())
-         ON CONFLICT (channel_id, nonce) DO NOTHING`,
+         SELECT $1, $2, $3, $4, $5, NOW(), $6, $7
+         WHERE NOT EXISTS (
+           SELECT 1 FROM channel_states WHERE channel_id=$1 AND nonce=$3
+         )`,
         [
           channelId,
           sessionId,
           Number(res.new_nonce),
           res.state_hash,
           res.fare_usdc,
+          res.balance_user,
+          charged.rows[0].charged_usdc,
         ]
-      ).catch(() => {});
+      );
+      await client.query(
+        `UPDATE channels
+         SET latest_nonce=$2, latest_state=$3::jsonb, updated_at=NOW()
+         WHERE id=$1`,
+        [channelId, Number(res.new_nonce), JSON.stringify({
+          nonce: Number(res.new_nonce),
+          stateHash: res.state_hash,
+          fareUsdc: charged.rows[0].charged_usdc,
+          balanceUser: res.balance_user,
+        })]
+      );
     }
-  } catch {
-    // DB 기록 실패가 실제 go-perun 상태 갱신을 되돌리지는 않는다.
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    logger.error('[Orchestrator] Perun update succeeded but audit persistence failed', {
+      sessionId, channelId, nonce: Number(res.new_nonce), error: err.message,
+    });
+    throw err;
+  } finally {
+    client.release();
   }
 
   return {

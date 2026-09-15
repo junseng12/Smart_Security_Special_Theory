@@ -99,6 +99,28 @@ async function bootstrap() {
   }
 
   // 스케줄러: 실패해도 계속
+  // The backend owns the one-minute billing clock because browser timers can
+  // pause when a mobile tab is backgrounded or reloaded.
+  try {
+    const usageBilling = require('./services/usageBillingService');
+    let usageCycleRunning = false;
+    const runUsageBilling = async () => {
+      if (usageCycleRunning) return;
+      usageCycleRunning = true;
+      try {
+        await usageBilling.runBillingCycle();
+      } catch (err) {
+        logger.error('[UsageBilling] cycle failed', { error: err.message });
+      } finally {
+        usageCycleRunning = false;
+      }
+    };
+    setInterval(runUsageBilling, 5_000);
+    setTimeout(runUsageBilling, 2_000);
+  } catch (billingErr) {
+    logger.warn('[UsageBilling] scheduler initialization failed', { error: billingErr.message });
+  }
+
   try {
     const escrowSvc = require('./services/escrowPayoutService');
     const chainTx = require('./services/chainTransactionTracker');
