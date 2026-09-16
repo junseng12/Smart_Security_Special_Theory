@@ -1,28 +1,26 @@
 // SmartCity Go-Perun Node — 진입점
 //
 // 시작 순서:
-//   1) 환경변수 로드
-//   2) setup.NewPerunNode() — perun-eth-backend 기반 실제 초기화
-//   3) Manager / Orchestrator 조립
-//   4) HTTP 헬스체크 서버 시작 (Railway용, PORT 환경변수)
-//   5) gRPC 서버 시작
+//  1. 환경변수 로드
+//  2. setup.NewPerunNode() — perun-eth-backend 기반 실제 초기화
+//  3. Manager / Orchestrator 조립
+//  4. HTTP 헬스체크 서버 시작 (Railway용, PORT 환경변수)
+//  5. gRPC 서버 시작
 //
 // 환경변수:
-//   BASE_RPC_URL        — wss://... (Alchemy Base Sepolia)
-//   CHAIN_ID            — 84532 (Base Sepolia)
-//   OPERATOR_PRIVKEY    — hex 개인키 (0x 없이)
-//   ADJUDICATOR_ADDR    — perun-eth-contracts Adjudicator 주소
-//   ASSET_HOLDER_ADDR   — perun-eth-contracts AssetHolderERC20 주소
-//   USDC_TOKEN_ADDR     — 0x036CbD53842c5426634e7929541eC2318f3dCF7e (Base Sepolia)
-//   RECEIVER_ADDR       — 운영자 수령 주소
-//   GRPC_PORT           — 기본 50051
-//   PORT                — Railway 자동 주입 HTTP 포트 (헬스체크용)
-//   DEPLOY_CONTRACTS    — "true" 이면 컨트랙트 배포 후 종료
+//
+//	BASE_RPC_URL        — wss://... (Alchemy Base Sepolia)
+//	CHAIN_ID            — 84532 (Base Sepolia)
+//	OPERATOR_PRIVKEY    — hex 개인키 (0x 없이)
+//	ADJUDICATOR_ADDR    — perun-eth-contracts Adjudicator 주소
+//	ASSET_HOLDER_ADDR   — perun-eth-contracts AssetHolderERC20 주소
+//	USDC_TOKEN_ADDR     — 0x036CbD53842c5426634e7929541eC2318f3dCF7e (Base Sepolia)
+//	RECEIVER_ADDR       — 운영자 수령 주소
+//	GRPC_PORT           — 기본 50051
+//	PORT                — Railway 자동 주입 HTTP 포트 (헬스체크용)
 package main
 
 import (
-	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -54,22 +52,6 @@ func main() {
 		USDCTokenAddr:   common.HexToAddress(envOr("USDC_TOKEN_ADDR", "0x036CbD53842c5426634e7929541eC2318f3dCF7e")),
 		ReceiverAddr:    common.HexToAddress(mustEnv("RECEIVER_ADDR")),
 		TxFinalityDepth: 1,
-	}
-
-	// ── 컨트랙트 배포 모드 ────────────────────────────────────────────
-	if os.Getenv("DEPLOY_CONTRACTS") == "true" {
-		deployCfg := *cfg
-		deployCfg.AdjudicatorAddr = common.Address{}
-		deployCfg.AssetHolderAddr = common.Address{}
-		addrs, err := setup.DeployContracts(context.Background(), &deployCfg, log)
-		if err != nil {
-			log.WithError(err).Fatal("contract deployment failed")
-		}
-		fmt.Printf("\n✅ 배포 완료\n")
-		fmt.Printf("ADJUDICATOR_ADDR=%s\n", addrs.AdjudicatorAddr.Hex())
-		fmt.Printf("ASSET_HOLDER_ADDR=%s\n", addrs.AssetHolderAddr.Hex())
-		fmt.Println("\nRailway 환경변수에 위 값을 등록 후 재시작하세요.")
-		os.Exit(0)
 	}
 
 	// ── go-perun 노드 초기화 (perun-eth-backend) ─────────────────────

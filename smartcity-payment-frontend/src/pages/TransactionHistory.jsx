@@ -6,7 +6,7 @@ import { ArrowLeft, RefreshCw, Search, ExternalLink, ChevronDown } from 'lucide-
 import BottomNav from '@/components/wallet/BottomNav';
 import { calcFare, calcRefund } from '@/lib/fareUtils';
 
-const BACKEND = "https://payment-backend-production.up.railway.app";
+const BACKEND = import.meta.env.VITE_PAYMENT_BACKEND_URL || "https://payment-backend-production.up.railway.app";
 
 const STATUS_CONFIG = {
   ACTIVE:          { label: '이용 중',   color: 'bg-blue-100 text-blue-700'     },

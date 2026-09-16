@@ -184,36 +184,6 @@ func configureEthereumWireAddressDecoder() {
 	})
 }
 
-// DeployContracts — 최초 1회 배포
-type DeployedAddrs struct {
-	AdjudicatorAddr common.Address
-	AssetHolderAddr common.Address
-}
-
-func DeployContracts(ctx context.Context, cfg *Config, log *logrus.Logger) (*DeployedAddrs, error) {
-	privKey, _ := crypto.HexToECDSA(cfg.OperatorPrivKey)
-	w := swallet.NewWallet(privKey)
-	deployer := accounts.Account{Address: crypto.PubkeyToAddress(privKey.PublicKey)}
-	cb, err := newContractBackend(cfg.RPCURL, cfg.ChainID, w)
-	if err != nil {
-		return nil, err
-	}
-
-	adjAddr, err := ethchannel.DeployAdjudicator(ctx, cb, deployer)
-	if err != nil {
-		return nil, fmt.Errorf("Adjudicator 배포 실패: %w", err)
-	}
-	log.WithField("addr", adjAddr.Hex()).Info("[Deploy] ✓ Adjudicator deployed")
-
-	assetAddr, err := ethchannel.DeployERC20Assetholder(ctx, cb, adjAddr, cfg.USDCTokenAddr, deployer)
-	if err != nil {
-		return nil, fmt.Errorf("AssetHolderERC20 배포 실패: %w", err)
-	}
-	log.WithField("addr", assetAddr.Hex()).Info("[Deploy] ✓ AssetHolderERC20 deployed")
-
-	return &DeployedAddrs{AdjudicatorAddr: adjAddr, AssetHolderAddr: assetAddr}, nil
-}
-
 // newContractBackend — ethclient + swallet.Transactor → ContractBackend
 // ★ backgroundChainReader로 래핑: SubscribeNewHead가 gRPC deadline에 의해
 //

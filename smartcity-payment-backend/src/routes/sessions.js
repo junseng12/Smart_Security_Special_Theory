@@ -3,7 +3,6 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * POST /api/v1/sessions/start        세션 + 채널 오픈
  * POST /api/v1/sessions/:id/charge   사용량 기반 요금 청구
- * POST /api/v1/sessions/:id/sign     사용자 서명 제출
  * POST /api/v1/sessions/:id/end      세션 종료 + 정산
  * GET  /api/v1/sessions/:id/status   세션 상태 조회
  * GET  /api/v1/sessions/:id/stream   SSE 실시간 이벤트
@@ -12,7 +11,6 @@
 const { Router } = require('express');
 const Joi = require('joi');
 const orchestrator = require('../services/channelOrchestrator');
-const sigMgr = require('../services/signatureManager');
 const sessionMgr = require('../services/sessionManager');
 const { isValidAddress } = require('../services/walletService');
 const { getSettlement } = require('../services/settlementManager');
@@ -106,39 +104,10 @@ router.post('/:id/charge', validate(chargeSchema), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// ── POST /sessions/:id/sign ───────────────────────────────────────────────────
-const signSchema = Joi.object({
-  channelId:   Joi.string().required(),
-  userSig:     Joi.string().required(),
-  userAddress: ethAddress().required(),
-});
-
-router.post('/:id/sign', validate(signSchema), async (req, res, next) => {
-  try {
-    const confirmedState = await sigMgr.submitUserSignature({
-      channelId:   req.body.channelId,
-      userSig:     req.body.userSig,
-      userAddress: req.body.userAddress,
-    });
-
-    sseClients.broadcast(req.body.userAddress, {
-      event: 'state_confirmed',
-      sessionId: req.params.id,
-      nonce: confirmedState.nonce,
-      balances: confirmedState.balances,
-    });
-
-    res.json({ ok: true, data: confirmedState });
-  } catch (err) { next(err); }
-});
-
 // ── POST /sessions/:id/end ────────────────────────────────────────────────────
 const endSchema = Joi.object({
   channelId:    Joi.string().required(),
   userAddress:  ethAddress().required(),
-  userFinalSig: Joi.string().optional(),
-  fareUsdc:     Joi.string().optional(),   // 레거시 호환 — 정산 금액은 proof에서 검증
-  adjustment:   Joi.object({ creditUsdc: usdcAmount() }).optional(),
 });
 
 router.post('/:id/end', validate(endSchema), async (req, res, next) => {
@@ -147,11 +116,15 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
     const _db = require('../services/db');
     const _sess = await _db.getPool().query(
       `SELECT s.id, s.status, s.deposit_usdc, s.charged_usdc,
-              el.state AS escrow_state, el.fare_amount, el.user_deposit, el.settle_tx
+              el.state AS escrow_state, el.fare_amount, el.user_deposit, el.settle_tx,
+              EXISTS (
+                SELECT 1 FROM chain_transactions ct
+                WHERE ct.session_id=s.id AND ct.action='CLAIM' AND ct.status='CONFIRMED'
+              ) AS claim_confirmed
        FROM sessions s
        LEFT JOIN escrow_locks el ON el.session_id=s.id
        WHERE s.id = $1`, [req.params.id]
-    ).catch(() => ({ rows: [] }));
+    );
     if (!_sess.rows[0]) {
       return res.status(404).json({ ok: false, error: `Session not found: ${req.params.id}` });
     }
@@ -169,7 +142,19 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
         depositUsdc: deposit.toFixed(6),
         txHash: existing.settle_tx || null,
       };
-      if (['Released', 'Refunded'].includes(existing.escrow_state)) {
+      let payoutComplete = existing.escrow_state === 'Refunded' || Boolean(existing.claim_confirmed);
+      if (existing.escrow_state === 'Released' && !payoutComplete) {
+        try {
+          const onchain = await require('../services/chainTransactionTracker').getOnchainState(req.params.id);
+          payoutComplete = Boolean(onchain.settlementClaimed);
+        } catch (err) {
+          logger.warn('Could not verify repeated end request payout state', {
+            sessionId: req.params.id,
+            error: err.message,
+          });
+        }
+      }
+      if (payoutComplete) {
         return res.json({ ok: true, data: { ...data, confirmed: true, status: 'completed' } });
       }
       return res.status(202).json({
@@ -182,11 +167,24 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
     // 세션 종료 + 정산 (비동기 처리 — deferred 시 즉시 202 반환)
     let usageState = null;
     try {
-      usageState = await usageBilling.catchUpSession(req.params.id);
+      // Freeze the durable session state and flush the final complete minute
+      // under the same per-session lock used by the billing scheduler.
+      usageState = await usageBilling.stopAndCatchUpSession(req.params.id);
     } catch (billingErr) {
       logger.error('Final due Perun usage update failed before billing stop', {
         sessionId: req.params.id,
         error: billingErr.message,
+      });
+      return res.status(202).json({
+        ok: true,
+        data: {
+          deferred: true,
+          confirmed: false,
+          billingStopped: true,
+          recoveryPending: true,
+          status: 'recovery_pending',
+          message: 'Billing is stopped. Settlement is waiting for Perun usage-state recovery.',
+        },
       });
     }
 
@@ -208,9 +206,8 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
         let fareUsdc = '0', refundUsdc = '0', depositUsdc = '3';
         try {
           const db = require('../services/db');
-          const fareEngine = require('../services/fareEngine');
           const row = await db.getPool().query(
-            `SELECT s.started_at, s.service_type, s.deposit_usdc, e.user_deposit
+            `SELECT s.charged_usdc, s.deposit_usdc, e.user_deposit
              FROM sessions s LEFT JOIN escrow_locks e ON e.session_id = s.id
              WHERE s.id = $1 LIMIT 1`, [req.params.id]
           );
@@ -218,16 +215,8 @@ router.post('/:id/end', validate(endSchema), async (req, res, next) => {
             const r0 = row.rows[0];
             const dep = parseFloat(r0.user_deposit || r0.deposit_usdc || 3);
             depositUsdc = String(dep);
-            const endTs = new Date();
-            const startTs = new Date(r0.started_at);
-            const durationMinutes = Math.max(0, (endTs - startTs) / 60_000);
-            const fareResult = await fareEngine.calculateFare({
-              sessionId: req.params.id,
-              serviceType: r0.service_type,
-              usage: { durationMinutes },
-            }).catch(() => ({ fareUsdc: '0.010000' }));
-            const calculatedFare = parseFloat(fareResult.fareUsdc ?? '0.010000');
-            fareUsdc = Math.min(Math.max(calculatedFare, 0.01), dep).toFixed(6);
+            const signedFare = parseFloat(r0.charged_usdc || 0);
+            fareUsdc = Math.min(Math.max(signedFare, 0), dep).toFixed(6);
             refundUsdc = String(Math.max(dep - parseFloat(fareUsdc), 0).toFixed(6));
           }
         } catch (_) {}

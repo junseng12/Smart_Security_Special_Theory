@@ -115,8 +115,9 @@ func (s *Server) GetChannelStatus(ctx context.Context, req *pb.GetChannelStatusR
 	return &pb.ChannelStatusResponse{
 		Ok:          true,
 		Nonce:       int64(status.Nonce),
-		BalanceUser: fmt.Sprintf("%f", status.BalanceUser),
-		BalanceOp:   fmt.Sprintf("%f", status.BalanceOp),
+		BalanceUser: status.BalanceUser,
+		BalanceOp:   status.BalanceOp,
+		StateHash:   status.StateHash,
 	}, nil
 }
 

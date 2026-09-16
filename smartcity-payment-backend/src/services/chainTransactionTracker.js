@@ -183,6 +183,13 @@ async function syncFinalState(sessionId, stateLabel, txHash = null) {
        WHERE id=$1`,
       [sessionId]
     );
+    await upsertSettlementRecord(client, {
+      sessionId,
+      channelId,
+      txHash,
+      status: stateLabel === 'Refunded' ? 'refunded' : 'confirmed',
+      onchain: actual,
+    });
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -203,6 +210,41 @@ function receiptSnapshot(receipt) {
     status: Number(receipt.status),
     to: receipt.to,
   };
+}
+
+async function upsertSettlementRecord(queryable, {
+  sessionId,
+  channelId,
+  txHash,
+  status,
+  onchain,
+}) {
+  const userRefund = Math.max(Number(onchain.userDeposit) - Number(onchain.fareAmount), 0).toFixed(6);
+  const operatorEarn = status === 'refunded' ? '0.000000' : onchain.fareAmount;
+  const finalState = JSON.stringify({
+    escrowState: onchain.stateLabel,
+    settlementClaimed: Boolean(onchain.settlementClaimed),
+    claimableAfter: onchain.claimableAfter,
+  });
+  const updated = await queryable.query(
+    `UPDATE settlements
+     SET channel_id=$2, tx_hash=$3, status=$4,
+         user_refund_usdc=$5, operator_earn_usdc=$6,
+         final_state=$7::jsonb,
+         confirmed_at=CASE WHEN $4='confirmed' THEN NOW() ELSE confirmed_at END
+     WHERE session_id=$1 RETURNING id`,
+    [sessionId, channelId || '', txHash, status, userRefund, operatorEarn, finalState]
+  );
+  if (!updated.rows[0]) {
+    await queryable.query(
+      `INSERT INTO settlements
+         (session_id,channel_id,tx_hash,status,final_nonce,user_refund_usdc,
+          operator_earn_usdc,final_state,confirmed_at)
+       VALUES ($1,$2,$3,$4,0,$5,$6,$7::jsonb,
+               CASE WHEN $4='confirmed' THEN NOW() ELSE NULL END)`,
+      [sessionId, channelId || '', txHash, status, userRefund, operatorEarn, finalState]
+    );
+  }
 }
 
 async function confirmTransaction(id, suppliedReceipt = null) {
@@ -262,12 +304,45 @@ async function confirmTransaction(id, suppliedReceipt = null) {
     return {confirmed:false,reason:'claim_not_completed',onchain};
   }
   if (record.action === 'SETTLE' && !onchain.settlementClaimed) {
-    await getPool().query(`UPDATE chain_transactions SET status='CONFIRMED',block_number=$2,receipt=$3,confirmed_at=NOW(),last_error=NULL WHERE id=$1`,
-      [id,Number(receipt.blockNumber),JSON.stringify(receiptSnapshot(receipt))]);
-    await getPool().query(`UPDATE escrow_locks SET state='Released',settle_tx=$2,fare_amount=$3,claimable_after=to_timestamp($4) WHERE session_id=$1`,
-      [record.session_id,receipt.hash,onchain.fareAmount,onchain.claimableAfter]);
-    await getPool().query(`UPDATE sessions SET status='Settling',charged_usdc=$2,updated_at=NOW() WHERE id=$1`,[record.session_id,onchain.fareAmount]);
-    await invalidateSessionCache(record.session_id,null);
+    const client = await getPool().connect();
+    let channelId = null;
+    try {
+      await client.query('BEGIN');
+      const sessionResult = await client.query('SELECT channel_id FROM sessions WHERE id=$1 FOR UPDATE', [record.session_id]);
+      channelId = sessionResult.rows[0]?.channel_id || null;
+      await ensureEscrowLockFromChain(client, record.session_id, channelId, onchain);
+      await client.query(
+        `UPDATE chain_transactions
+         SET status='CONFIRMED',block_number=$2,receipt=$3,confirmed_at=NOW(),
+             last_checked_at=NOW(),last_error=NULL,updated_at=NOW()
+         WHERE id=$1`,
+        [id,Number(receipt.blockNumber),JSON.stringify(receiptSnapshot(receipt))]
+      );
+      await client.query(
+        `UPDATE escrow_locks
+         SET state='Released',settle_tx=$2,fare_amount=$3,claimable_after=to_timestamp($4),last_error=NULL
+         WHERE session_id=$1`,
+        [record.session_id,receipt.hash,onchain.fareAmount,onchain.claimableAfter]
+      );
+      await client.query(
+        `UPDATE sessions SET status='Settling',charged_usdc=$2,updated_at=NOW() WHERE id=$1`,
+        [record.session_id,onchain.fareAmount]
+      );
+      await upsertSettlementRecord(client, {
+        sessionId: record.session_id,
+        channelId,
+        txHash: receipt.hash,
+        status: 'reserved',
+        onchain,
+      });
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+    await invalidateSessionCache(record.session_id,channelId);
     return {confirmed:true,reserved:true,txHash:receipt.hash,onchain};
   }
   const client = await getPool().connect();
@@ -305,6 +380,13 @@ async function confirmTransaction(id, suppliedReceipt = null) {
        WHERE id=$1`,
       [record.session_id, settledFare]
     );
+    await upsertSettlementRecord(client, {
+      sessionId: record.session_id,
+      channelId,
+      txHash: receipt.hash,
+      status: record.action === 'REFUND' ? 'refunded' : 'confirmed',
+      onchain,
+    });
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');

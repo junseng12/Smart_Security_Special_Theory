@@ -10,7 +10,7 @@ import {
 import BottomNav from '@/components/wallet/BottomNav';
 import useMetaMaskProvider from '@/hooks/use-metamask-provider';
 
-const BACKEND          = "https://payment-backend-production.up.railway.app";
+const BACKEND          = import.meta.env.VITE_PAYMENT_BACKEND_URL || "https://payment-backend-production.up.railway.app";
 const OPERATOR_ADDRESS  = "0x1E506DE9EdEB3F7c3C1f39Edc5c38625944345C7";
 const ESCROW_V3_ADDRESS = import.meta.env.VITE_ESCROW_CONTRACT_ADDRESS; // V3.2
 
@@ -612,7 +612,6 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
           channelId: sessionData.channelId,
           userAddress:
             mmAddress || localStorage.getItem("mm_address"),
-          fareUsdc: String(frozenFare.toFixed(6)),
         }
       );
       const res = await Promise.race([
@@ -742,23 +741,33 @@ const chargeIntervalRef = useRef(null); // ProposeUsageUpdate 주기 호출용
 
         setStep("ended");
       } else {
-        // Backend에서도 여전히 Active로 확인되거나 상태 확인이 불가능한 경우에만
-        // 사용자가 종료를 다시 시도할 수 있도록 active로 복귀한다.
+        // The stop request may already have reached the backend even when both
+        // responses were lost. Never resume a local billing UI from uncertainty.
         addLog(
-          `❌ 서비스 종료 요청을 확인하지 못했습니다: ${err.message}`,
+          `⚠️ 서비스 종료 요청 확인이 지연되고 있습니다: ${err.message}`,
           "error"
         );
         addLog(
-          "다시 '서비스 종료 및 정산' 버튼을 눌러주세요.",
+          "추가 요금을 표시하지 않고 서버 복구 상태를 확인합니다.",
           "info"
         );
 
-        saveSession({
+        const pendingSnapshot = {
           ...sessionData,
-          status: "active",
-        });
-
-        setStep("active");
+          status: "recovery_pending",
+          result: {
+            deferred: true,
+            recoveryPending: true,
+            billingStopped: true,
+            fareUsdc: "확인 중",
+            refundUsdc: "확인 중",
+            elapsedSec: finalElapsedSec,
+            error: err.message,
+          },
+        };
+        saveSession(pendingSnapshot);
+        setSessionData(pendingSnapshot);
+        setStep("ended");
       }
     } finally {
       endingRef.current = false;

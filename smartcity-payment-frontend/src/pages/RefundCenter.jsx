@@ -1,17 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { base44 } from '@/api/base44Client';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  ArrowLeft, Shield, Search, CheckCircle2, AlertCircle,
+  ArrowLeft, Shield, CheckCircle2, AlertCircle,
   Loader2, Lock, RefreshCw, Clock, ChevronRight
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import BottomNav from '@/components/wallet/BottomNav';
 
 // ── 백엔드 API ────────────────────────────────────────────────────────────────
-const BACKEND = "https://payment-backend-production.up.railway.app";
+const BACKEND = import.meta.env.VITE_PAYMENT_BACKEND_URL || "https://payment-backend-production.up.railway.app";
 
 async function apiCall(path, method = "GET", body = null) {
   const res = await fetch(BACKEND + path, {
@@ -451,7 +450,7 @@ function PayoutButton({ caseId, sessionId, onDone }) {
     setLoading(true);
     setErr(null);
     try {
-      await fetch(`https://payment-backend-production.up.railway.app/api/v1/refunds/${caseId}/payout`, {
+      await fetch(`${BACKEND}/api/v1/refunds/${caseId}/payout`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sessionId }),

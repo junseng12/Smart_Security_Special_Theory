@@ -172,8 +172,9 @@ func max64(a, b int64) int64 {
 
 type StatusResult struct {
 	State       string
-	BalanceUser float64
-	BalanceOp   float64
+	BalanceUser string
+	BalanceOp   string
+	StateHash   string
 	Nonce       uint64
 }
 
@@ -182,7 +183,13 @@ func (o *Orchestrator) GetStatus(_ context.Context, channelID string) (*StatusRe
 	if err != nil {
 		return nil, fmt.Errorf("channel not found: %w", err)
 	}
-	return &StatusResult{State: "open", BalanceUser: 0, BalanceOp: 0, Nonce: h.latestNonce}, nil
+	return &StatusResult{
+		State:       "open",
+		BalanceUser: pricing.WeiToUsdc(h.balanceUser),
+		BalanceOp:   pricing.WeiToUsdc(h.balanceOp),
+		StateHash:   h.latestStateHash,
+		Nonce:       h.latestNonce,
+	}, nil
 }
 
 func (o *Orchestrator) RegisterDispute(ctx context.Context, channelID string) error {

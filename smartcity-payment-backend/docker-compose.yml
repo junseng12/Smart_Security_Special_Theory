@@ -4,7 +4,7 @@ version: '3.9'
 # SmartCity Payment Backend — Docker Compose
 #
 # 기본 실행 (외부 DB 사용):
-#   docker compose up api watchtower
+#   docker compose up api
 #
 # 로컬 DB 포함 실행:
 #   docker compose --profile localdb up
@@ -35,17 +35,6 @@ services:
       start_period: 15s
 
   # ── Watchtower ────────────────────────────────────────────────────────────
-  watchtower:
-    build: .
-    container_name: smartcity-watchtower
-    command: node src/services/watchtower.js
-    env_file: .env
-    depends_on:
-      - api
-    restart: unless-stopped
-    volumes:
-      - ./logs:/app/logs
-
   # ── Redis ─────────────────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine

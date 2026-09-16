@@ -7,6 +7,7 @@ jest.mock('../src/services/perunClient', () => ({
   getMode: jest.fn(() => 'grpc'),
   startSession: jest.fn(),
   proposeUsageUpdate: jest.fn(),
+  getChannelStatus: jest.fn(),
 }));
 
 jest.mock('../src/services/settlementManager', () => ({}));
@@ -56,6 +57,7 @@ describe('native Perun channel audit persistence', () => {
   test('stores nonce and state hash in the same transaction as charged fare', async () => {
     const query = jest.fn()
       .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [{ latest_nonce: 0 }] })
       .mockResolvedValueOnce({ rows: [{ charged_usdc: '0.100000' }] })
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({})
@@ -68,6 +70,12 @@ describe('native Perun channel audit persistence', () => {
       new_nonce: 1,
       state_hash: `0x${'ab'.repeat(32)}`,
       balance_user: '2.900000',
+    });
+    perun.getChannelStatus.mockResolvedValue({
+      nonce: 1,
+      state_hash: `0x${'ab'.repeat(32)}`,
+      balance_user: '2.900000',
+      balance_op: '0.100000',
     });
 
     const result = await orchestrator.chargeUsage({

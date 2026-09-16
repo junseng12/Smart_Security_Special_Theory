@@ -7,7 +7,6 @@ const { ethers } = require('ethers');
 const logger      = require('../utils/logger');
 const sessionMgr  = require('./sessionManager');
 const perun       = require('./perunClient');
-const settleMgr   = require('./settlementManager');
 const escrowSvc   = require('./escrowPayoutService');
 
 /**
@@ -74,9 +73,7 @@ async function startSessionAndOpenChannel({
     openedTx: null,
   });
 
-  await sessionMgr
-    .linkChannel(dbSession.id, perunRes.channel_id)
-    .catch(() => {});
+  await sessionMgr.linkChannel(dbSession.id, perunRes.channel_id);
 
   logger.info('[Orchestrator] startSessionAndOpenChannel OK', {
     dbSessionId: dbSession.id,
@@ -116,17 +113,49 @@ async function chargeUsage({
     durationMinutes,
     energyKwh,
   });
+  const authoritative = await perun.getChannelStatus({ channelId });
+  if (Number(authoritative.nonce) < Number(res.new_nonce)) {
+    throw new Error('Go-Perun status lagged behind the accepted usage update');
+  }
+  const cumulativeFare = String(authoritative.balance_op);
+  const cumulativeUser = String(authoritative.balance_user);
+  if (!/^\d+(\.\d{1,6})?$/.test(cumulativeFare) || !/^\d+(\.\d{1,6})?$/.test(cumulativeUser)) {
+    throw new Error('Go-Perun returned invalid cumulative balances');
+  }
 
   const db = require('./db');
   const client = await db.getPool().connect();
   try {
     await client.query('BEGIN');
+    const audit = await client.query(
+      'SELECT latest_nonce FROM channels WHERE id=$1 FOR UPDATE',
+      [channelId]
+    );
+    if (!audit.rows[0]) throw new Error(`Channel audit record not found: ${channelId}`);
+
+    if (Number(res.new_nonce) <= Number(audit.rows[0].latest_nonce || 0)) {
+      await client.query('COMMIT');
+      return {
+        fare: { fareUsdc: res.fare_usdc, policyHash: res.policy_hash },
+        updatedState: {
+          nonce: Number(authoritative.nonce),
+          stateHash: authoritative.state_hash || res.state_hash,
+          balances: { user: cumulativeUser },
+        },
+        signatureRequest: {
+          stateHash: authoritative.state_hash || res.state_hash,
+          nonce: Number(authoritative.nonce),
+        },
+        fallback: usedFallback,
+      };
+    }
+
     const charged = await client.query(
       `UPDATE sessions
-       SET charged_usdc = COALESCE(charged_usdc, 0) + $1::NUMERIC
+       SET charged_usdc = $1::NUMERIC, updated_at=NOW()
        WHERE id = $2
        RETURNING charged_usdc`,
-      [res.fare_usdc, sessionId]
+      [cumulativeFare, sessionId]
     );
     if (!charged.rows[0]) throw new Error(`Session not found after Perun update: ${sessionId}`);
 
@@ -151,10 +180,10 @@ async function chargeUsage({
           channelId,
           sessionId,
           Number(res.new_nonce),
-          res.state_hash,
+          authoritative.state_hash || res.state_hash,
           res.fare_usdc,
-          res.balance_user,
-          charged.rows[0].charged_usdc,
+          cumulativeUser,
+          cumulativeFare,
         ]
       );
       await client.query(
@@ -163,9 +192,9 @@ async function chargeUsage({
          WHERE id=$1`,
         [channelId, Number(res.new_nonce), JSON.stringify({
           nonce: Number(res.new_nonce),
-          stateHash: res.state_hash,
+          stateHash: authoritative.state_hash || res.state_hash,
           fareUsdc: charged.rows[0].charged_usdc,
-          balanceUser: res.balance_user,
+          balanceUser: cumulativeUser,
         })]
       );
     }
@@ -187,13 +216,13 @@ async function chargeUsage({
     },
     updatedState: {
       nonce: Number(res.new_nonce),
-      stateHash: res.state_hash,
+      stateHash: authoritative.state_hash || res.state_hash,
       balances: {
-        user: res.balance_user,
+        user: cumulativeUser,
       },
     },
     signatureRequest: {
-      stateHash: res.state_hash,
+      stateHash: authoritative.state_hash || res.state_hash,
       nonce: Number(res.new_nonce),
     },
     fallback: usedFallback,
@@ -308,16 +337,6 @@ async function endSessionAndSettle({
       escrow,
     };
   }
-
-  await settleMgr.recordSettlement({
-    sessionId,
-    channelId,
-    userAddress,
-    txHash: escrow.txHash,
-    fareUsdc: escrow.fareUsdc,
-    refundUsdc: escrow.refundUsdc,
-    confirmed: true,
-  });
 
   return {
     ...escrow,

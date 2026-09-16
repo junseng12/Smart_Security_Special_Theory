@@ -284,7 +284,7 @@ async function settleAndReleaseInternal({sessionId,proof}) {
   const fare = await escrow.verifiedFare(escrowId,proof.paramsABI,proof.stateABI,proof.signatures);
   const fareUsdc = ethers.formatUnits(fare,6);
   const refundUsdc = ethers.formatUnits(status[1]-fare,6);
-  // Persist proof before deferral/submission so the watchtower can retry after restart.
+  // Persist proof before deferral/submission so the main recovery scheduler can retry after restart.
   await getPool().query(`UPDATE escrow_locks SET perun_proof=$2, fare_amount=$3, state='PendingSettle' WHERE session_id=$1`,
     [sessionId,JSON.stringify(proof),fareUsdc]);
   if (!status[8]) return {deferred:true,confirmed:false,reason:'pending_deadline',fareUsdc,refundUsdc};
@@ -489,6 +489,12 @@ async function operatorDepositUnlocked(sessionId, depositUsdc, userDepTxHash) {
 
   // 이미 FullyFunded(2) 이상이면 skip
   if (state >= 2) {
+    await getPool().query(
+      `UPDATE escrow_locks
+       SET operator_deposit=$2, state=$3, last_error=NULL
+       WHERE session_id=$1`,
+      [sessionId, ethers.formatUnits(opDeposit, 6), STATE_LABELS[state]]
+    );
     logger.info('operatorDeposit: 이미 FullyFunded 이상, skip', { sessionId, state: STATE_LABELS[state] });
     return { skipped: true, reason: 'already_fully_funded', state: STATE_LABELS[state] };
   }
@@ -522,7 +528,7 @@ async function operatorDepositUnlocked(sessionId, depositUsdc, userDepTxHash) {
     await getPool().query(
       `UPDATE escrow_locks SET operator_deposit=$2, operator_deposit_tx=$3, state='FullyFunded' WHERE session_id=$1`,
       [sessionId, depositUsdc, r.hash]
-    ).catch(() => {});
+    );
 
     return { txHash: r.hash, operatorDeposit: depositUsdc };
   } catch (e) {
@@ -533,9 +539,7 @@ async function operatorDepositUnlocked(sessionId, depositUsdc, userDepTxHash) {
 
 
 // ─────────────────────────────────────────────────────────────────
-// claimSettlement (V3.2 stub)
-// V3.2는 settleAndRelease 하나로 정산 완료 — 별도 claim 단계 없음
-// watchtower 호환성을 위해 stub으로 유지 (Released 상태 확인 후 skip)
+// claimSettlement distributes the reserved fare/refund after the dispute window.
 // ─────────────────────────────────────────────────────────────────
 async function claimSettlement(sessionId) {
   const escrow = getEscrow(getWallet());

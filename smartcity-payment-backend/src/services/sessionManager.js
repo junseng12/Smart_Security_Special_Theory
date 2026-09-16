@@ -86,16 +86,23 @@ async function startSession({ userAddress, serviceType, depositUsdc, meta = {} }
     timeoutAt: now + MAX_SESSION_DURATION_MS,
   };
 
-  // Redis 저장 (없으면 skip — DB만으로 운영)
-  const redis = getRedis();
-  if (redis) await redis.set(SESSION_KEY(sessionId), JSON.stringify(sessionData), 'EX', SESSION_TTL);
-
-  // DB 저장
+  // PostgreSQL is authoritative. Never publish a session in Redis before the
+  // durable row exists, otherwise billing and the UI can disagree.
   await getPool().query(
     `INSERT INTO sessions (id, user_address, service_type, deposit_usdc, meta)
      VALUES ($1, $2, $3, $4, $5)`,
     [sessionId, userAddress, serviceType, depositUsdc, JSON.stringify(meta)]
   );
+
+  const redis = getRedis();
+  if (redis) {
+    try {
+      await redis.set(SESSION_KEY(sessionId), JSON.stringify(sessionData), 'EX', SESSION_TTL);
+    } catch (err) {
+      logger.warn('Session cache write failed after DB insert', { sessionId, error: err.message });
+      await redis.del(SESSION_KEY(sessionId)).catch(() => {});
+    }
+  }
 
   logger.info('Session started', { sessionId, userAddress, serviceType });
   return sessionData;
@@ -117,17 +124,14 @@ async function getSession(sessionId) {
 
 // ── 상태 전이 ─────────────────────────────────────────────────────────────────
 
-async function _updateSessionState(sessionId, newStatus, extra = {}) {
+async function _updateSessionState(sessionId, newStatus, extra = {}, expectedStatuses = null) {
   const session = await getSession(sessionId);
   if (!session) throw new Error(`Session ${sessionId} not found`);
 
   const updated = { ...session, status: newStatus, ...extra, updatedAt: Date.now() };
 
-  // Redis 업데이트 (없으면 skip — DB만으로 운영)
-  const redis = getRedis();
-  if (redis) await redis.set(SESSION_KEY(sessionId), JSON.stringify(updated), 'EX', SESSION_TTL);
-
-  // DB 업데이트
+  // PostgreSQL is the billing authority, so persist the transition before
+  // updating the Redis read cache.
   const fields = ['status = $2', 'updated_at = NOW()'];
   const values = [sessionId, newStatus];
   let idx = 3;
@@ -136,10 +140,30 @@ async function _updateSessionState(sessionId, newStatus, extra = {}) {
   if (extra.endedAt)   { fields.push(`ended_at = $${idx++}`);   values.push(new Date(extra.endedAt)); }
   if (extra.settledAt) { fields.push(`settled_at = $${idx++}`); values.push(new Date(extra.settledAt)); }
 
-  await getPool().query(
-    `UPDATE sessions SET ${fields.join(', ')} WHERE id = $1`,
+  let where = 'id = $1';
+  if (expectedStatuses?.length) {
+    where += ` AND status = ANY($${idx++}::text[])`;
+    values.push(expectedStatuses);
+  }
+
+  const result = await getPool().query(
+    `UPDATE sessions SET ${fields.join(', ')} WHERE ${where} RETURNING status`,
     values
   );
+  if (!result.rows[0]) {
+    const current = await getPool().query('SELECT status FROM sessions WHERE id=$1', [sessionId]);
+    throw new Error(`Session ${sessionId} cannot transition from ${current.rows[0]?.status || 'missing'} to ${newStatus}`);
+  }
+
+  const redis = getRedis();
+  if (redis) {
+    try {
+      await redis.set(SESSION_KEY(sessionId), JSON.stringify(updated), 'EX', SESSION_TTL);
+    } catch (err) {
+      logger.warn('Session cache update failed after DB transition', { sessionId, newStatus, error: err.message });
+      await redis.del(SESSION_KEY(sessionId)).catch(() => {});
+    }
+  }
 
   logger.info('Session state changed', { sessionId, newStatus });
   return updated;
@@ -152,14 +176,13 @@ async function linkChannel(sessionId, channelId) {
 
 /** 세션 종료 (사용자 반납 / 타임아웃) */
 async function endSession(sessionId, { forced = false } = {}) {
-  const session = await getSession(sessionId);
-  if (!session) throw new Error(`Session ${sessionId} not found`);
-  if (session.status !== SESSION_STATES.ACTIVE) {
-    throw new Error(`Session ${sessionId} is already ${session.status}`);
-  }
-
   const newStatus = forced ? SESSION_STATES.FORCE_CLOSED : SESSION_STATES.ENDED;
-  return _updateSessionState(sessionId, newStatus, { endedAt: Date.now() });
+  return _updateSessionState(
+    sessionId,
+    newStatus,
+    { endedAt: Date.now() },
+    [SESSION_STATES.ACTIVE]
+  );
 }
 
 /** 정산 시작 */

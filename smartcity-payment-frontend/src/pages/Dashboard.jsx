@@ -10,7 +10,7 @@ import { connectMetaMask, getUsdcBalance, clearMetaMaskStorage, getConnectedMeta
 import { calcFare, calcRefund } from '@/lib/fareUtils';
 import useMetaMaskProvider from '@/hooks/use-metamask-provider';
 
-const BACKEND     = "https://payment-backend-production.up.railway.app";
+const BACKEND     = import.meta.env.VITE_PAYMENT_BACKEND_URL || "https://payment-backend-production.up.railway.app";
 const SESSION_KEY = "active_session";
 const PROC_KEY    = "payment_processing";
 
