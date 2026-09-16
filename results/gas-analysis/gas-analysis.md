@@ -14,16 +14,16 @@
 
 ## Results
 
-| Operation | N | Mean | Median | Stddev | Min | Max | CV |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| User Deposit | 10 | 237201.40 | 237205.00 | 5.80 | 237193 | 237205 | 0.0024% |
-| Operator Deposit | 10 | 91314.60 | 91797.00 | 1517.06 | 86997 | 91797 | 1.6614% |
-| Settlement Reservation | 10 | 211913.20 | 211918.00 | 14.09 | 211894 | 211930 | 0.0066% |
-| Settlement Claim | 10 | 104644.60 | 104647.00 | 5.06 | 104635 | 104647 | 0.0048% |
-| Dispute Registration | 10 | 106124.00 | 106124.00 | 0.00 | 106124 | 106124 | 0.0000% |
-| Refund Execution | 10 | 113325.00 | 113325.00 | 0.00 | 113325 | 113325 | 0.0000% |
-| Deposit Total | 10 | 328516.00 | 329002.00 | 1515.82 | 324202 | 329002 | 0.4614% |
-| Settlement Total | 10 | 316557.80 | 316565.00 | 18.07 | 316529 | 316577 | 0.0057% |
+| Operation | N | Mean gas (gas units) | Median | Stddev | Min | Max | CV | Avg effective gas price (gwei/gas) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| User Deposit | 10 | 237201.40 | 237205.00 | 5.80 | 237193 | 237205 | 0.0024% | 0.006000 |
+| Operator Deposit | 10 | 91314.60 | 91797.00 | 1517.06 | 86997 | 91797 | 1.6614% | 0.006000 |
+| Settlement Reservation | 10 | 211913.20 | 211918.00 | 14.09 | 211894 | 211930 | 0.0066% | 0.006000 |
+| Settlement Claim | 10 | 104644.60 | 104647.00 | 5.06 | 104635 | 104647 | 0.0048% | 0.006000 |
+| Dispute Registration | 10 | 106124.00 | 106124.00 | 0.00 | 106124 | 106124 | 0.0000% | 0.006000 |
+| Refund Execution | 10 | 113325.00 | 113325.00 | 0.00 | 113325 | 113325 | 0.0000% | 0.006000 |
+| Deposit Total | 10 | 328516.00 | 329002.00 | 1515.82 | 324202 | 329002 | 0.4614% | 0.006000 |
+| Settlement Total | 10 | 316557.80 | 316565.00 | 18.07 | 316529 | 316577 | 0.0057% | 0.006000 |
 
 - Successful measured transactions: 60
 - Failures: 0
@@ -35,7 +35,7 @@
 
 Each operation used ten successful Base Sepolia receipts from fresh escrow and Perun channel identifiers. Failed transactions are excluded from statistics and recorded separately. Log queries were split into ranges of at most ten blocks to remain compatible with the RPC provider. Every normal-flow sample used the Backend to Go-Perun finalization path and the deployed contract verified the encoded Params, final State, two native participant signatures, and PaymentData appData before reserving settlement. Final verification confirmed settlementClaimed for normal flows and Refunded for refund flows.
 
-These values measure the additional on-chain execution cost of the SmartCityEscrow design. They do not measure off-chain Go-Perun state update throughput. Gas price and transaction fees vary with network conditions, so gasUsed is the primary comparison value. settleAndRelease includes ABI decoding, native signature verification, appData binding checks, and settlement reservation.
+These values measure the additional on-chain execution cost of the SmartCityEscrow design. They do not measure off-chain Go-Perun state update throughput. The average effective gas price is receipt-weighted and reported in gwei per gas; execution fee equals gasUsed multiplied by effective gas price. Gas price and transaction fees vary with network conditions, so gasUsed remains the primary comparison value. settleAndRelease includes ABI decoding, native signature verification, appData binding checks, and settlement reservation.
 
 ## Setup transactions excluded from statistics
 
