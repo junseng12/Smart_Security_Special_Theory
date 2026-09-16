@@ -63,9 +63,15 @@ describe("SmartCityEscrow state-bound settlement", function () {
   });
 
   it("rejects tampered appData fare and non-final states", async function () {
-    const { escrow, escrowId, proof, deposit, user } = await fixture();
+    const { escrow, usdc, operator, escrowId, proof, deposit, user } = await fixture();
+    const escrowAddress = await escrow.getAddress();
+    const balancesBefore = {
+      escrow: await usdc.balanceOf(escrowAddress),
+      operator: await usdc.balanceOf(operator.address),
+      user: await usdc.balanceOf(user.address),
+    };
     const tampered = makeProof({
-      escrowAddress: await escrow.getAddress(),
+      escrowAddress,
       escrowId,
       userAddress: user.address,
       deposit: deposit.toString(),
@@ -73,9 +79,11 @@ describe("SmartCityEscrow state-bound settlement", function () {
     });
     await expect(escrow.verifiedFare(escrowId, tampered.paramsABI, proof.stateABI, tampered.signatures))
       .to.be.revertedWithCustomError(escrow, "InvalidPerunProof");
+    await expect(escrow.settleAndRelease(escrowId, tampered.paramsABI, proof.stateABI, tampered.signatures))
+      .to.be.revertedWithCustomError(escrow, "InvalidPerunProof");
 
     const nonFinal = makeProof({
-      escrowAddress: await escrow.getAddress(),
+      escrowAddress,
       escrowId,
       userAddress: user.address,
       deposit: deposit.toString(),
@@ -84,6 +92,13 @@ describe("SmartCityEscrow state-bound settlement", function () {
     });
     await expect(escrow.verifiedFare(escrowId, nonFinal.paramsABI, nonFinal.stateABI, nonFinal.signatures))
       .to.be.revertedWithCustomError(escrow, "InvalidPerunProof");
+    await expect(escrow.settleAndRelease(escrowId, nonFinal.paramsABI, nonFinal.stateABI, nonFinal.signatures))
+      .to.be.revertedWithCustomError(escrow, "InvalidPerunProof");
+
+    expect(await usdc.balanceOf(escrowAddress)).to.equal(balancesBefore.escrow);
+    expect(await usdc.balanceOf(operator.address)).to.equal(balancesBefore.operator);
+    expect(await usdc.balanceOf(user.address)).to.equal(balancesBefore.user);
+    expect((await escrow.getEscrowStatus(escrowId))[0]).to.equal(2);
   });
 
   it("keeps funds reserved through the dispute window, then claims", async function () {
