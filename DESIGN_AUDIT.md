@@ -1,6 +1,6 @@
 # State-bound settlement 설계 점검
 
-기준 커밋은 `960abf5054fba70f0899a96450b8dc92712123f3`, 작업 브랜치는 `go-sdk`다.
+기준 커밋은 `167213013d0457d3f5b189d4ae80b74372e16f7d`, 작업 브랜치는 `go-sdk`다.
 
 ## 설계와 일치하는 부분
 
@@ -26,6 +26,8 @@
 - 프론트가 종료 응답을 잃었을 때 Active로 되돌아가 요금을 계속 표시하던 동작을 제거했다.
 - 임의 `fareUsdc`, 구형 `/sign`, 메모리 채널 API, 별도 cron/watchtower를 제거했다.
 - 서로 다른 구형 escrow 소스·ABI·배포 스크립트와 이를 쓰던 가짜 E2E를 제거했다.
+- 트랜잭션 영수증 직후 public RPC의 상태 조회가 잠깐 뒤처질 때 정상 operator deposit을 503으로 오판하지 않도록 bounded retry를 추가했다.
+- Base Sepolia에서 정상 정산과 환불의 실제 E2E Gas Benchmark를 각각 10회 수행하고 최종 온체인 상태를 검증했다.
 
 ## 남은 설계 차이와 운영 제한
 
@@ -36,3 +38,15 @@
 5. 실제 MetaMask 예치가 필요한 Railway E2E는 사용자 지갑 승인이 있어야 완결할 수 있다.
 
 1번과 2번을 해결하려면 사용자 participant 키 관리/P2P 모델을 논문에서 명시하고, 선택한 모델에 맞춘 active-channel restore를 별도 단계로 구현해야 한다. 현재 구현의 신뢰 경계는 “escrow fare 변조 방지”까지 충족하지만 “사용자 키 비수탁”까지 충족하지는 않는다.
+
+## 구현 수준 평가
+
+- 논문 핵심 설계: 약 95%. state-bound fare, native Perun proof, 컨트랙트 자체 검증, dispute window와 최종 claim, 실제 정상/환불 E2E가 구현됐다.
+- 운영 가능한 프로토타입: 약 90%. 현재 단일 Backend replica와 custodial participant라는 명시한 조건에서는 전체 결제 흐름이 동작한다.
+- production 운영 안전성: 약 75%. 활성 채널 재시작 복구, 운영 환불 API 인증, 다중 Backend replica 동시성 제어가 남아 있다.
+
+하나의 숫자로 표현하면 현재 구현은 약 90%로 보는 것이 적절하다. 사용자가 수용한 custodial participant 제약은 미완성 항목으로 다시 감점하지 않았다.
+
+## 환불 운영 API의 의미
+
+현재 브라우저는 환불 신청뿐 아니라 `evaluate`, `approve`, `payout` 같은 운영자 작업도 Backend에 요청할 수 있다. 컨트랙트가 수령인을 고정하므로 제3자가 돈을 자기 주소로 빼갈 수는 없지만, 인증되지 않은 호출이 운영자 gas를 쓰거나 환불 처리를 임의로 시작할 수 있다. 실제 운영 전에는 사용자 화면에는 환불 신청만 열고, 지급·승인 API는 관리자 인증 또는 내부 worker 전용으로 제한해야 한다. 사용자 신청에는 wallet nonce 서명을 붙여 신청 주소의 소유권도 확인하는 것이 권장된다.

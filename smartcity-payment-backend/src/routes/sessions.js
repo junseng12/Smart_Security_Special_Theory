@@ -22,6 +22,16 @@ const logger = require('../utils/logger');
 
 const router = Router();
 
+async function waitForFullyFunded(sessionId, attempts = 5, delayMs = 750) {
+  let status;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    status = await escrowSvc.getOnchainStatus(sessionId);
+    if (status.isFullyFunded && status.stateLabel === 'FullyFunded') return status;
+    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return status;
+}
+
 // ── Validation helpers ────────────────────────────────────────────────────────
 const ethAddress = () =>
   Joi.string().custom((val, helpers) =>
@@ -329,7 +339,8 @@ router.post('/:id/deposit', async (req, res, next) => {
       });
     }
 
-    const fundedStatus = await escrowSvc.getOnchainStatus(req.params.id);
+    // Public RPC nodes can briefly lag behind a confirmed receipt.
+    const fundedStatus = await waitForFullyFunded(req.params.id);
     if (!fundedStatus.isFullyFunded || fundedStatus.stateLabel !== 'FullyFunded') {
       return res.status(503).json({
         ok: false,

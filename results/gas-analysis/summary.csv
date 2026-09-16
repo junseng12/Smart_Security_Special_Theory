@@ -1,0 +1,9 @@
+operation,contract_function,sample_count,mean_gas,median_gas,stddev_gas,min_gas,max_gas,cv_percent
+User Deposit,userDeposit,10,237201.40,237205.00,5.80,237193,237205,0.0024
+Operator Deposit,operatorDeposit,10,91314.60,91797.00,1517.06,86997,91797,1.6614
+Settlement Reservation,settleAndRelease,10,211913.20,211918.00,14.09,211894,211930,0.0066
+Settlement Claim,claimSettlement,10,104644.60,104647.00,5.06,104635,104647,0.0048
+Dispute Registration,registerRefundIssue,10,106124.00,106124.00,0.00,106124,106124,0.0000
+Refund Execution,refundToBuyer,10,113325.00,113325.00,0.00,113325,113325,0.0000
+Deposit Total,userDeposit + operatorDeposit,10,328516.00,329002.00,1515.82,324202,329002,0.4614
+Settlement Total,settleAndRelease + claimSettlement,10,316557.80,316565.00,18.07,316529,316577,0.0057
