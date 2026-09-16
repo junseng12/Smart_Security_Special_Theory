@@ -388,12 +388,28 @@ function samplesFor(operation) {
   return rows.filter(row => row.operation === operation && row.success).map(row => Number(row.gas_used));
 }
 
+function feeSamplesFor(operation) {
+  return rows.filter(row => row.operation === operation && row.success)
+    .map(row => Number(row.transaction_fee_wei));
+}
+
 function aggregateSamples(left, right) {
   const pairs = new Map();
   for (const row of rows.filter(r => [left, right].includes(r.operation) && r.success)) {
     const key = `${row.scenario}:${row.run_number}`;
     if (!pairs.has(key)) pairs.set(key, {});
     pairs.get(key)[row.operation] = Number(row.gas_used);
+  }
+  return [...pairs.values()].filter(pair => pair[left] !== undefined && pair[right] !== undefined)
+    .map(pair => pair[left] + pair[right]);
+}
+
+function aggregateFeeSamples(left, right) {
+  const pairs = new Map();
+  for (const row of rows.filter(r => [left, right].includes(r.operation) && r.success)) {
+    const key = `${row.scenario}:${row.run_number}`;
+    if (!pairs.has(key)) pairs.set(key, {});
+    pairs.get(key)[row.operation] = Number(row.transaction_fee_wei);
   }
   return [...pairs.values()].filter(pair => pair[left] !== undefined && pair[right] !== undefined)
     .map(pair => pair[left] + pair[right]);
@@ -456,18 +472,19 @@ async function executeSamples() {
 
 function buildSummary() {
   const definitions = [
-    ['User Deposit', 'userDeposit', samplesFor('User Deposit'), ['User Deposit']],
-    ['Operator Deposit', 'operatorDeposit', samplesFor('Operator Deposit'), ['Operator Deposit']],
-    ['Settlement Reservation', 'settleAndRelease', samplesFor('Settlement Reservation'), ['Settlement Reservation']],
-    ['Settlement Claim', 'claimSettlement', samplesFor('Settlement Claim'), ['Settlement Claim']],
-    ['Dispute Registration', 'registerRefundIssue', samplesFor('Dispute Registration'), ['Dispute Registration']],
-    ['Refund Execution', 'refundToBuyer', samplesFor('Refund Execution'), ['Refund Execution']],
-    ['Deposit Total', 'userDeposit + operatorDeposit', aggregateSamples('User Deposit', 'Operator Deposit'), ['User Deposit', 'Operator Deposit']],
-    ['Settlement Total', 'settleAndRelease + claimSettlement', aggregateSamples('Settlement Reservation', 'Settlement Claim'), ['Settlement Reservation', 'Settlement Claim']],
+    ['User Deposit', 'userDeposit', samplesFor('User Deposit'), feeSamplesFor('User Deposit'), ['User Deposit']],
+    ['Operator Deposit', 'operatorDeposit', samplesFor('Operator Deposit'), feeSamplesFor('Operator Deposit'), ['Operator Deposit']],
+    ['Settlement Reservation', 'settleAndRelease', samplesFor('Settlement Reservation'), feeSamplesFor('Settlement Reservation'), ['Settlement Reservation']],
+    ['Settlement Claim', 'claimSettlement', samplesFor('Settlement Claim'), feeSamplesFor('Settlement Claim'), ['Settlement Claim']],
+    ['Dispute Registration', 'registerRefundIssue', samplesFor('Dispute Registration'), feeSamplesFor('Dispute Registration'), ['Dispute Registration']],
+    ['Refund Execution', 'refundToBuyer', samplesFor('Refund Execution'), feeSamplesFor('Refund Execution'), ['Refund Execution']],
+    ['Deposit Total', 'userDeposit + operatorDeposit', aggregateSamples('User Deposit', 'Operator Deposit'), aggregateFeeSamples('User Deposit', 'Operator Deposit'), ['User Deposit', 'Operator Deposit']],
+    ['Settlement Total', 'settleAndRelease + claimSettlement', aggregateSamples('Settlement Reservation', 'Settlement Claim'), aggregateFeeSamples('Settlement Reservation', 'Settlement Claim'), ['Settlement Reservation', 'Settlement Claim']],
   ];
-  return definitions.map(([operation, fn, values, priceOperations]) => {
+  return definitions.map(([operation, fn, values, feeValues, priceOperations]) => {
     if (!values.length) return { operation, contract_function: fn, sample_count: 0 };
     const s = stats(values);
+    const fee = stats(feeValues);
     return {
       operation,
       contract_function: fn,
@@ -479,6 +496,8 @@ function buildSummary() {
       max_gas: s.max,
       cv_percent: s.cv.toFixed(4),
       mean_effective_gas_price_gwei_per_gas: meanEffectiveGasPriceGwei(priceOperations).toFixed(6),
+      mean_l2_execution_fee_wei: fee.mean.toFixed(0),
+      mean_l2_execution_fee_eth: (fee.mean / 1e18).toFixed(15),
     };
   });
 }
@@ -508,7 +527,8 @@ function writeResults(summary, highCv, verificationProblems, environment) {
   writeCsv('summary.csv', [
     'operation', 'contract_function', 'sample_count', 'mean_gas', 'median_gas',
     'stddev_gas', 'min_gas', 'max_gas', 'cv_percent',
-    'mean_effective_gas_price_gwei_per_gas',
+    'mean_effective_gas_price_gwei_per_gas', 'mean_l2_execution_fee_wei',
+    'mean_l2_execution_fee_eth',
   ], summary);
   writeCsv('failures.csv', [
     'scenario', 'run_number', 'operation', 'session_id', 'escrow_id', 'error', 'timestamp',
@@ -528,9 +548,9 @@ function writeResults(summary, highCv, verificationProblems, environment) {
     `- CLAIM_PERIOD: ${environment.claimPeriod} seconds\n` +
     `- Standard deviation: sample standard deviation (n-1)\n\n` +
     `## Results\n\n` +
-    `| Operation | N | Mean gas (gas units) | Median | Stddev | Min | Max | CV | Avg effective gas price (gwei/gas) |\n` +
-    `|---|---:|---:|---:|---:|---:|---:|---:|---:|\n` +
-    summary.map(r => `| ${r.operation} | ${r.sample_count} | ${r.mean_gas || ''} | ${r.median_gas || ''} | ${r.stddev_gas || ''} | ${r.min_gas || ''} | ${r.max_gas || ''} | ${r.cv_percent || ''}% | ${r.mean_effective_gas_price_gwei_per_gas || ''} |`).join('\n') +
+    `| Operation | N | Mean gas (gas units) | Median | Stddev | Min | Max | CV | Avg gas price (gwei/gas) | Avg L2 execution fee (wei) | Avg L2 execution fee (ETH) |\n` +
+    `|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n` +
+    summary.map(r => `| ${r.operation} | ${r.sample_count} | ${r.mean_gas || ''} | ${r.median_gas || ''} | ${r.stddev_gas || ''} | ${r.min_gas || ''} | ${r.max_gas || ''} | ${r.cv_percent || ''}% | ${r.mean_effective_gas_price_gwei_per_gas || ''} | ${r.mean_l2_execution_fee_wei || ''} | ${r.mean_l2_execution_fee_eth || ''} |`).join('\n') +
     `\n\n- Successful measured transactions: ${rows.filter(r => r.success).length}\n` +
     `- Failures: ${failures.length}\n` +
     `- Operations extended to 30 samples because CV >= 5%: ${highCv.length ? highCv.join(', ') : 'none'}\n` +
@@ -538,7 +558,7 @@ function writeResults(summary, highCv, verificationProblems, environment) {
     `- Final-state verification problems: ${verificationProblems.length ? verificationProblems.join('; ') : 'none'}\n\n` +
     `## Method and interpretation\n\n` +
     `Each operation used ten successful Base Sepolia receipts from fresh escrow and Perun channel identifiers. Failed transactions are excluded from statistics and recorded separately. Log queries were split into ranges of at most ten blocks to remain compatible with the RPC provider. Every normal-flow sample used the Backend to Go-Perun finalization path and the deployed contract verified the encoded Params, final State, two native participant signatures, and PaymentData appData before reserving settlement. Final verification confirmed settlementClaimed for normal flows and Refunded for refund flows.\n\n` +
-    `These values measure the additional on-chain execution cost of the SmartCityEscrow design. They do not measure off-chain Go-Perun state update throughput. The average effective gas price is receipt-weighted and reported in gwei per gas; execution fee equals gasUsed multiplied by effective gas price. Gas price and transaction fees vary with network conditions, so gasUsed remains the primary comparison value. settleAndRelease includes ABI decoding, native signature verification, appData binding checks, and settlement reservation.\n\n` +
+    `These values measure the additional on-chain execution cost of the SmartCityEscrow design. They do not measure off-chain Go-Perun state update throughput. The average effective gas price is receipt-weighted and reported in gwei per gas. Average L2 execution fee is calculated per receipt as gasUsed multiplied by effective gas price and then averaged. It excludes the separate Base L1 data fee. Gas price and transaction fees vary with network conditions, so gasUsed remains the primary comparison value. settleAndRelease includes ABI decoding, native signature verification, appData binding checks, and settlement reservation.\n\n` +
     `## Setup transactions excluded from statistics\n\n` +
     setupTransactions.map(tx => `- ${tx.label}: ${tx.txHash} (gas ${tx.gasUsed})`).join('\n') + `\n`;
   fs.writeFileSync(path.join(OUT, 'gas-analysis.md'), md);
