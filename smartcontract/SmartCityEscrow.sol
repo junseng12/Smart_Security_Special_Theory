@@ -182,7 +182,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         uint256 operatorRefund
     );
 
-    // Evidence 3: settlement was reserved and the 24-hour dispute window started.
+    // Evidence 3: settlement was reserved and the configured dispute window started.
     event SettlementReserved(
         bytes32 indexed escrowId,
         address indexed operator,
@@ -211,7 +211,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         uint256 penalty
     );
 
-    // Evidence 6: settlement was claimed after the 24-hour dispute window.
+    // Evidence 6: settlement was claimed after the configured dispute window.
     event SettlementClaimed(
         bytes32 indexed escrowId,
         address indexed operator,
@@ -346,7 +346,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
     /**
      * @notice Reserve settlement after ride ends.
      * @dev This function DOES NOT transfer funds immediately.
-     *      It records pending settlement amounts and opens a 24-hour dispute window.
+     *      It records pending settlement amounts and opens the CLAIM_PERIOD dispute window.
      */
     function settleAndRelease(
         bytes32 escrowId,
@@ -439,7 +439,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
     // 4. claimSettlement
     // -------------------------------------------------------------------------
     /**
-     * @notice Claim reserved settlement after 24-hour dispute window.
+     * @notice Claim reserved settlement after the CLAIM_PERIOD dispute window.
      * @dev Anyone can call this after claimableAfter.
      *
      * Transfers:

@@ -195,7 +195,7 @@ async function runMigrations(queryable = pool) {
       state               TEXT NOT NULL DEFAULT 'UserDeposited',
       locked_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       settled_at          TIMESTAMPTZ,
-      claimable_after     TIMESTAMPTZ,  -- V3.2: settleAndRelease 후 24h 분쟁 기간 종료 시각
+      claimable_after     TIMESTAMPTZ,  -- settleAndRelease 후 온체인 CLAIM_PERIOD 종료 시각
       perun_proof         JSONB,
       retry_count         INTEGER DEFAULT 0,
       last_error          TEXT

@@ -101,10 +101,57 @@ describe("SmartCityEscrow state-bound settlement", function () {
     expect((await escrow.getEscrowStatus(escrowId))[0]).to.equal(2);
   });
 
+  it("rejects a final state signed for a different channel and leaves USDC untouched", async function () {
+    const { escrow, usdc, operator, user, escrowId, proof, deposit } = await fixture();
+    const otherChannel = makeProof({
+      escrowAddress: await escrow.getAddress(), escrowId,
+      userAddress: user.address, deposit: deposit.toString(),
+      fare: ethers.parseUnits("1.25", 6).toString(), nonce: "8",
+    });
+    expect(otherChannel.channelId).not.to.equal(proof.channelId);
+    const before = await usdc.balanceOf(await escrow.getAddress());
+    await expect(escrow.connect(operator).settleAndRelease(
+      escrowId, otherChannel.paramsABI, otherChannel.stateABI, otherChannel.signatures,
+    )).to.be.revertedWithCustomError(escrow, "InvalidPerunProof");
+    expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(before);
+    expect((await escrow.getEscrowStatus(escrowId))[0]).to.equal(2);
+  });
+
+  it("characterizes the stale-final-state gap when a newer signed final state exists only off-chain", async function () {
+    const { escrow, usdc, user, escrowId, proof, deposit } = await fixture();
+    const earlierNonFinal = makeProof({
+      escrowAddress: await escrow.getAddress(), escrowId,
+      userAddress: user.address, deposit: deposit.toString(),
+      fare: ethers.parseUnits("1.00", 6).toString(), version: 2, final: false,
+    });
+    const newer = makeProof({
+      escrowAddress: await escrow.getAddress(), escrowId,
+      userAddress: user.address, deposit: deposit.toString(),
+      fare: ethers.parseUnits("2.00", 6).toString(), version: 4,
+    });
+    expect(newer.channelId).to.equal(proof.channelId);
+    expect(newer.stateHash).not.to.equal(proof.stateHash);
+    await expect(escrow.settleAndRelease(
+      escrowId, earlierNonFinal.paramsABI, earlierNonFinal.stateABI, earlierNonFinal.signatures,
+    )).to.be.revertedWithCustomError(escrow, "InvalidPerunProof");
+    // Version 4 exists solely off-chain; the escrow cannot compare it with
+    // the submitted, validly signed version 3 proof. Honest Go-Perun cannot
+    // advance after finalization, so this models signer equivocation.
+    expect(await escrow.verifiedFare(escrowId, newer.paramsABI, newer.stateABI, newer.signatures))
+      .to.equal(ethers.parseUnits("2.00", 6));
+    await escrow.settleAndRelease(escrowId, proof.paramsABI, proof.stateABI, proof.signatures);
+    expect((await escrow.getEscrowStatus(escrowId))[3]).to.equal(ethers.parseUnits("1.25", 6));
+    expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(deposit * 2n);
+    await expect(escrow.settleAndRelease(escrowId, newer.paramsABI, newer.stateABI, newer.signatures))
+      .to.be.revertedWithCustomError(escrow, "InvalidState");
+  });
+
   it("keeps funds reserved through the dispute window, then claims", async function () {
     const { escrow, usdc, operator, user, escrowId, proof, fare, deposit } = await fixture();
     await escrow.settleAndRelease(escrowId, proof.paramsABI, proof.stateABI, proof.signatures);
+    const escrowBefore = await usdc.balanceOf(await escrow.getAddress());
     await expect(escrow.claimSettlement(escrowId)).to.be.revertedWithCustomError(escrow, "ClaimPeriodNotEnded");
+    expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(escrowBefore);
 
     await ethers.provider.send("evm_increaseTime", [4 * 60 + 1]);
     await ethers.provider.send("evm_mine");
@@ -120,5 +167,24 @@ describe("SmartCityEscrow state-bound settlement", function () {
     const { escrow, escrowId } = await fixture();
     await escrow.registerRefundIssue(escrowId, 0, "unlock failure", false);
     await expect(escrow.refundToBuyer(escrowId, 1)).to.be.revertedWithCustomError(escrow, "FareExceedsUserDeposit");
+  });
+
+  it("rejects refund without an issue and unauthorized issue registration", async function () {
+    const { escrow, usdc, operator, user, escrowId, deposit } = await fixture();
+    const escrowAddress = await escrow.getAddress();
+    const before = await usdc.balanceOf(escrowAddress);
+    await expect(escrow.connect(user).registerRefundIssue(escrowId, 0, "fabricated", false))
+      .to.be.reverted;
+    await expect(escrow.connect(operator).refundToBuyer(escrowId, 0))
+      .to.be.revertedWithCustomError(escrow, "InvalidState");
+    await expect(escrow.connect(user).forceRefund(escrowId))
+      .to.be.revertedWithCustomError(escrow, "DeadlineNotPassed");
+    expect(await usdc.balanceOf(escrowAddress)).to.equal(before);
+    expect((await escrow.getEscrowStatus(escrowId))[0]).to.equal(2);
+
+    // A permitted operator can register an issue without on-chain device evidence.
+    await escrow.connect(operator).registerRefundIssue(escrowId, 0, "operator asserted", false);
+    await escrow.connect(operator).refundToBuyer(escrowId, 0);
+    expect(await usdc.balanceOf(user.address)).to.equal(deposit);
   });
 });
