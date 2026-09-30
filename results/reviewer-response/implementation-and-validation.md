@@ -1,89 +1,106 @@
-# Reviewer response: cost, threats, and decision flow
+# 리뷰 대응: 실제 구현과 검증 범위
 
-Scope: `go-sdk` research prototype, inspected on 2026-09-30. The comparison below is a **local Hardhat experiment**. The earlier [Base Sepolia escrow benchmark](../gas-analysis/gas-analysis.md) and [20-session E2E evidence](../e2e-validation/table3-e2e-scenarios.md) are separate measurements. No new Base Sepolia transaction or contract deployment was made for this review.
+기준: `go-sdk` 연구용 구현. 비용 비교는 로컬 Hardhat 실험이다. 기존 [Base Sepolia 에스크로 측정](../gas-analysis/gas-analysis.md) 및 [종단 간 검증](../e2e-validation/table3-e2e-scenarios.md)은 별도 자료다. 이번 리뷰 대응에서 Base Sepolia 거래나 새 컨트랙트 배포는 하지 않았다.
 
-## 1. Architecture actually implemented
+## 1. 구현된 결제 구조
 
-1. The Backend creates a DB session and passes its ID and `keccak256(utf8(sessionId))` to Go-Perun ([channelOrchestrator.js](../../smartcity-payment-backend/src/services/channelOrchestrator.js), `startSessionAndOpenChannel`; [orchestrator.go](../../go-perun-node/internal/channel/orchestrator.go), `StartSessionAndOpen`).
-2. Go opens a zero-funded channel. The second Perun participant is a **server-created custodial account**, not the user's MetaMask key. The actual USDC is transferred to `SmartCityEscrow.userDeposit` and `operatorDeposit` ([channel.go](../../go-perun-node/internal/channel/channel.go), `OpenChannel`; [SmartCityEscrow.sol](../../smartcontract/SmartCityEscrow.sol), `userDeposit`/`operatorDeposit`).
-3. The Backend billing scheduler counts complete minutes from `started_at`; each due minute invokes Go `ChargeUsage`, which updates signed Perun `PaymentData.FareWei` and the state version/hash. The backend persists the returned audit values ([usageBillingService.js](../../smartcity-payment-backend/src/services/usageBillingService.js), `catchUpSessionUnlocked`; [channel.go](../../go-perun-node/internal/channel/channel.go), `ChargeUsage`). This repository has no verified direct device telemetry feed in that billing path.
-4. At end, the Backend freezes billing, Go finalizes or restores the channel, checks session/user identity, and exports `CurrentTX()` with both native signatures via official Perun encoding ([channelOrchestrator.js](../../smartcity-payment-backend/src/services/channelOrchestrator.js), `endSessionAndSettle`; [orchestrator.go](../../go-perun-node/internal/channel/orchestrator.go), `EndSessionAndSettle`; [proof.go](../../go-perun-node/internal/paymentapp/proof.go), `Export`). The Backend relays this proof to the escrow. The escrow derives the fare from signed appData. After the actual `CLAIM_PERIOD` of **4 minutes** and absent a dispute, `claimSettlement` distributes USDC.
+1. 백엔드는 DB 세션 ID와 `keccak256(utf8(세션 ID))`로 만든 에스크로 ID를 Go 노드에 전달한다([channelOrchestrator.js](../../smartcity-payment-backend/src/services/channelOrchestrator.js)의 `startSessionAndOpenChannel`, [orchestrator.go](../../go-perun-node/internal/channel/orchestrator.go)의 `StartSessionAndOpen`).
+2. Go는 양쪽 자금 배분이 0인 Perun 채널을 연다. 두 번째 참가자는 MetaMask 사용자가 아니라 서버가 생성한 보관형 참가자다. 실제 USDC는 `SmartCityEscrow.userDeposit`과 `operatorDeposit`으로 예치한다([channel.go](../../go-perun-node/internal/channel/channel.go)의 `OpenChannel`, [SmartCityEscrow.sol](../../smartcontract/SmartCityEscrow.sol)). **현재 Perun 채널 개설은 온체인 예치 TX를 만들지 않는다.**
+3. 백엔드는 경과한 1분 단위로 청구를 실행하고 Go의 `ChargeUsage`가 Perun appData 요금과 상태 버전·해시를 갱신한다([usageBillingService.js](../../smartcity-payment-backend/src/services/usageBillingService.js), [channel.go](../../go-perun-node/internal/channel/channel.go)). 이 경로에 인증된 실물 기기 텔레메트리 연결은 확인되지 않았다.
+4. 종료 시 백엔드는 청구를 중단한다. Go는 최종 상태와 두 Perun 참가자의 서명을 공식 형식으로 내보내고, 백엔드는 이를 에스크로에 전달한다([proof.go](../../go-perun-node/internal/paymentapp/proof.go)의 `Export`). `settleAndRelease`는 요금을 예약하고, 실제 4분 분쟁 기간이 지난 뒤 `claimSettlement`가 USDC를 분배한다. **현재 정상 종료 시 Perun adjudicator를 통한 `ch.Settle()` 거래는 없다.**
 
-## 2. Cost comparison
+## 2. 비용 비교: 무엇을 합산했는가
 
-Baseline: each usage update is a separate `MockUSDC.transfer(user → operator, 0.1 USDC)` transaction. Proposed: `userDeposit + operatorDeposit + settleAndRelease + claimSettlement`; intermediate Perun updates incur no on-chain transaction. Both paths use the same six-decimal mock ERC-20 and local Hardhat EVM. Deployment, minting and approvals are setup excluded from both totals. The baseline lacks the proposal's escrow/dispute protections, so this is a transaction-execution comparison rather than protocol equivalence. The script constructs a final state with official Go-Perun encoding and signatures, but represents the n intermediate updates by final version/fare; it does not run n live channel updates. Each n has one local run.
+직접 결제 방식은 매 사용량 갱신마다 MockUSDC를 사용자에서 운영자로 전송한다. 제안 방식의 네 거래는 **Perun 채널 개설·종료 거래가 아니라** 다음의 에스크로 거래다.
 
-| Usage updates | Baseline TX | Baseline gas | Baseline estimated L2 execution fee (ETH) | Proposed TX | Proposed gas | Proposed estimated L2 execution fee (ETH) |
+| 에스크로 작업 | 함수 | 갱신 1회 실험의 Gas |
+|---|---|---:|
+| 사용자 예치 | `userDeposit` | 233,927 |
+| 운영자 예치 | `operatorDeposit` | 71,419 |
+| 최종 증명 검증과 정산 예약 | `settleAndRelease` | 211,270 |
+| 분쟁 기간 후 실제 분배 | `claimSettlement` | 119,310 |
+| **제안 방식 합계** | **4개 TX** | **635,926** |
+
+두 방식 모두 같은 로컬 Hardhat EVM과 소수점 6자리 MockUSDC를 사용했다. 컨트랙트 배포·발행·`approve`는 준비 단계로 제외했다. 제안 방식의 중간 Perun 갱신은 최종 증명의 버전과 누적 요금으로 나타냈고, 이 비용 스크립트에서 실제 n번의 채널 갱신을 실행하지는 않았다. 따라서 이 표는 **온체인 실행 비용** 비교이며 상태 채널 처리량 측정이 아니다. 각 갱신 횟수는 로컬 1회 실행했다.
+
+| 사용량 갱신 횟수 | 직접 전송 TX | 직접 전송 Gas | 직접 전송 추정 L2 실행 수수료(ETH) | 제안 방식 TX | 제안 방식 Gas | 제안 방식 추정 L2 실행 수수료(ETH) |
 |---:|---:|---:|---:|---:|---:|---:|
 | 1 | 1 | 34,484 | 0.000000206904 | 4 | 635,926 | 0.000003815556 |
 | 5 | 5 | 172,420 | 0.000001034520 | 4 | 635,986 | 0.000003815916 |
 | 10 | 10 | 344,840 | 0.000002069040 | 4 | 635,986 | 0.000003815916 |
 | 20 | 20 | 689,680 | 0.000004138080 | 4 | 635,962 | 0.000003815772 |
 
-Fee estimate = **local gas used × 0.006 gwei/gas**, the historical average effective price in the existing Base Sepolia benchmark. It is **not a fresh Base Sepolia fee receipt** and excludes the Base L1 data fee. Local `MockUSDC` gas can differ from deployed USDC gas. The precise data and per-transaction averages are in [comparison.csv](../payment-cost-comparison/comparison.csv); the reproducible script is [compare-payment-costs.js](../../smartcontract/scripts/compare-payment-costs.js). In the tested points, the proposal first uses less gas at 20 updates; it costs more at 1, 5, and 10 updates. The proposed gas remains roughly constant as n increases.
+수수료는 로컬 측정 Gas에 기존 Base Sepolia 실험의 평균 유효 가격인 **0.006 gwei/Gas**를 곱한 추정치다. 새 Base Sepolia 실거래 수수료가 아니며 Base의 L1 데이터 비용을 포함하지 않는다. 실제 USDC와 MockUSDC의 Gas도 다를 수 있다. 직접 전송 방식에는 제안 방식의 에스크로·분쟁 보장이 없다. 측정 지점에서 제안 방식의 Gas가 직접 전송보다 낮은 것은 20회뿐이다. [합계 CSV](../payment-cost-comparison/comparison.csv), [작업별 CSV](../payment-cost-comparison/operations.csv), [재현 스크립트](../../smartcontract/scripts/compare-payment-costs.js)에 근거값이 있다.
 
-## 3. Threat-model tests
+## 3. 위협별 실제 결과
 
-All seven [Hardhat contract tests](../../smartcontract/test/stateBoundSettlement.test.js) pass. The table distinguishes rejected attempts from limits of the deployed design.
+[컨트랙트 테스트](../../smartcontract/test/stateBoundSettlement.test.js) 7개가 통과했다.
 
-| Threat | Attacker | Attempt | Expected defense | Actual result |
+| 위협 | 시도 주체 | 시도 | 기대한 방어 | 실제 결과 |
 |---|---|---|---|---|
-| T1 Invalid/tampered state | User or provider | Mix a signed proof with altered appData, submit a non-final state, or use a different channel | Reject proof; preserve escrow USDC | `InvalidPerunProof`; balance and escrow state unchanged |
-| T2 Stale state/replay | Provider with access to both signing keys | Submit an earlier non-final state; separately, create conflicting signed final proofs at versions 3 and 4, then submit version 3 | Reject earlier state; latest final should win | Earlier non-final state rejected. **Conflicting final proof not covered**: valid version 3 was accepted while version 4 existed only off-chain. A second settlement is rejected by `InvalidState`; a reused channel ID is rejected at deposit. |
-| T3 Invalid settlement amount | User or provider | Change the fare in appData without matching signatures | Reject mismatched amount; preserve USDC | `InvalidPerunProof`; no separate caller-supplied settlement amount exists. A different fare jointly signed by both server-controlled participants cannot be distinguished as false by the contract. |
-| T4 Premature claim | Provider | Claim before `claimableAfter` | Reject until dispute window ends | `ClaimPeriodNotEnded`; claim after 4 minutes succeeds |
-| T5 Unauthorized refund | User / caller without operator role | Register an issue as user or refund without an issue | Reject unauthorized call and missing issue | Both rejected; no USDC movement. **Limit:** an authorized operator can register an issue without on-chain device evidence and then refund. |
+| T1 변조·비최종 상태 | 사용자 또는 제공자 | appData 변조, 최종 플래그 누락, 다른 채널 증명 | 정산 거부 및 USDC 보존 | `InvalidPerunProof`로 거부, 잔액과 상태 유지 |
+| T2 과거 상태·재사용 | 두 서명 키에 접근하는 제공자 | 이전 비최종 상태 제출; 별도로 상충하는 버전 3·4 최종 증명을 만들어 버전 3부터 제출 | 이전 상태 배제 | 비최종 상태·중복 정산은 거부. **상충하는 과거 최종 증명은 버전 4가 체인 밖에만 있으면 수락됨** |
+| T3 다른 정산 금액 | 사용자 또는 제공자 | 증명의 appData 요금만 바꾸기 | 다른 금액 거부 | 서명 불일치로 거부, USDC 이동 없음. 별도의 임의 요금 입력 인자는 없음 |
+| T4 조기 청구 | 제공자 | 4분 경과 전 청구 | 청구 거부 | `ClaimPeriodNotEnded`, USDC 이동 없음 |
+| T5 무단 환불 | 권한 없는 사용자 | 직접 이슈 등록 또는 이슈 없는 환불 | 환불 거부 | 둘 다 거부. 단, 권한 있는 운영자는 온체인 기기 증거 없이 이슈를 등록할 수 있음 |
 
-Under the honest Go-Perun flow, only the last update has `IsFinal=true` and no later update is accepted. Thus ordinary older states are non-final and rejected. The two-final-proof test deliberately models **signer equivocation**: two conflicting final proofs signed for the same channel, which the honest SDK workflow does not create but a party controlling both signing keys can create. T2 cannot be solved by checking `s.version > 0` or hashing the submitted state: those values are also present in an older, correctly signed final state. Rejecting that proof on-chain requires a trusted latest-state commitment available to the contract before settlement (or a different independent participant/signing assumption). That would add an on-chain step or materially change custody and gas results, so this review does not claim such a defense or alter the deployed contract.
+정상적인 Go-Perun 경로에서는 최종 상태가 된 뒤 추가 갱신을 받지 않는다. 그보다 앞선 일반 상태는 비최종이므로 T2에서 거부된다. 상충하는 최종 증명 테스트는 **서명 키의 이중 서명**을 가정한다. 서버가 운영자와 보관형 참가자의 서명 키를 통제할 수 있으므로, 악의적인 제공자를 위협 모델에 넣는다면 이 가능성을 배제할 수 없다.
 
-## 4. Exact final-state validation
+Perun의 표준 adjudicator 분쟁 경로에서는 등록된 상태를 **분쟁 기간 안에 더 높은 버전의 상태로 반박**할 수 있다([Perun Ethereum 컨트랙트 설명](https://github.com/hyperledger-labs/perun-eth-contracts#dispute)). 판정자가 체인 밖의 최신 상태를 스스로 찾아내는 것은 아니므로, 최신 상태를 가진 참가자가 기간 안에 제출해야 한다. 공식 설명에는 양측이 서명한 최종 상태를 별도 대기 없이 종결하는 경로도 있으므로, adjudicator를 사용한다는 사실만으로 모든 과거 최종 증명이 자동 차단되는 것은 아니다. 현재 두 번째 참가자는 서버가 만든 보관형 계정이라는 제약도 있다. 또한 `channel.go`의 `InitiateDispute`는 오류만 반환하며, `CloseChannel`도 `ch.Settle()`을 호출하지 않는다. SmartCityEscrow는 adjudicator에 등록된 상태를 조회하거나 그 판정 결과를 정산 조건으로 사용하지 않는다. 따라서 **Perun 자체의 가능한 반박 절차가 현재 USDC 에스크로의 T2 방어로 자동 연결되지는 않는다.** 연결하려면 adjudicator 사용, 독립적으로 이의를 제기할 참가자, 기간, 에스크로가 판정 결과를 확인하는 방법을 함께 설계하고 재측정해야 한다.
 
-| Step | File / function | Actual check or action |
+## 4. 최종 상태 검증 절차
+
+| 단계 | 파일·함수 | 실제 검사 |
 |---|---|---|
-| Export | `go-perun-node/internal/channel/channel.go`, `ExportFinal`; `internal/paymentapp/proof.go`, `Export` | Restores the channel, reads `CurrentTX()`, requires `IsFinal`, validates Perun app data and channel ID, verifies both native signatures, and encodes Params/State through `perun-eth-backend` |
-| Relay | `smartcity-payment-backend/src/services/channelOrchestrator.js`, `endSessionAndSettle`; `escrowPayoutService.js`, `settleAndReleaseInternal` | Stops billing, forwards the native proof, checks proof byte/signature shape and asks `verifiedFare`; does not set a caller-selected fare |
-| Channel/format | `smartcontract/SmartCityEscrow.sol`, `verifiedFare` | Canonical ABI re-encoding; `state.channelID == perunChannelIDs[escrowId] == keccak256(paramsABI)`; Perun app is this escrow; ledger and non-virtual flags; `isFinal` and `version > 0` |
-| Participants/signatures | Same function | Exactly two distinct nonzero participant addresses; participant 0 equals stored operator; Ethereum signed-message recovery of `keccak256(stateABI)` matches both Params addresses. Participant 1 is the custodial Go user, not the MetaMask user. |
-| Payment binding | Same function | One supported asset/backend, two zero Perun AssetHolder balances, no locked allocation; appData contains matching `escrowId`, Base chain ID, escrow address, stored MetaMask user, and deposited amount; fare cannot exceed deposit |
-| Reservation | Same contract, `settleAndRelease` | Caller has operator role and matches escrow operator; escrow is `FullyFunded`; hold deadline passed. Emits state hash/version, stores signed fare and payout amounts, sets `Released` and `claimableAfter` |
-| Claim | Same contract, `claimSettlement` | Escrow is `Released`, not already claimed, and dispute window ended; then transfers reserved USDC |
+| 최종 증명 내보내기 | `go-perun-node/internal/channel/channel.go`의 `ExportFinal`, `internal/paymentapp/proof.go`의 `Export` | 저장 채널 복원, `CurrentTX()`, `IsFinal`, 채널 ID, 두 원본 서명 검증, 공식 Params·State 인코딩 |
+| 증명 전달 | `smartcity-payment-backend/src/services/channelOrchestrator.js`의 `endSessionAndSettle`, `escrowPayoutService.js`의 `settleAndReleaseInternal` | 청구 중단, 증명 형식 검사, `verifiedFare` 호출; 별도의 요금 인자를 정산 함수에 주지 않음 |
+| 채널·상태 검사 | `smartcontract/SmartCityEscrow.sol`의 `verifiedFare` | ABI 정규 인코딩, 예치 시 결속한 채널 ID, 컨트랙트 주소, ledger·non-virtual 플래그, 최종 플래그, `version > 0` |
+| 서명 검사 | 같은 함수 | 서로 다른 참가자 주소 2개, 저장된 운영자 주소, 두 Ethereum 서명 복원값 검사. 두 번째는 MetaMask 주소가 아니라 보관형 참가자 주소 |
+| 요금 결속 검사 | 같은 함수 | 한 자산·두 명의 0잔액 Perun 배분, appData의 에스크로 ID·체인 ID·계약 주소·저장된 MetaMask 사용자·예치금·요금 상한 검사 |
+| 정산 예약 | `settleAndRelease` | 운영자 권한, `FullyFunded`, 예치 마감 시각 경과 후 검증된 요금 저장; 상태 해시·버전 이벤트 기록 |
+| 최종 분배 | `claimSettlement` | `Released`, 미청구, `claimableAfter` 경과 확인 후 USDC 전송 |
 
-The emitted state hash/version are **audit evidence**, not an on-chain comparison with an independently stored latest final hash/version. `perunChannelIDs` is a deposit-time channel binding, not a latest-state commitment. The nonce is inside Params and therefore affects the channel ID, but is not a latest-version check. `fareAmount` is stored **after** proof verification; it is not a prior expected amount.
+컨트랙트가 기록하는 상태 해시·버전은 **감사 기록**이지 별도로 저장된 최신 최종 해시·버전과의 비교가 아니다. 채널 ID는 예치 시 정한 채널의 동일성을 확인한다. Params의 nonce는 채널 ID에 반영되지만 최신 상태 버전을 나타내지 않는다. 요금도 증명 검증 **후** 저장하므로 사전에 독립적으로 확정된 예상 요금과 비교하지 않는다.
 
-## 5. Actual fault and refund decision
+## 5. 장애 판단과 환불 절차
 
-There is no implemented end-to-end flow in which a physical service device autonomously reports authenticated telemetry, the Backend validates it, and a RefundIssue automatically follows. Normal billing uses the scheduler's elapsed minutes and Perun updates. Faults enter through refund API requests (`POST /api/v1/refunds` with a reason and optional caller-provided evidence), then `POST /:caseId/evaluate`, manual approval, or the separate proof-recovery timeout path.
+현재 구현에는 인증된 실물 기기 상태가 백엔드에 자동 보고되고 장애가 자동 확정되는 전체 경로가 없다. 정상 과금은 시간 기반 스케줄러에서 시작한다. 장애 사례는 [환불 API](../../smartcity-payment-backend/src/routes/refunds.js)의 사유 및 선택적 증거 제출, 규칙 평가 또는 수동 검토로 시작한다.
 
-In [refundDecisionEngine.js](../../smartcity-payment-backend/src/services/refundDecisionEngine.js), `sensor_failure` needs caller-provided return/end evidence and a fare record; `double_charge` queries duplicate nonces; `unlock_failure` auto-approves the requested amount or default without independent evidence; `service_outage` can auto-approve even without an outage record; `device_fault` and `wrong_charge` require manual review. Eligible amounts up to 5 USDC are approved automatically. The public [refund routes](../../smartcity-payment-backend/src/routes/refunds.js) create/evaluate/approve/pay cases; `payout` requires case status `APPROVED`, matching session/user records, and invokes the operator wallet. No authentication middleware beyond content-type/shape validation was found on these routes.
+[환불 판단 코드](../../smartcity-payment-backend/src/services/refundDecisionEngine.js)는 `sensor_failure`에 제출된 반납·종료 기록과 요금 기록을 요구한다. `double_charge`는 DB nonce 중복을 조회한다. `unlock_failure`는 독립 증거 확인 없이 자동 승인 대상이며, `service_outage`는 장애 기록 없이도 승인할 수 있다. `device_fault`와 `wrong_charge`는 수동 검토 대상이다. 조건에 해당하는 5 USDC 이하 사례는 자동 승인한다. 이 규칙은 **신뢰하는 백엔드의 정책**이지 기기 증거의 온체인 검증이 아니다.
 
-At payout, [escrowPayoutService.js](../../smartcity-payment-backend/src/services/escrowPayoutService.js), `refundToBuyer`, checks on-chain escrow state, registers `RefundIssue` via the operator wallet if needed, and submits **zero refundFare**, implementing full return of the user's deposit. The contract itself verifies operator role, allowed escrow state, dispute-window timing after reservation, and `RefundIssue` before transfer. It does **not** validate device evidence or the Backend's case reasoning; the approved case amount is not used to calculate a partial on-chain refund. Separately, when the final Perun proof remains unavailable one hour after hold deadline, [index.js](../../smartcity-payment-backend/src/index.js) and [settlementRecovery.js](../../smartcity-payment-backend/src/services/settlementRecovery.js) invoke `forceRefund`; the contract enforces its timeout. This path is recovery from missing proof, not device fault detection.
+지급 API는 `APPROVED` 상태와 사례·세션 사용자 일치를 확인한다. [escrowPayoutService.js](../../smartcity-payment-backend/src/services/escrowPayoutService.js)의 `refundToBuyer`는 운영자 지갑으로 `RefundIssue`를 등록하고 요금 인자 0을 전달해 사용자 예치금 전액을 환불한다. 승인된 사례의 금액을 부분 환불액으로 온체인에 전달하지 않는다. 컨트랙트는 운영자 권한, 에스크로 상태, 이슈 존재, 예약 후 분쟁 기간을 검사하지만 기기 증거와 사례 판단 자체는 검사하지 않는다. 환불 라우트에서 콘텐츠 형식·입력값 검사 이상의 인증 미들웨어는 확인되지 않았다.
 
-## 6. Security claims and trust boundaries
+별도로 최종 Perun 증명이 예치 마감 후 1시간 동안 없으면 [index.js](../../smartcity-payment-backend/src/index.js)와 [settlementRecovery.js](../../smartcity-payment-backend/src/services/settlementRecovery.js)가 `forceRefund`를 실행한다. 이는 기기 장애 탐지가 아니라 증명 생성 실패 복구다.
 
-Supported: malformed/non-final/wrong-channel proof rejection; native signature and appData binding; no independent Backend fare input to settlement; deposited funds remain in escrow through the dispute window; premature and duplicate claim prevention; refund requires operator privilege and `RefundIssue` (or time-based `forceRefund`).
+## 6. 논문에 사용할 수 있는 문단
 
-Not supported: on-chain knowledge of the highest signed off-chain state; independent user MetaMask signature on each Perun update; independent device evidence attestation; protection against a malicious operator who also controls the server-created custodial participant key; arbitrary refund issue registration by that authorized operator; verified automatic device failure detection. The Backend and its operator wallet/custodial node must be trusted to calculate usage, report faults, and relay the latest proof honestly. The current refund API also requires an operational authorization boundary outside these routes before being exposed to untrusted callers.
+**비용:** 같은 로컬 EVM과 ERC-20 모의 토큰으로 사용량 갱신마다 직접 결제하는 방식과 제안 방식을 비교하였다. 직접 결제 방식의 온체인 거래 수는 갱신 횟수에 비례하지만, 제안 방식의 온체인 거래는 사용자·운영자 예치, 최종 증명 검증과 정산 예약, 분쟁 기간 후 청구의 4건으로 일정하였다. 갱신 20회에서 실행 Gas는 각각 689,680과 635,962였다. 수수료는 기존 Base Sepolia 평균 가격을 적용한 추정치이며, 직접 결제 방식과 제안 방식의 에스크로·분쟁 보장 수준은 서로 다르다.
 
-## 7. Paper-ready paragraphs
+**보안:** SmartCityEscrow는 예치된 채널 ID와 최종 플래그, 두 Perun 서명, 체인·계약·세션·사용자·예치금에 결속된 appData를 검증한 뒤 그 안의 요금만 예약한다. 정상적인 Go-Perun 갱신 경로의 과거 상태는 비최종이므로 정산에 사용할 수 없다. 다만 두 서명 키로 상충하는 최종 증명을 만든 경우 현재 에스크로는 체인 밖의 더 최신 버전을 알 수 없으며, Perun adjudicator의 판정 결과도 에스크로 정산에 연결되어 있지 않다.
 
-**Cost.** 동일한 로컬 EVM과 6자리 소수의 ERC-20 모의 토큰을 사용해 사용량 갱신마다 직접 전송하는 방식과 제안 방식을 비교했다. 직접 전송 방식의 온체인 트랜잭션 수는 갱신 횟수 n에 비례한 반면, 제안 방식은 사용자·운영자 예치, 최종 상태 검증을 통한 정산 예약, 분쟁 기간 이후 청구의 4건으로 일정했다. n=20에서 측정된 실행 가스는 각각 689,680 및 635,962였다. 수수료는 기존 Base Sepolia 평균 가스가격을 적용한 **추정치**이며 실제 Base Sepolia에서 baseline 결제를 반복 실행한 영수증은 아니다. 비교 대상의 에스크로·분쟁 보장 수준은 서로 다르다.
+**장애·환불:** 현재 장애 및 과금 오류 판단은 신뢰하는 백엔드의 환불 사례 접수, 정책 평가와 수동 검토를 통해 수행된다. 승인된 사례에 대해 운영자 권한으로 `RefundIssue`를 등록하고 사용자 예치금을 환불한다. 기기 텔레메트리의 독립 인증과 자동 장애 탐지는 구현되어 있지 않다.
 
-**Final state.** Go-Perun 노드는 최종 상태와 두 custodial 참가자의 서명을 공식 인코딩으로 내보낸다. SmartCityEscrow는 예치 시 결속한 채널 ID, 최종 플래그, 참가자 서명, 체인·계약·세션·사용자·예치금에 결속된 appData를 검증한 뒤 그 안의 요금만 정산 예약한다. 정상적인 Go-Perun 흐름의 과거 상태는 비최종 상태이므로 거부된다. 다만 두 서명 키를 가진 주체가 상충하는 최종 증명을 생성했다면 컨트랙트는 체인 밖에 존재하는 더 최신의 최종 상태를 알 수 없으므로, 그러한 과거 최종 증명의 선제 제출까지 방어한다고 주장하지 않는다.
+## 7. 재현 명령과 변경 파일
 
-**Fault/refund.** 현재 구현의 장애·과금 오류 판정은 신뢰하는 Backend의 환불 사례 생성, 규칙 평가 또는 수동 검토에 의존한다. 승인된 사례에 대해 운영자 권한으로 RefundIssue를 등록하고 에스크로에서 사용자 예치금을 환불한다. 기기 텔레메트리의 독립 인증과 자동 장애 탐지는 구현되어 있지 않으며, 증명 생성 실패에 따른 별도의 시간 초과 강제 환불이 존재한다.
-
-## 8. Reproduction
-
-From the repository root on Windows PowerShell:
+Windows PowerShell의 저장소 루트에서 실행한다.
 
 ```powershell
 cd smartcontract
-npm.cmd test -- --grep "SmartCityEscrow state-bound settlement"
+npm.cmd test
 npx.cmd hardhat run scripts/compare-payment-costs.js --network hardhat
 cd ..\smartcity-payment-backend
-npm.cmd test -- --runInBand
+npm.cmd test
 cd ..\go-perun-node
 go test ./...
 ```
 
-The cost script rewrites `results/payment-cost-comparison/comparison.csv` and `comparison.md`. It requires locally installed Node dependencies and Go. It does not require private keys, Base RPC access, or MetaMask. A fresh live Base Sepolia baseline needs user/operator wallet funding and explicit network credentials; none were configured in this workspace during this review.
+| 파일 | 변경 목적 |
+|---|---|
+| `smartcontract/scripts/compare-payment-costs.js` | 직접 전송과 에스크로 흐름의 로컬 Gas 및 수수료 추정치 측정 |
+| `results/payment-cost-comparison/comparison.csv`, `operations.csv`, `comparison.md` | 합계·작업별 값과 논문용 표 저장 |
+| `smartcontract/test/stateBoundSettlement.test.js` | T1~T5의 방어와 T2 한계 재현 |
+| `smartcontract/SmartCityEscrow.sol`, `smartcity-payment-backend/src/services/db.js` | 실제 4분 분쟁 기간과 주석 일치 |
+| `go-perun-node/internal/channel/channel.go` | 실제 채널 개설·종료 및 분쟁 경로에 맞게 설명 주석 정정 |
+| 이 문서 | 측정 범위, 보장·비보장 항목, 신뢰 가정과 논문 문안 정리 |
+
+비용 스크립트에는 로컬 Node 의존성과 Go가 필요하다. Base RPC, 개인키, MetaMask는 필요하지 않다. 실제 Base Sepolia 직접 결제 비교는 별도의 지갑 자금과 네트워크 설정이 있어야 하며 이번 실행에는 포함되지 않았다.

@@ -2,11 +2,11 @@
 //
 // ★ Custodial 모드: 사용자 키쌍을 서버 내부에서 생성하여 P2P 피어 없이 동작
 //
-//	OpenChannel  → 내부 UserNode 생성 → ProposeChannel + 자동 수락
-//	ChargeUsage  → ch.Update(TransferBalance) [오프체인 — 서명만, TX 없음]
-//	FinalUpdate  → ch.Update(IsFinal=true)    [credit 차감 + 채널 최종화]
-//	CloseChannel → ch.Settle()               [perun-eth-backend Adjudicator가 Withdraw]
-//	Dispute      → ch.ForceUpdate()           [수동 분쟁 트리거]
+//	OpenChannel  → 내부 UserNode 생성 → ProposeChannel + 자동 수락 (자금 0, 온체인 예치 없음)
+//	ChargeUsage  → ch.Update(PaymentData)    [오프체인 — 서명만, TX 없음]
+//	FinalUpdate  → ch.Update(IsFinal=true)    [요금 조정 + 최종화, TX 없음]
+//	CloseChannel → 저장된 최종 증명 조회       [ch.Settle 호출 없음]
+//	Dispute      → 현재 미연결               [InitiateDispute는 오류 반환]
 package channel
 
 import (

@@ -1,4 +1,4 @@
-updates,baselineTx,baselineGas,baselineFeeWei,baselineAvgGas,baselineAvgFeeWei,proposedTx,proposedGas,proposedFeeWei,proposedAvgGas,proposedAvgFeeWei
+사용량갱신횟수,직접전송TX수,직접전송Gas,직접전송추정수수료wei,직접전송TX당평균Gas,직접전송TX당평균추정수수료wei,제안방식TX수,제안방식Gas,제안방식추정수수료wei,제안방식TX당평균Gas,제안방식TX당평균추정수수료wei
 1,1,34484,206904000000,34484,206904000000,4,635926,3815556000000,158981,953889000000
 5,5,172420,1034520000000,34484,206904000000,4,635986,3815916000000,158996,953979000000
 10,10,344840,2069040000000,34484,206904000000,4,635986,3815916000000,158996,953979000000

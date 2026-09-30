@@ -1,16 +1,29 @@
-# On-chain per-update payments vs Perun escrow
+# 사용량별 온체인 결제 비용 비교
 
-Local Hardhat EVM receipts; MockUSDC (6 decimals) for both methods. Each update transfers 0.1 USDC directly from user to operator in the baseline. The proposed path deposits 3 USDC per party, submits an official Go-Perun-encoded final proof with cumulative fare 0.1 × n, then claims after the dispute window. Its intermediate Perun updates are represented by the final version/fare and are not run by this cost script; their on-chain gas is zero. Deployment, minting and token approvals are setup transactions excluded from both totals. The baseline offers no escrow or dispute protection; this is an execution-cost comparison, not a security-equivalent protocol comparison. Each n is one local run; the existing separate Base Sepolia proposed benchmark contains ten live runs.
+두 방식 모두 로컬 Hardhat EVM과 소수점 6자리 MockUSDC로 측정했다. 기존 방식은 사용량 갱신마다 사용자에서 운영자로 0.1 USDC를 직접 전송한다. 제안 방식은 사용자와 운영자가 각각 3 USDC를 SmartCityEscrow에 예치하고, Go-Perun 공식 인코딩의 최종 증명으로 정산을 예약한 뒤 분쟁 기간 이후 청구한다. 이 스크립트는 n번의 실제 중간 Perun 업데이트를 실행하지 않고 최종 상태 버전과 누적 요금으로 나타낸다. 중간 업데이트의 온체인 TX 수는 0이다.
 
-The fee columns are **estimated Base Sepolia L2 execution fees**, calculated as local gas × 0.006 gwei/gas (historical average from the existing Base Sepolia escrow benchmark). They are not fresh Base Sepolia transaction receipts and exclude the Base L1 data fee. The local mock token differs from deployed USDC, so do not present these as directly observed Base Sepolia totals.
+**제안 방식의 4 TX는 Perun 채널 개설·종료 TX가 아니다.** 사용자 예치(userDeposit), 운영자 예치(operatorDeposit), 정산 예약(settleAndRelease), 최종 청구(claimSettlement)라는 USDC 에스크로 호출이다. 현재 구현의 Perun 채널은 자금 배분이 0이므로 개설 시 온체인 예치를 건너뛰며, 정상 종료 시 Perun adjudicator 정산 TX도 보내지 않는다.
 
-| Usage updates | Baseline TX | Baseline gas | Baseline estimated fee (ETH) | Proposed TX | Proposed gas | Proposed estimated fee (ETH) |
+컨트랙트 배포·토큰 발행·approve는 두 방식의 준비 단계로 통계에서 제외했다. 기존 직접 전송 방식에는 에스크로·분쟁 보호가 없으므로 보안 수준까지 같은 프로토콜의 비교는 아니다. 각 n은 로컬 실험 1회이며, 별도의 Base Sepolia 제안 방식 벤치마크에는 실제 거래 10회가 있다.
+
+수수료 열은 로컬 Gas × 0.006 gwei/Gas(기존 Base Sepolia 실험의 평균 가격)로 계산한 **L2 실행 수수료 추정치**다. 새로운 Base Sepolia 실거래 영수증이 아니며 L1 데이터 비용은 제외한다. 배포된 USDC와 MockUSDC의 Gas 사용량도 다를 수 있다.
+
+| 사용량 갱신 횟수 | 직접 전송 TX | 직접 전송 Gas | 직접 전송 추정 수수료(ETH) | 제안 방식 TX | 제안 방식 Gas | 제안 방식 추정 수수료(ETH) |
 |---:|---:|---:|---:|---:|---:|---:|
 | 1 | 1 | 34484 | 0.000000206904 | 4 | 635926 | 0.000003815556 |
 | 5 | 5 | 172420 | 0.00000103452 | 4 | 635986 | 0.000003815916 |
 | 10 | 10 | 344840 | 0.00000206904 | 4 | 635986 | 0.000003815916 |
 | 20 | 20 | 689680 | 0.00000413808 | 4 | 635962 | 0.000003815772 |
 
-For the observed deployed-escrow gas benchmark, see [gas-analysis.md](../gas-analysis/gas-analysis.md).
+갱신 1회의 제안 방식 상세값:
 
-Run: `cd smartcontract && npx hardhat run scripts/compare-payment-costs.js --network hardhat`. Requires Node dependencies and Go.
+| 에스크로 작업 | Gas |
+|---|---:|
+| userDeposit | 233927 |
+| operatorDeposit | 71419 |
+| settleAndRelease | 211270 |
+| claimSettlement | 119310 |
+
+모든 갱신 횟수별 작업 상세값은 [operations.csv](operations.csv), Base Sepolia의 실제 에스크로 거래 측정은 [gas-analysis.md](../gas-analysis/gas-analysis.md)를 참조한다.
+
+재현 명령: `cd smartcontract; npx.cmd hardhat run scripts/compare-payment-costs.js --network hardhat`. Node 의존성과 Go가 필요하다.
