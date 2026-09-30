@@ -97,6 +97,29 @@ function baseSepoliaReferencePrice() {
   return ethers.parseUnits(gwei, 'gwei');
 }
 
+function liveReceiptEvidence() {
+  const lines = fs.readFileSync(path.join(ROOT, 'results', 'gas-analysis', 'raw_transactions.csv'), 'utf8')
+    .trim().split(/\r?\n/);
+  const headers = lines[0].split(',');
+  const records = lines.slice(1).map(line => Object.fromEntries(
+    line.split(',').map((value, index) => [headers[index], value]),
+  ));
+  const selected = records.filter(row => row.session_id === 'd815a8a8-a352-4822-ac2a-15660bc631a1');
+  const names = {
+    'User Deposit': '사용자 예치', 'Operator Deposit': '운영자 예치',
+    'Settlement Reservation': '정산 예약', 'Settlement Claim': '최종 청구',
+  };
+  if (selected.length !== 4 || selected.some(row => row.success !== 'true'
+      || row.escrow_id !== selected[0].escrow_id || !names[row.operation])) {
+    throw new Error('실제 Base Sepolia 영수증 자료가 불완전함');
+  }
+  const entries = selected.map(row => `| ${names[row.operation]} | [거래 영수증](https://sepolia.basescan.org/tx/${row.tx_hash}) | ${Number(row.gas_used).toLocaleString('en-US')} |`).join('\n');
+  const gas = selected.reduce((sum, row) => sum + BigInt(row.gas_used), 0n);
+  return `같은 에스크로 ID(\`${selected[0].escrow_id}\`)의 Base Sepolia 거래 4건은 공개 RPC에서 함수·성공 여부·Gas를 재확인했다. **635,926 Gas는 위의 MockUSDC 로컬 합계이고, 다음 ${gas.toLocaleString('en-US')} Gas는 실제 Base Sepolia 한 세션의 합계**다.\n\n` +
+    `| 실제 Base Sepolia 작업 | 거래 | Gas |\n|---|---|---:|\n${entries}\n| **실거래 합계** | **성공 거래 4건** | **${gas.toLocaleString('en-US')}** |\n\n` +
+    '`userDeposit`은 새로운 에스크로 기록의 사용자·운영자·예치금·마감 시각·상태를 저장하고 Perun 채널 ID와 채널 재사용 표시를 새로 기록한다. 비어 있던 에스크로 주소로 USDC를 처음 옮기며 이벤트 2개도 남긴다. `operatorDeposit`은 이미 존재하는 기록의 운영자 예치금·상태를 갱신하고 USDC를 한 번 옮기며 이벤트 1개를 남긴다. 따라서 두 함수의 Gas는 같지 않다. 정확한 세부 Gas 비중은 토큰 구현과 저장 상태에 따라 달라진다. 전체 합계는 한 사람이 한 거래에서 지불한 Gas가 아니라 사용자 예치 거래와 운영자 측 정산 거래들을 합친 네 거래의 사용량이다.\n\n';
+}
+
 async function main() {
   const referencePrice = baseSepoliaReferencePrice();
   const rows = [];
@@ -154,6 +177,7 @@ async function main() {
     `|---:|---:|---:|---:|---:|---:|---:|\n${table}\n\n` +
     `갱신 1회의 제안 방식 상세값:\n\n| 에스크로 작업 | Gas |\n|---|---:|\n${detail}\n\n` +
     `모든 갱신 횟수별 작업 상세값은 [operations.csv](operations.csv), Base Sepolia의 실제 에스크로 거래 측정은 [gas-analysis.md](../gas-analysis/gas-analysis.md)를 참조한다.\n\n` +
+    liveReceiptEvidence() +
     `재현 명령: \`cd smartcontract; npx.cmd hardhat run scripts/compare-payment-costs.js --network hardhat\`. Node 의존성과 Go가 필요하다.\n`);
   console.log(table);
 }

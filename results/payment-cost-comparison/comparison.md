@@ -26,4 +26,16 @@
 
 모든 갱신 횟수별 작업 상세값은 [operations.csv](operations.csv), Base Sepolia의 실제 에스크로 거래 측정은 [gas-analysis.md](../gas-analysis/gas-analysis.md)를 참조한다.
 
+같은 에스크로 ID(`0x28a2f57eff40d4e0663b387450130843eb939b2e3837f8de29436284854979bb`)의 Base Sepolia 거래 4건은 공개 RPC에서 함수·성공 여부·Gas를 재확인했다. **635,926 Gas는 위의 MockUSDC 로컬 합계이고, 다음 645,567 Gas는 실제 Base Sepolia 한 세션의 합계**다.
+
+| 실제 Base Sepolia 작업 | 거래 | Gas |
+|---|---|---:|
+| 사용자 예치 | [거래 영수증](https://sepolia.basescan.org/tx/0xef0f5c1dcc1dbd84c115bb0f1d325f53d4c817b0bfe7f9ae33dbb09292eb5cf8) | 237,205 |
+| 운영자 예치 | [거래 영수증](https://sepolia.basescan.org/tx/0xf1428981f5e4f859c73051e66436514b6b64d34807e97af8182440d6e01252d6) | 91,797 |
+| 정산 예약 | [거래 영수증](https://sepolia.basescan.org/tx/0x1e87a7fc2a2aad9d57a95cecd7c82a86f454bc3b29ed5e7ed07f351a2487dd39) | 211,918 |
+| 최종 청구 | [거래 영수증](https://sepolia.basescan.org/tx/0xcef365a6266cb592eed7580740dbce8485c6c72c96a546b66003546d43d94187) | 104,647 |
+| **실거래 합계** | **성공 거래 4건** | **645,567** |
+
+`userDeposit`은 새로운 에스크로 기록의 사용자·운영자·예치금·마감 시각·상태를 저장하고 Perun 채널 ID와 채널 재사용 표시를 새로 기록한다. 비어 있던 에스크로 주소로 USDC를 처음 옮기며 이벤트 2개도 남긴다. `operatorDeposit`은 이미 존재하는 기록의 운영자 예치금·상태를 갱신하고 USDC를 한 번 옮기며 이벤트 1개를 남긴다. 따라서 두 함수의 Gas는 같지 않다. 정확한 세부 Gas 비중은 토큰 구현과 저장 상태에 따라 달라진다. 전체 합계는 한 사람이 한 거래에서 지불한 Gas가 아니라 사용자 예치 거래와 운영자 측 정산 거래들을 합친 네 거래의 사용량이다.
+
 재현 명령: `cd smartcontract; npx.cmd hardhat run scripts/compare-payment-costs.js --network hardhat`. Node 의존성과 Go가 필요하다.
