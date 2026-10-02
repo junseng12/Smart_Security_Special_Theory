@@ -62,6 +62,16 @@ describe("SmartCityEscrow state-bound settlement", function () {
       .withArgs(escrowId, operator.address, fare, user.address, ethers.parseUnits("1.75", 6), ethers.parseUnits("3.0", 6), anyValue);
   });
 
+  it("rejects a user-initiated settlement even with an otherwise valid proof", async function () {
+    const { escrow, usdc, user, escrowId, proof } = await fixture();
+    const escrowBefore = await usdc.balanceOf(await escrow.getAddress());
+    await expect(escrow.connect(user).settleAndRelease(
+      escrowId, proof.paramsABI, proof.stateABI, proof.signatures,
+    )).to.be.revertedWithCustomError(escrow, "AccessControlUnauthorizedAccount");
+    expect((await escrow.getEscrowStatus(escrowId))[0]).to.equal(2);
+    expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(escrowBefore);
+  });
+
   it("rejects tampered appData fare and non-final states", async function () {
     const { escrow, usdc, operator, escrowId, proof, deposit, user } = await fixture();
     const escrowAddress = await escrow.getAddress();
@@ -144,6 +154,23 @@ describe("SmartCityEscrow state-bound settlement", function () {
     expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(deposit * 2n);
     await expect(escrow.settleAndRelease(escrowId, newer.paramsABI, newer.stateABI, newer.signatures))
       .to.be.revertedWithCustomError(escrow, "InvalidState");
+  });
+
+  it("shows the escrow cannot verify usage when both custodial Perun signers authorize a higher fare", async function () {
+    const { escrow, usdc, user, escrowId, deposit } = await fixture();
+    // This models a provider controlling both Perun keys, not an honest Go update.
+    // The user's MetaMask key never signs this Perun state.
+    const assertedFare = ethers.parseUnits("2.50", 6);
+    const providerSigned = makeProof({
+      escrowAddress: await escrow.getAddress(), escrowId,
+      userAddress: user.address, deposit: deposit.toString(),
+      fare: assertedFare.toString(),
+    });
+    await escrow.settleAndRelease(
+      escrowId, providerSigned.paramsABI, providerSigned.stateABI, providerSigned.signatures,
+    );
+    expect((await escrow.getEscrowStatus(escrowId))[3]).to.equal(assertedFare);
+    expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(deposit * 2n);
   });
 
   it("keeps funds reserved through the dispute window, then claims", async function () {
