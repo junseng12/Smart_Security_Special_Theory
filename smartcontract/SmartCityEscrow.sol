@@ -93,8 +93,8 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         // Final fare extracted from verified Perun appData.
         uint256 fareAmount;
 
-        // Original service deadline.
-        uint256 holdDeadline;
+        // Original service deadline; packed with state and compatibility flags.
+        uint64 holdDeadline;
 
         // Kept only for backend ABI compatibility.
         // In this version, operator deposit is never transferred to the user.
@@ -107,12 +107,6 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         // ---------------------------------------------------------------------
         // claimableAfter = settleAndRelease timestamp + CLAIM_PERIOD.
         uint256 claimableAfter;
-
-        // Pending settlement amounts recorded by settleAndRelease().
-        // Funds remain in this contract until claimSettlement() or refundToBuyer().
-        uint256 fareClaimed;
-        uint256 userRefundClaimed;
-        uint256 operatorRefundClaimed;
 
         // Prevent duplicate claimSettlement() execution while keeping Released state
         // for backend state-label compatibility.
@@ -169,9 +163,8 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
     );
 
     /**
-     * @dev Kept for backend ABI compatibility.
-     * In V3.1 this event means "settlement has been reserved",
-     * not "funds have already been transferred".
+     * @dev Legacy ABI declaration. SettlementReserved is emitted instead;
+     * no payout occurs until claimSettlement().
      */
     event SettledAndReleased(
         bytes32 indexed escrowId,
@@ -287,7 +280,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
             revert OperatorNotAuthorized(operator);
         }
         if (amount == 0) revert ZeroAmount();
-        if (holdDeadline <= block.timestamp) revert InvalidHoldDeadline();
+        if (holdDeadline <= block.timestamp || holdDeadline > type(uint64).max) revert InvalidHoldDeadline();
 
         escrows[escrowId] = EscrowRecord({
             user: msg.sender,
@@ -295,13 +288,10 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
             userDeposit: amount,
             operatorDeposit: 0,
             fareAmount: 0,
-            holdDeadline: holdDeadline,
+            holdDeadline: uint64(holdDeadline),
             penalizeOperator: false,
             state: EscrowState.UserDeposited,
             claimableAfter: 0,
-            fareClaimed: 0,
-            userRefundClaimed: 0,
-            operatorRefundClaimed: 0,
             settlementClaimed: false
         });
 
@@ -381,9 +371,6 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         uint256 claimableAfter = block.timestamp + CLAIM_PERIOD;
 
         rec.fareAmount = fareAmount;
-        rec.fareClaimed = fareAmount;
-        rec.userRefundClaimed = userRefund;
-        rec.operatorRefundClaimed = operatorRefund;
         rec.claimableAfter = claimableAfter;
         rec.settlementClaimed = false;
 
@@ -400,16 +387,6 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
             claimableAfter
         );
 
-        // Kept for existing backend event listeners.
-        // In this version, it means "settlement reserved", not "payout completed".
-        emit SettledAndReleased(
-            escrowId,
-            rec.operator,
-            fareAmount,
-            rec.user,
-            userRefund,
-            operatorRefund
-        );
     }
 
     /// @notice Validate native Perun proof and return only its signed fare.
@@ -443,9 +420,8 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
      * @dev Anyone can call this after claimableAfter.
      *
      * Transfers:
-     * - fareClaimed -> operator
-     * - userRefundClaimed -> user
-     * - operatorRefundClaimed -> operator
+     * - verified fare plus operator deposit -> operator
+     * - remaining user deposit -> user
      */
     function claimSettlement(bytes32 escrowId) external nonReentrant {
         EscrowRecord storage rec = escrows[escrowId];
@@ -458,31 +434,24 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
             revert ClaimPeriodNotEnded(escrowId, rec.claimableAfter, block.timestamp);
         }
 
-        uint256 fare = rec.fareClaimed;
-        uint256 userRefund = rec.userRefundClaimed;
-        uint256 operatorRefund = rec.operatorRefundClaimed;
+        uint256 fare = rec.fareAmount;
+        uint256 userRefund = rec.userDeposit - fare;
+        uint256 operatorRefund = rec.operatorDeposit;
 
         address user = rec.user;
         address operator = rec.operator;
 
         // Prevent duplicate claims.
-        rec.fareClaimed = 0;
-        rec.userRefundClaimed = 0;
-        rec.operatorRefundClaimed = 0;
         rec.settlementClaimed = true;
 
         // State remains Released as final normal-settlement state
         // for backend STATE_LABELS compatibility.
-        if (fare > 0) {
-            usdc.safeTransfer(operator, fare);
+        if (fare + operatorRefund > 0) {
+            usdc.safeTransfer(operator, fare + operatorRefund);
         }
         if (userRefund > 0) {
             usdc.safeTransfer(user, userRefund);
         }
-        if (operatorRefund > 0) {
-            usdc.safeTransfer(operator, operatorRefund);
-        }
-
         emit SettlementClaimed(
             escrowId,
             operator,
@@ -565,7 +534,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
      * @param refundFare  Fare amount to transfer to operator even on refund.
      *   Pass 0 for full refund cases (unlock failure, complete service outage).
      *   Pass the actual fare for partial-use cases (device fault mid-ride).
-     *   Must not exceed fareClaimed (or userDeposit when no settlement was reserved).
+     *   Must not exceed the verified fare when settlement was reserved.
      * @dev Before settlement reservation, refundFare must be zero. After
      *      reservation, refundFare cannot exceed the fare from verified Perun appData.
      */
@@ -580,7 +549,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         if (msg.sender != rec.operator) revert NotEscrowOperator(escrowId, msg.sender);
 
         // refundFare must not exceed the maximum chargeable amount
-        uint256 maxFare = rec.claimableAfter > 0 ? rec.fareClaimed : 0;
+        uint256 maxFare = rec.claimableAfter > 0 ? rec.fareAmount : 0;
         if (refundFare > maxFare) revert FareExceedsUserDeposit(refundFare, maxFare);
 
         _executeRefundToBuyer(escrowId, rec, refundFare);
@@ -637,9 +606,6 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         address operator = rec.operator;
 
         rec.state = EscrowState.Refunded;
-        rec.fareClaimed = 0;
-        rec.userRefundClaimed = 0;
-        rec.operatorRefundClaimed = 0;
         rec.settlementClaimed = true;
 
         if (userRefund > 0) {
@@ -732,6 +698,8 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         );
     }
 
+    /// @notice Preserve the settlement getter ABI while deriving pending amounts
+    /// from the original deposits and verified fare instead of storing copies.
     function getSettlementClaim(bytes32 escrowId)
         external
         view
@@ -747,9 +715,9 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
 
         return (
             rec.claimableAfter,
-            rec.fareClaimed,
-            rec.userRefundClaimed,
-            rec.operatorRefundClaimed,
+            rec.claimableAfter > 0 && !rec.settlementClaimed ? rec.fareAmount : 0,
+            rec.claimableAfter > 0 && !rec.settlementClaimed ? rec.userDeposit - rec.fareAmount : 0,
+            rec.claimableAfter > 0 && !rec.settlementClaimed ? rec.operatorDeposit : 0,
             rec.settlementClaimed
         );
     }
@@ -792,8 +760,7 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
      *      Cash-flow:
      *        fareToOperator = refundFare
      *        userRefund     = totalUserFunds - refundFare
-     *                         where totalUserFunds = userDeposit (pre-reservation)
-     *                                              = fareClaimed + userRefundClaimed (post-reservation)
+     *                         where totalUserFunds = userDeposit in both cases
      *        operatorRefund = operatorDeposit (always returned to operator)
      */
     function _executeRefundToBuyer(
@@ -810,8 +777,8 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
 
         if (rec.claimableAfter > 0) {
             // Dispute after settlement reservation.
-            // Total user funds in contract = fareClaimed + userRefundClaimed.
-            uint256 totalUserFunds = rec.fareClaimed + rec.userRefundClaimed;
+            // The signed fare changes the split, not the deposited total.
+            uint256 totalUserFunds = rec.userDeposit;
             userRefund = totalUserFunds - refundFare;
         } else {
             // Dispute before settlement reservation.
@@ -820,9 +787,6 @@ contract SmartCityEscrow is AccessControl, ReentrancyGuard {
         }
 
         rec.state = EscrowState.Refunded;
-        rec.fareClaimed = 0;
-        rec.userRefundClaimed = 0;
-        rec.operatorRefundClaimed = 0;
         rec.settlementClaimed = true;
 
         if (fareToOperator > 0) {

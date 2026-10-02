@@ -149,6 +149,11 @@ describe("SmartCityEscrow state-bound settlement", function () {
   it("keeps funds reserved through the dispute window, then claims", async function () {
     const { escrow, usdc, operator, user, escrowId, proof, fare, deposit } = await fixture();
     await escrow.settleAndRelease(escrowId, proof.paramsABI, proof.stateABI, proof.signatures);
+    const pendingClaim = await escrow.getSettlementClaim(escrowId);
+    expect(pendingClaim[1]).to.equal(fare);
+    expect(pendingClaim[2]).to.equal(deposit - fare);
+    expect(pendingClaim[3]).to.equal(deposit);
+    expect(pendingClaim[4]).to.equal(false);
     const escrowBefore = await usdc.balanceOf(await escrow.getAddress());
     await expect(escrow.claimSettlement(escrowId)).to.be.revertedWithCustomError(escrow, "ClaimPeriodNotEnded");
     expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(escrowBefore);
@@ -161,6 +166,73 @@ describe("SmartCityEscrow state-bound settlement", function () {
     await escrow.claimSettlement(escrowId);
     expect(await usdc.balanceOf(operator.address)).to.equal(opBefore + fare + deposit);
     expect(await usdc.balanceOf(user.address)).to.equal(userBefore + (deposit - fare));
+    const paidClaim = await escrow.getSettlementClaim(escrowId);
+    expect(paidClaim[1]).to.equal(0);
+    expect(paidClaim[2]).to.equal(0);
+    expect(paidClaim[3]).to.equal(0);
+    expect(paidClaim[4]).to.equal(true);
+    await expect(escrow.claimSettlement(escrowId))
+      .to.be.revertedWithCustomError(escrow, "SettlementAlreadyClaimed");
+  });
+
+  for (const refundFare of ["0", "1.25"]) {
+    it(`preserves reserved-settlement refund accounting with ${refundFare} USDC fare`, async function () {
+      const { escrow, usdc, operator, user, escrowId, proof, deposit } = await fixture();
+      const farePaid = ethers.parseUnits(refundFare, 6);
+      await escrow.settleAndRelease(escrowId, proof.paramsABI, proof.stateABI, proof.signatures);
+      await escrow.registerRefundIssue(escrowId, 1, "device fault", false);
+      await expect(escrow.refundToBuyer(escrowId, ethers.parseUnits("1.26", 6)))
+        .to.be.revertedWithCustomError(escrow, "FareExceedsUserDeposit");
+      await escrow.refundToBuyer(escrowId, farePaid);
+      expect(await usdc.balanceOf(user.address)).to.equal(deposit - farePaid);
+      expect(await usdc.balanceOf(operator.address)).to.equal(deposit + farePaid);
+      expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(0);
+      const closedClaim = await escrow.getSettlementClaim(escrowId);
+      expect(closedClaim[1]).to.equal(0);
+      expect(closedClaim[2]).to.equal(0);
+      expect(closedClaim[3]).to.equal(0);
+      expect(closedClaim[4]).to.equal(true);
+    });
+  }
+
+  it("returns the original deposits on timeout without a settlement reservation", async function () {
+    const { escrow, usdc, operator, user, escrowId, deposit } = await fixture();
+    const beforeClaim = await escrow.getSettlementClaim(escrowId);
+    expect(beforeClaim[1]).to.equal(0);
+    expect(beforeClaim[2]).to.equal(0);
+    expect(beforeClaim[3]).to.equal(0);
+    await ethers.provider.send("evm_increaseTime", [60 * 60]);
+    await ethers.provider.send("evm_mine");
+    await escrow.forceRefund(escrowId);
+    expect(await usdc.balanceOf(user.address)).to.equal(deposit);
+    expect(await usdc.balanceOf(operator.address)).to.equal(deposit);
+    expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(0);
+    expect((await escrow.getSettlementClaim(escrowId))[4]).to.equal(true);
+  });
+
+  it("preserves emergency cancellation after settlement reservation", async function () {
+    const { escrow, usdc, operator, user, escrowId, proof, deposit } = await fixture();
+    await escrow.settleAndRelease(escrowId, proof.paramsABI, proof.stateABI, proof.signatures);
+    await escrow.emergencyCancel(escrowId);
+    expect(await usdc.balanceOf(user.address)).to.equal(deposit);
+    expect(await usdc.balanceOf(operator.address)).to.equal(deposit);
+    expect(await usdc.balanceOf(await escrow.getAddress())).to.equal(0);
+    const claim = await escrow.getSettlementClaim(escrowId);
+    expect(claim[1]).to.equal(0);
+    expect(claim[2]).to.equal(0);
+    expect(claim[3]).to.equal(0);
+    expect(claim[4]).to.equal(true);
+  });
+
+  it("rejects a deadline that cannot fit the packed timestamp", async function () {
+    const { escrow, operator, user } = await fixture();
+    await expect(escrow.connect(user).userDeposit(
+      ethers.keccak256(ethers.toUtf8Bytes("oversized-deadline")),
+      operator.address,
+      ethers.parseUnits("1", 6),
+      1n << 64n,
+      ethers.keccak256(ethers.toUtf8Bytes("unused-channel")),
+    )).to.be.revertedWithCustomError(escrow, "InvalidHoldDeadline");
   });
 
   it("does not allow arbitrary refund fare before a Perun reservation", async function () {

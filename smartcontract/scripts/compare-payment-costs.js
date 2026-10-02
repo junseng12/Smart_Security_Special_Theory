@@ -7,7 +7,7 @@ const { ethers } = hre;
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const OUT = path.join(ROOT, 'results', 'payment-cost-comparison');
-const COUNTS = [1, 5, 10, 20];
+const COUNTS = [1, 5, 10, 15, 16, 20];
 const DEPOSIT = ethers.parseUnits('3', 6);
 const PER_UPDATE = ethers.parseUnits('0.1', 6);
 const OP_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -97,29 +97,6 @@ function baseSepoliaReferencePrice() {
   return ethers.parseUnits(gwei, 'gwei');
 }
 
-function liveReceiptEvidence() {
-  const lines = fs.readFileSync(path.join(ROOT, 'results', 'gas-analysis', 'raw_transactions.csv'), 'utf8')
-    .trim().split(/\r?\n/);
-  const headers = lines[0].split(',');
-  const records = lines.slice(1).map(line => Object.fromEntries(
-    line.split(',').map((value, index) => [headers[index], value]),
-  ));
-  const selected = records.filter(row => row.session_id === 'd815a8a8-a352-4822-ac2a-15660bc631a1');
-  const names = {
-    'User Deposit': '사용자 예치', 'Operator Deposit': '운영자 예치',
-    'Settlement Reservation': '정산 예약', 'Settlement Claim': '최종 청구',
-  };
-  if (selected.length !== 4 || selected.some(row => row.success !== 'true'
-      || row.escrow_id !== selected[0].escrow_id || !names[row.operation])) {
-    throw new Error('실제 Base Sepolia 영수증 자료가 불완전함');
-  }
-  const entries = selected.map(row => `| ${names[row.operation]} | [거래 영수증](https://sepolia.basescan.org/tx/${row.tx_hash}) | ${Number(row.gas_used).toLocaleString('en-US')} |`).join('\n');
-  const gas = selected.reduce((sum, row) => sum + BigInt(row.gas_used), 0n);
-  return `같은 에스크로 ID(\`${selected[0].escrow_id}\`)의 Base Sepolia 거래 4건은 공개 RPC에서 함수·성공 여부·Gas를 재확인했다. **635,926 Gas는 위의 MockUSDC 로컬 합계이고, 다음 ${gas.toLocaleString('en-US')} Gas는 실제 Base Sepolia 한 세션의 합계**다.\n\n` +
-    `| 실제 Base Sepolia 작업 | 거래 | Gas |\n|---|---|---:|\n${entries}\n| **실거래 합계** | **성공 거래 4건** | **${gas.toLocaleString('en-US')}** |\n\n` +
-    '`userDeposit`은 새로운 에스크로 기록의 사용자·운영자·예치금·마감 시각·상태를 저장하고 Perun 채널 ID와 채널 재사용 표시를 새로 기록하며 이벤트 2개를 남긴다. `operatorDeposit`은 이미 존재하는 기록의 운영자 예치금·상태를 갱신하고 이벤트 1개를 남긴다. 두 함수 모두 USDC를 전송하지만, 로컬 실험에서는 사용자 예치가 새 컨트랙트로 들어오는 첫 전송이었다. 실제 체인의 토큰 잔액 상태는 별도로 확인해야 한다. 따라서 두 함수의 Gas는 같지 않으며 정확한 세부 Gas 비중은 토큰 구현과 저장 상태에 따라 달라진다. 전체 합계는 한 사람이 한 거래에서 지불한 Gas가 아니라 사용자 예치 거래와 운영자 측 정산 거래들을 합친 네 거래의 사용량이다.\n\n';
-}
-
 async function main() {
   const referencePrice = baseSepoliaReferencePrice();
   const rows = [];
@@ -164,20 +141,24 @@ async function main() {
   fs.writeFileSync(path.join(OUT, 'operations.csv'),
     `사용량갱신횟수,방식,작업,Gas\n${operations.map(row =>
       `${row.updates},${row.method === 'baseline' ? '직접전송' : '제안방식'},${row.operation},${row.gasUsed}`).join('\n')}\n`);
-  const eth = wei => ethers.formatEther(wei);
-  const table = rows.map(r => `| ${r.updates} | ${r.baselineTx} | ${r.baselineGas} | ${eth(r.baselineFeeWei)} | ${r.proposedTx} | ${r.proposedGas} | ${eth(r.proposedFeeWei)} |`).join('\n');
+  const eth = wei => Number(ethers.formatEther(wei)).toFixed(12);
+  const gas = amount => Number(amount).toLocaleString('en-US');
+  const table = rows.map(r => `| ${r.updates} | ${r.baselineTx} | ${gas(r.baselineGas)} | ${eth(r.baselineFeeWei)} | ${r.proposedTx} | ${gas(r.proposedGas)} | ${eth(r.proposedFeeWei)} |`).join('\n');
   const detail = operations.filter(r => r.updates === 1 && r.method === 'proposed')
-    .map(r => `| ${r.operation} | ${r.gasUsed} |`).join('\n');
+    .map(r => `| ${r.operation} | ${gas(r.gasUsed)} |`).join('\n');
+  const firstCheaper = rows.find(r => BigInt(r.baselineGas) > BigInt(r.proposedGas));
+  const twenty = rows.find(r => r.updates === 20);
+  const savingAtTwenty = (100 * (Number(twenty.baselineGas) - Number(twenty.proposedGas)) / Number(twenty.baselineGas)).toFixed(1);
   fs.writeFileSync(path.join(OUT, 'comparison.md'), `# 사용량별 온체인 결제 비용 비교\n\n` +
     `두 방식 모두 로컬 Hardhat EVM과 소수점 6자리 MockUSDC로 측정했다. 기존 방식은 사용량 갱신마다 사용자에서 운영자로 0.1 USDC를 직접 전송한다. 제안 방식은 사용자와 운영자가 각각 3 USDC를 SmartCityEscrow에 예치하고, Go-Perun 공식 인코딩의 최종 증명으로 정산을 예약한 뒤 분쟁 기간 이후 청구한다. 이 스크립트는 n번의 실제 중간 Perun 업데이트를 실행하지 않고 최종 상태 버전과 누적 요금으로 나타낸다. 중간 업데이트의 온체인 TX 수는 0이다.\n\n` +
     `**제안 방식의 4 TX는 Perun 채널 개설·종료 TX가 아니다.** 사용자 예치(userDeposit), 운영자 예치(operatorDeposit), 정산 예약(settleAndRelease), 최종 청구(claimSettlement)라는 USDC 에스크로 호출이다. 현재 구현의 Perun 채널은 자금 배분이 0이므로 개설 시 온체인 예치를 건너뛰며, 정상 종료 시 Perun adjudicator 정산 TX도 보내지 않는다.\n\n` +
-    `컨트랙트 배포·토큰 발행·approve는 두 방식의 준비 단계로 통계에서 제외했다. 기존 직접 전송 방식에는 에스크로·분쟁 보호가 없으므로 보안 수준까지 같은 프로토콜의 비교는 아니다. 각 n은 로컬 실험 1회이며, 별도의 Base Sepolia 제안 방식 벤치마크에는 실제 거래 10회가 있다.\n\n` +
+    `컨트랙트 배포·토큰 발행은 준비 단계로 제외했다. 제안 방식의 USDC approve 거래도 제외했으며, 직접 전송 방식에는 approve가 필요하지 않다. 따라서 아래 교차점은 사전 승인이 끝난 경우의 실행 Gas 기준이다. 직접 전송 방식에는 에스크로·분쟁 보호가 없으므로 보안 수준까지 같은 프로토콜의 비교는 아니다. 각 n은 로컬 실험 1회다. 현재 소스의 최적화된 컨트랙트로 측정했으며, Base Sepolia에 배포된 이전 컨트랙트의 Gas를 이 표에 섞지 않았다.\n\n` +
     `수수료 열은 로컬 Gas × ${ethers.formatUnits(referencePrice, 'gwei')} gwei/Gas(기존 Base Sepolia 실험의 평균 가격)로 계산한 **L2 실행 수수료 추정치**다. 새로운 Base Sepolia 실거래 영수증이 아니며 L1 데이터 비용은 제외한다. 배포된 USDC와 MockUSDC의 Gas 사용량도 다를 수 있다.\n\n` +
     `| 사용량 갱신 횟수 | 직접 전송 TX | 직접 전송 Gas | 직접 전송 추정 수수료(ETH) | 제안 방식 TX | 제안 방식 Gas | 제안 방식 추정 수수료(ETH) |\n` +
     `|---:|---:|---:|---:|---:|---:|---:|\n${table}\n\n` +
     `갱신 1회의 제안 방식 상세값:\n\n| 에스크로 작업 | Gas |\n|---|---:|\n${detail}\n\n` +
-    `모든 갱신 횟수별 작업 상세값은 [operations.csv](operations.csv), Base Sepolia의 실제 에스크로 거래 측정은 [gas-analysis.md](../gas-analysis/gas-analysis.md)를 참조한다.\n\n` +
-    liveReceiptEvidence() +
+    `분당 1회씩 직접 전송한다고 가정하면 ${firstCheaper.updates}회째(${firstCheaper.updates}분)부터 제안 방식의 누적 Gas가 더 낮다. 20회에는 직접 전송 ${Number(twenty.baselineGas).toLocaleString('en-US')} Gas, 제안 방식 ${Number(twenty.proposedGas).toLocaleString('en-US')} Gas로 약 ${savingAtTwenty}% 적다. 이 결과는 로컬 MockUSDC 기준이며 실제 USDC·Base Sepolia 최적화 배포본의 실측치는 아니다.\n\n` +
+    `모든 갱신 횟수별 작업 상세값은 [operations.csv](operations.csv)를 참조한다.\n\n` +
     `재현 명령: \`cd smartcontract; npx.cmd hardhat run scripts/compare-payment-costs.js --network hardhat\`. Node 의존성과 Go가 필요하다.\n`);
   console.log(table);
 }
